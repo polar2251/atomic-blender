@@ -190,7 +190,7 @@ def build_sphere_sprite(
     ao_factor: float = 0.0,
     has_rim: bool = False,
     depth_shade: float = 1.0,
-    size: int = 192,
+    size: int = 88,
 ) -> Any:
     """Render an anti-aliased 3D PBR-shaded sphere sprite as a ``PIL.Image`` (RGBA)."""
     lin = np.linspace(-1.0, 1.0, size, dtype=np.float32)
@@ -297,7 +297,7 @@ def render_reference_axes_overlay(
     if not _HAS_PIL:
         return cx, cy, max(34.0, arm_len * 1.15)
 
-    ss = 2
+    ss = 1
     box_half = int(math.ceil(arm_len * 1.55))
     size_ss = box_half * 2 * ss
     badge = Image.new("RGBA", (size_ss, size_ss), (0, 0, 0, 0))
@@ -316,7 +316,7 @@ def render_reference_axes_overlay(
         hub_fill = (71, 85, 105, 245)
         stroke_col = (15, 23, 42, 220)
 
-    draw.ellipse((oc - disc_r, oc - disc_r, oc + disc_r, oc + disc_r), fill=disc_fill, outline=disc_edge, width=2)
+    draw.ellipse((oc - disc_r, oc - disc_r, oc + disc_r, oc + disc_r), fill=disc_fill, outline=disc_edge, width=1)
 
     right, up, back = quat_to_axes(quat)
     basis_defs = (
@@ -333,9 +333,9 @@ def render_reference_axes_overlay(
     projected.sort(key=lambda item: item[0])
 
     len_ss = arm_len * ss
-    shaft_w = max(4, int(round(arm_len * 0.125 * ss)))
-    head_half_w = max(5.5, arm_len * 0.145 * ss)
-    label_font = _load_overlay_font(max(18, int(round(arm_len * 0.36 * ss)))) if show_labels else None
+    shaft_w = max(2, int(round(arm_len * 0.125 * ss)))
+    head_half_w = max(3.5, arm_len * 0.145 * ss)
+    label_font = _load_overlay_font(max(11, int(round(arm_len * 0.36 * ss)))) if show_labels else None
 
     for dz, lbl, dx, dy, rgb, text_rgb in projected:
         depth_bright = 0.72 + 0.28 * ((dz + 1.0) * 0.5)
@@ -381,15 +381,14 @@ def render_reference_axes_overlay(
                 lbl,
                 font=label_font,
                 fill=text_rgb + (255,),
-                stroke_width=max(2, ss),
+                stroke_width=1,
                 stroke_fill=stroke_col,
             )
 
-    hub_r = max(3.5, arm_len * 0.11 * ss)
+    hub_r = max(2.5, arm_len * 0.11 * ss)
     draw.ellipse((oc - hub_r, oc - hub_r, oc + hub_r, oc + hub_r), fill=hub_fill, outline=stroke_col, width=1)
 
-    badge_small = badge.resize((box_half * 2, box_half * 2), Image.Resampling.LANCZOS)
-    _blit_rgba(target_img, badge_small, int(round(cx - box_half)), int(round(cy - box_half)))
+    _blit_rgba(target_img, badge, int(round(cx - box_half)), int(round(cy - box_half)))
     return cx, cy, max(36.0, arm_len * 1.25)
 
 
@@ -604,19 +603,18 @@ class ViewportScene:
                 sss = float(profile.get("subsurface_weight", mat_cfg.get("subsurface_weight", 0.0)))
                 coat = float(profile.get("coat_weight", mat_cfg.get("coat_weight", 0.0)))
                 ao_factor = float(mat_cfg.get("ao_factor", 0.0))
-                for bucket, d_shade in enumerate((0.88, 0.94, 1.00)):
-                    base_sprites[(sym, bucket)] = build_sphere_sprite(
-                        hex_color=c,
-                        roughness=roughness,
-                        specular=specular,
-                        metallic=metallic,
-                        subsurface_weight=sss,
-                        coat_weight=coat,
-                        ao_factor=ao_factor,
-                        has_rim=has_rim,
-                        depth_shade=d_shade,
-                        size=192,
-                    )
+                base_sprites[(sym, 0)] = build_sphere_sprite(
+                    hex_color=c,
+                    roughness=roughness,
+                    specular=specular,
+                    metallic=metallic,
+                    subsurface_weight=sss,
+                    coat_weight=coat,
+                    ao_factor=ao_factor,
+                    has_rim=has_rim,
+                    depth_shade=1.0,
+                    size=88,
+                )
 
         radii = np.array([elem_r[s] for s in symbols], dtype=np.float64)
         colors = [elem_c[s] for s in symbols]
@@ -684,17 +682,26 @@ class ViewportScene:
             dark_backdrop=dark_backdrop,
         )
 
-    def _get_sprite(self, symbol: str, diameter_px: int, bucket: int) -> Any:
-        key = (symbol, diameter_px, bucket, self.dark_backdrop)
+    def _get_sprite(
+        self,
+        symbol: str,
+        diameter_px: int,
+        bucket: int = 0,
+        interactive: bool = False,
+    ) -> Any:
+        key = (symbol, diameter_px, int(interactive), self.dark_backdrop)
         cached = self._resized_sprites.get(key)
         if cached is not None:
             return cached
-        base = self._base_sprites.get((symbol, bucket))
+        base = self._base_sprites.get((symbol, 0))
+        if base is None:
+            base = self._base_sprites.get((symbol, bucket))
         if base is None:
             return None
-        if len(self._resized_sprites) > 600:
+        if len(self._resized_sprites) > 200:
             self._resized_sprites.clear()
-        resized = base.resize((diameter_px, diameter_px), Image.Resampling.LANCZOS)
+        resample = Image.Resampling.BILINEAR if interactive else Image.Resampling.BICUBIC
+        resized = base.resize((diameter_px, diameter_px), resample)
         if symbol in self._outline_symbols:
             resized = _apply_thin_outline(resized)
         elif self.dark_backdrop and symbol in self._dark_outline_symbols:
@@ -789,9 +796,9 @@ class ViewportScene:
 
         cw = max(16, int(canvas_w))
         ch = max(16, int(canvas_h))
-        ss = 1.0 if interactive else (1.5 if max(cw, ch) <= 1100 else 1.25)
-        rw = max(16, int(round(cw * ss)))
-        rh = max(16, int(round(ch * ss)))
+        ss = 1.0
+        rw = cw
+        rh = ch
 
         # Background canvas + clipped camera output frame
         outer_bg = (21, 23, 28, 255) if self.dark_backdrop else (232, 234, 237, 255)
@@ -918,7 +925,7 @@ class ViewportScene:
                     )
             else:
                 _, sx, sy, diam_px, idx, bucket = payload
-                sprite = self._get_sprite(self.symbols[idx], diam_px, bucket)
+                sprite = self._get_sprite(self.symbols[idx], diam_px, bucket, interactive=interactive)
                 if sprite is not None:
                     _blit_rgba(frame, sprite, int(round(sx - diam_px * 0.5)), int(round(sy - diam_px * 0.5)))
                     if self.show_labels and diam_px >= 12:
@@ -958,11 +965,8 @@ class ViewportScene:
         outer_draw.rectangle(
             (fx0, fy0, fx0 + fw_i - 1, fy0 + fh_i - 1),
             outline=border_col,
-            width=max(1, int(ss)),
+            width=1,
         )
-
-        if ss > 1.0:
-            img = img.resize((cw, ch), Image.Resampling.LANCZOS)
         return img
 
     def to_view_dict(

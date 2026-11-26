@@ -319,9 +319,9 @@ class TestAtomicBlender(unittest.TestCase):
         from atomic_blender.gui import AtomicBlenderApp, compute_preview_resolution
         from atomic_blender.viewport3d import ViewportScene
 
-        self.assertEqual(compute_preview_resolution(1400, 1200, max_side=560), (560, 480))
-        self.assertEqual(compute_preview_resolution(800, 1400, max_side=560), (320, 560))
-        self.assertEqual(compute_preview_resolution(400, 300, max_side=560), (400, 300))
+        self.assertEqual(compute_preview_resolution(1400, 1200, max_side=400), (400, 343))
+        self.assertEqual(compute_preview_resolution(800, 1400, max_side=400), (229, 400))
+        self.assertEqual(compute_preview_resolution(300, 250, max_side=400), (300, 250))
 
         style = json.loads(resolve_style_path("studio").read_text(encoding="utf-8"))
         structure = {
@@ -374,8 +374,8 @@ class TestAtomicBlender(unittest.TestCase):
 
                 self.assertEqual(len(recorder.requests), 1)
                 req1 = recorder.requests[0]
-                self.assertEqual(req1["resolution"], [560, 480])
-                self.assertEqual(req1["samples"], 10)
+                self.assertEqual(req1["resolution"], [400, 343])
+                self.assertEqual(req1["samples"], 4)
                 seq1 = int(req1["seq"])  # type: ignore[arg-type]
 
                 # Matching preview_done flips canvas cleanly to rendered PNG
@@ -502,6 +502,68 @@ class TestAtomicBlender(unittest.TestCase):
             self.assertEqual(app._vp_scene.axes_pos, (0.12, 0.86))
         finally:
             app.destroy()
+
+    def test_dark_widgets_type_map_visibility_and_nonperiodic_replicate(self) -> None:
+        import time
+        from atomic_blender.gui import AtomicBlenderApp, DarkCheckbutton, DarkSpinbox
+
+        with tempfile.TemporaryDirectory() as tmp:
+            xyz = Path(tmp) / "mol.xyz"
+            xyz.write_text("2\nH2\nH 0 0 0\nH 0 0 0.74\n", encoding="utf-8")
+            lmp = Path(tmp) / "atoms.data"
+            lmp.write_text("", encoding="utf-8")
+
+            app = AtomicBlenderApp()
+            app.withdraw()
+            try:
+                app.var_blender.set("")
+
+                # Type Map is hidden for .xyz and automatically shown for LAMMPS .data
+                app.var_input.set(str(xyz))
+                self.assertEqual(app.lbl_type_map.winfo_manager(), "")
+                app.var_input.set(str(lmp))
+                self.assertEqual(app.lbl_type_map.winfo_manager(), "grid")
+
+                # Collapsing Style & Representation body keeps f_rep packed in its original place
+                self.assertTrue(bool(app.f_rep_body.winfo_manager()))
+                app._toggle_section(app.f_rep_body)
+                self.assertFalse(bool(app.f_rep_body.winfo_manager()))
+                app._toggle_section(app.f_rep_body)
+                self.assertTrue(bool(app.f_rep_body.winfo_manager()))
+                siblings = list(app.f_rep.master.pack_slaves())  # type: ignore[union-attr]
+                self.assertLess(siblings.index(app.f_rep), siblings.index(app.f_geom))
+
+                # Non-periodic .xyz loads cleanly even when Replicate is set > 1
+                app.var_input.set(str(xyz))
+                app.var_rep_x.set(1)
+                app.var_rep_y.set(2)
+                app.var_rep_z.set(2)
+                app._run_inspect_async()
+                deadline = time.monotonic() + 3.0
+                while time.monotonic() < deadline and app._structure_cache is None:
+                    app._poll_queue()
+                    time.sleep(0.02)
+                self.assertIsNotNone(app._structure_cache)
+                self.assertNotIn("Inspect error", app.var_inspector.get())
+                cfg = app._collect_config()
+                self.assertEqual(cfg.replicate, (1, 1, 1))
+
+                # DarkSpinbox and DarkCheckbutton interactions
+                sb = DarkSpinbox(app, variable=app.var_samples, from_=1, to=2048, increment=8)
+                sb._step(8)
+                self.assertEqual(app.var_samples.get(), 72)
+                sb._step(-8)
+                self.assertEqual(app.var_samples.get(), 64)
+
+                chk = DarkCheckbutton(app, text="Test", variable=app.var_axes_labels)
+                prev = app.var_axes_labels.get()
+                chk._on_click(None)  # type: ignore[arg-type]
+                self.assertEqual(app.var_axes_labels.get(), not prev)
+                chk.configure(state="disabled")
+                chk._on_click(None)  # type: ignore[arg-type]
+                self.assertEqual(app.var_axes_labels.get(), not prev)
+            finally:
+                app.destroy()
 
 
 if __name__ == "__main__":
