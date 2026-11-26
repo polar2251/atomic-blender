@@ -179,8 +179,8 @@ class DarkCheckbutton(tk.Frame):
         text: str,
         variable: tk.BooleanVar,
         command: Any = None,
-        bg: str = "#1E2128",
-        fg: str = "#E5E7EB",
+        bg: str = "#171A21",
+        fg: str = "#E2E8F0",
         font: tuple[str, int] = ("Segoe UI", 9),
     ) -> None:
         super().__init__(parent, bg=bg)
@@ -229,8 +229,8 @@ class DarkCheckbutton(tk.Frame):
             check_col = "#64748B"
             self._lbl.configure(fg="#64748B")
         else:
-            fill = "#0D9488" if checked else "#14161A"
-            outline = "#14B8A6" if checked else "#64748B"
+            fill = "#0D9488" if checked else "#111318"
+            outline = "#14B8A6" if checked else "#475569"
             check_col = "#FFFFFF"
             self._lbl.configure(fg=self._fg)
         self._box.create_rectangle(2, 2, 15, 15, fill=fill, outline=outline, width=1.4)
@@ -262,8 +262,8 @@ class DarkRadiobutton(tk.Frame):
         variable: tk.StringVar,
         value: str,
         command: Any = None,
-        bg: str = "#1E2128",
-        fg: str = "#E5E7EB",
+        bg: str = "#171A21",
+        fg: str = "#E2E8F0",
         font: tuple[str, int] = ("Segoe UI", 9),
     ) -> None:
         super().__init__(parent, bg=bg)
@@ -304,8 +304,8 @@ class DarkRadiobutton(tk.Frame):
     def _redraw(self) -> None:
         self._dot.delete("all")
         selected = self._var.get() == self._value
-        outline = "#14B8A6" if selected else "#64748B"
-        self._dot.create_oval(2, 2, 15, 15, fill="#14161A", outline=outline, width=1.5)
+        outline = "#14B8A6" if selected else "#475569"
+        self._dot.create_oval(2, 2, 15, 15, fill="#111318", outline=outline, width=1.5)
         if selected:
             self._dot.create_oval(5, 5, 12, 12, fill="#14B8A6", outline="")
 
@@ -323,7 +323,7 @@ class DarkSpinbox(tk.Frame):
         width: int = 4,
         command: Any = None,
     ) -> None:
-        super().__init__(parent, bg="#14161A", highlightbackground="#323844", highlightthickness=1)
+        super().__init__(parent, bg="#111318", highlightbackground="#262B36", highlightthickness=1)
         self._var = variable
         self._from = int(from_)
         self._to = int(to)
@@ -331,9 +331,9 @@ class DarkSpinbox(tk.Frame):
         self._cmd = command
 
         btn_cfg = {
-            "bg": "#2B303B",
-            "fg": "#E5E7EB",
-            "activebackground": "#363C49",
+            "bg": "#222631",
+            "fg": "#CBD5E1",
+            "activebackground": "#2D3342",
             "activeforeground": "#FFFFFF",
             "bd": 0,
             "relief": tk.FLAT,
@@ -349,9 +349,9 @@ class DarkSpinbox(tk.Frame):
             textvariable=self._var,
             width=width,
             justify=tk.CENTER,
-            bg="#14161A",
-            fg="#E5E7EB",
-            insertbackground="#E5E7EB",
+            bg="#111318",
+            fg="#E2E8F0",
+            insertbackground="#E2E8F0",
             relief=tk.FLAT,
             bd=0,
             font=("Segoe UI", 9),
@@ -403,8 +403,8 @@ class DarkSlider(tk.Canvas):
         variable: tk.DoubleVar,
         command: Any = None,
         release_command: Any = None,
-        bg: str = "#1E2128",
-        height: int = 26,
+        bg: str = "#171A21",
+        height: int = 24,
     ) -> None:
         super().__init__(parent, height=height, bg=bg, highlightthickness=0, cursor="hand2")
         self._from = float(from_)
@@ -485,14 +485,14 @@ class DarkSlider(tk.Canvas):
         frac = max(0.0, min(1.0, (cur - self._from) / max(1e-9, self._to - self._from)))
         tx = x0 + frac * (x1 - x0)
 
-        # Recessed track + glowing teal active segment
-        self.create_line(x0, cy, x1, cy, fill="#2B303B", width=6, capstyle=tk.ROUND)
+        # Minimal recessed track + teal active segment
+        self.create_line(x0, cy, x1, cy, fill="#222631", width=4, capstyle=tk.ROUND)
         if tx > x0 + 1:
-            self.create_line(x0, cy, tx, cy, fill="#0D9488", width=6, capstyle=tk.ROUND)
+            self.create_line(x0, cy, tx, cy, fill="#0D9488", width=4, capstyle=tk.ROUND)
 
-        r = 8 if (self._hover or self._dragging) else 7
+        r = 7 if (self._hover or self._dragging) else 6
         thumb_fill = "#2DD4BF" if (self._hover or self._dragging) else "#14B8A6"
-        self.create_oval(tx - r, cy - r, tx + r, cy + r, fill=thumb_fill, outline="#F8FAFC", width=1.6)
+        self.create_oval(tx - r, cy - r, tx + r, cy + r, fill=thumb_fill, outline="#0F1115", width=1.4)
         self.create_oval(tx - 2.5, cy - 2.5, tx + 2.5, cy + 2.5, fill="#0F172A", outline="")
 
 
@@ -1074,14 +1074,14 @@ class AtomicBlenderApp(tk.Tk):
                     style.theme_use(theme)
                     break
 
-        bg = "#14161B"
-        panel = "#1E2128"
-        recessed = "#121418"
-        ctrl = "#2B303B"
-        ctrl_hover = "#363C49"
-        border = "#323844"
-        fg = "#E5E7EB"
-        muted = "#94A3B8"
+        bg = "#0F1115"
+        panel = "#171A21"
+        recessed = "#111318"
+        ctrl = "#222631"
+        ctrl_hover = "#2D3342"
+        border = "#262B36"
+        fg = "#E2E8F0"
+        muted = "#8B95A7"
         accent = "#0D9488"
         accent_hover = "#14B8A6"
 
@@ -1095,8 +1095,8 @@ class AtomicBlenderApp(tk.Tk):
         style.configure("Outer.TFrame", background=bg)
         style.configure("TFrame", background=panel)
         style.configure("TPanedwindow", background=bg)
-        style.configure("TLabelframe", background=panel, bordercolor=border, relief="solid", borderwidth=1)
-        style.configure("TLabelframe.Label", background=panel, foreground="#CBD5E1", font=("Segoe UI", 9, "bold"))
+        style.configure("TLabelframe", background=panel, bordercolor=panel, relief="flat", borderwidth=0)
+        style.configure("TLabelframe.Label", background=panel, foreground=muted, font=("Segoe UI", 8, "bold"))
         style.configure("TLabel", background=panel, foreground=fg, font=("Segoe UI", 9))
         style.configure("Banner.TLabel", background=bg, foreground=fg, font=("Segoe UI", 9))
         style.configure("Muted.TLabel", background=panel, foreground=muted, font=("Segoe UI", 8))
@@ -1105,7 +1105,7 @@ class AtomicBlenderApp(tk.Tk):
             "TButton",
             background=ctrl,
             foreground=fg,
-            bordercolor=border,
+            bordercolor=ctrl,
             lightcolor=ctrl,
             darkcolor=ctrl,
             padding=(8, 4),
@@ -1113,18 +1113,18 @@ class AtomicBlenderApp(tk.Tk):
         )
         style.map(
             "TButton",
-            background=[("active", ctrl_hover), ("pressed", "#242832"), ("disabled", "#1A1D24")],
-            foreground=[("disabled", "#64748B")],
+            background=[("active", ctrl_hover), ("pressed", "#1B1F29"), ("disabled", "#151820")],
+            foreground=[("disabled", "#475569")],
         )
 
         style.configure(
             "Accent.TButton",
             background=accent,
             foreground="#FFFFFF",
-            bordercolor="#0F766E",
+            bordercolor=accent,
             lightcolor=accent,
             darkcolor=accent,
-            padding=(10, 6),
+            padding=(10, 7),
             font=("Segoe UI", 9, "bold"),
         )
         style.map(
@@ -1278,7 +1278,7 @@ class AtomicBlenderApp(tk.Tk):
         left_body = ttk.Frame(left_host, padding=0, style="Outer.TFrame")
         left_body.pack(side=tk.TOP, fill=tk.BOTH, expand=True)
 
-        left_canvas = tk.Canvas(left_body, bg="#14161B", highlightthickness=0, width=388)
+        left_canvas = tk.Canvas(left_body, bg="#0F1115", highlightthickness=0, width=378)
         left_scroll = ttk.Scrollbar(left_body, orient=tk.VERTICAL, command=left_canvas.yview)
         left = ttk.Frame(left_canvas, padding=6, style="Outer.TFrame")
         left_win = left_canvas.create_window((0, 0), window=left, anchor=tk.NW)
@@ -1321,63 +1321,62 @@ class AtomicBlenderApp(tk.Tk):
 
     def _build_controls(self, parent: ttk.Frame, action_parent: ttk.Frame | None = None) -> None:
         # 1. Input & Output (pinned above tabs)
-        f_io = ttk.LabelFrame(parent, text="Structure & Output", padding=8)
-        f_io.pack(fill=tk.X, pady=(0, 6))
-        f_io.columnconfigure(0, minsize=72)
+        f_io = ttk.LabelFrame(parent, text="FILE", padding=(10, 8))
+        f_io.pack(fill=tk.X, pady=(0, 8))
+        f_io.columnconfigure(0, minsize=56)
         f_io.columnconfigure(1, weight=1)
 
         ttk.Label(f_io, text="Input").grid(row=0, column=0, sticky=tk.W, pady=2)
-        entry_in = ttk.Entry(f_io, textvariable=self.var_input, width=34)
+        entry_in = ttk.Entry(f_io, textvariable=self.var_input, width=32)
         entry_in.grid(row=0, column=1, sticky=tk.EW, padx=4, pady=2)
         entry_in.bind("<FocusOut>", lambda _e: self._schedule_inspect())
         row_in_btns = ttk.Frame(f_io)
         row_in_btns.grid(row=0, column=2, sticky=tk.EW, pady=2)
-        ttk.Button(row_in_btns, text="Browse...", command=self._browse_input).pack(side=tk.LEFT)
+        ttk.Button(row_in_btns, text="Open", width=6, command=self._browse_input).pack(side=tk.LEFT)
         self.btn_recent = tk.Menubutton(
             row_in_btns,
             text="▾",
-            bg="#2B303B",
-            fg="#E5E7EB",
-            activebackground="#363C49",
+            bg="#222631",
+            fg="#E2E8F0",
+            activebackground="#2D3342",
             activeforeground="#FFFFFF",
             relief=tk.FLAT,
-            borderwidth=1,
-            highlightbackground="#323844",
-            highlightthickness=1,
-            padx=5,
-            pady=2,
+            borderwidth=0,
+            highlightthickness=0,
+            padx=6,
+            pady=3,
             cursor="hand2",
             font=("Segoe UI", 9),
         )
         self.recent_menu = tk.Menu(
             self.btn_recent,
             tearoff=0,
-            bg="#1E2128",
-            fg="#E5E7EB",
+            bg="#171A21",
+            fg="#E2E8F0",
             activebackground="#0D9488",
             activeforeground="#FFFFFF",
-            disabledforeground="#64748B",
+            disabledforeground="#475569",
         )
         self.btn_recent.configure(menu=self.recent_menu)
         self.btn_recent.pack(side=tk.LEFT, padx=(3, 0))
         self._rebuild_recent_menu()
 
-        ttk.Label(f_io, text="Output PNG").grid(row=1, column=0, sticky=tk.W, pady=2)
-        ttk.Entry(f_io, textvariable=self.var_output, width=34).grid(row=1, column=1, sticky=tk.EW, padx=4, pady=2)
-        ttk.Button(f_io, text="Save As...", command=self._browse_output).grid(row=1, column=2, pady=2)
+        ttk.Label(f_io, text="Output").grid(row=1, column=0, sticky=tk.W, pady=2)
+        ttk.Entry(f_io, textvariable=self.var_output, width=32).grid(row=1, column=1, sticky=tk.EW, padx=4, pady=2)
+        ttk.Button(f_io, text="Save", width=6, command=self._browse_output).grid(row=1, column=2, pady=2)
 
-        self.lbl_type_map = ttk.Label(f_io, text="Type Map")
+        self.lbl_type_map = ttk.Label(f_io, text="Types")
         self.entry_type_map = ttk.Entry(f_io, textvariable=self.var_type_map)
         self.entry_type_map.bind("<FocusOut>", lambda _e: self._schedule_inspect())
-        self.btn_inspect_tm = ttk.Button(f_io, text="Inspect", command=self._schedule_inspect)
+        self.btn_inspect_tm = ttk.Button(f_io, text="Apply", width=6, command=self._schedule_inspect)
         self.lbl_type_map.grid(row=2, column=0, sticky=tk.W, pady=2)
         self.entry_type_map.grid(row=2, column=1, sticky=tk.EW, padx=4, pady=2)
         self.btn_inspect_tm.grid(row=2, column=2, pady=2)
         self._sync_type_map_visibility()
 
-        # 2. View / Tool / Selection Tab Switcher
-        tab_bar = tk.Frame(parent, bg="#14161B")
-        tab_bar.pack(fill=tk.X, pady=(0, 6))
+        # 2. Modern Segmented Pill Tab Switcher (View / Tool / Selection)
+        tab_bar = tk.Frame(parent, bg="#111318", padx=3, pady=3)
+        tab_bar.pack(fill=tk.X, pady=(0, 8))
         tab_bar.columnconfigure(0, weight=1, uniform="main_tabs")
         tab_bar.columnconfigure(1, weight=1, uniform="main_tabs")
         tab_bar.columnconfigure(2, weight=1, uniform="main_tabs")
@@ -1386,15 +1385,15 @@ class AtomicBlenderApp(tk.Tk):
         for col_idx, (tab_key, tab_label) in enumerate(
             (("view", "View"), ("tool", "Tool"), ("selection", "Selection"))
         ):
-            holder = tk.Frame(tab_bar, bg="#14161B")
-            holder.grid(row=0, column=col_idx, sticky=tk.EW, padx=(0, 4) if col_idx < 2 else (0, 0))
+            holder = tk.Frame(tab_bar, bg="#111318")
+            holder.grid(row=0, column=col_idx, sticky=tk.EW, padx=(0, 3) if col_idx < 2 else (0, 0))
             btn = tk.Button(
                 holder,
                 text=tab_label,
                 command=lambda k=tab_key: self._switch_tab(k),
                 bd=0,
                 relief=tk.FLAT,
-                pady=6,
+                pady=5,
                 cursor="hand2",
                 font=("Segoe UI", 9, "bold"),
             )
@@ -1412,13 +1411,13 @@ class AtomicBlenderApp(tk.Tk):
         # --- View Tab: Unified Display Types, Step Camera View, Cycles Render ---
         self._build_display_types_panel(self.tab_view)
 
-        f_cam = ttk.LabelFrame(self.tab_view, text="Camera View", padding=8)
-        f_cam.pack(fill=tk.X, pady=(0, 6))
-        f_cam.columnconfigure(0, minsize=72)
+        f_cam = ttk.LabelFrame(self.tab_view, text="CAMERA", padding=(10, 8))
+        f_cam.pack(fill=tk.X, pady=(0, 8))
+        f_cam.columnconfigure(0, minsize=68)
         f_cam.columnconfigure(2, weight=1)
 
         ttk.Label(f_cam, text="Rotate (°)").grid(row=0, column=0, sticky=tk.W, pady=2)
-        ent_rot = ttk.Entry(f_cam, textvariable=self.var_rot_step, width=6, justify=tk.CENTER)
+        ent_rot = ttk.Entry(f_cam, textvariable=self.var_rot_step, width=5, justify=tk.CENTER)
         ent_rot.grid(row=0, column=1, sticky=tk.W, padx=(4, 6), pady=2)
         row_rot = ttk.Frame(f_cam)
         row_rot.grid(row=0, column=2, sticky=tk.EW, pady=2)
@@ -1440,7 +1439,7 @@ class AtomicBlenderApp(tk.Tk):
             ).grid(row=0, column=c_idx, sticky=tk.EW, padx=(0, 2 if c_idx < 5 else 0))
 
         ttk.Label(f_cam, text="Move (Å)").grid(row=1, column=0, sticky=tk.W, pady=2)
-        ent_pan = ttk.Entry(f_cam, textvariable=self.var_pan_step, width=6, justify=tk.CENTER)
+        ent_pan = ttk.Entry(f_cam, textvariable=self.var_pan_step, width=5, justify=tk.CENTER)
         ent_pan.grid(row=1, column=1, sticky=tk.W, padx=(4, 6), pady=2)
         row_pan = ttk.Frame(f_cam)
         row_pan.grid(row=1, column=2, sticky=tk.EW, pady=2)
@@ -1462,12 +1461,12 @@ class AtomicBlenderApp(tk.Tk):
             row=0, column=4, columnspan=2, sticky=tk.EW
         )
 
-        f_ren = ttk.LabelFrame(self.tab_view, text="Cycles Render", padding=8)
-        f_ren.pack(fill=tk.X, pady=(0, 6))
-        f_ren.columnconfigure(0, minsize=72)
+        f_ren = ttk.LabelFrame(self.tab_view, text="RENDER", padding=(10, 8))
+        f_ren.pack(fill=tk.X, pady=(0, 8))
+        f_ren.columnconfigure(0, minsize=68)
         f_ren.columnconfigure(1, weight=1)
 
-        ttk.Label(f_ren, text="Resolution").grid(row=0, column=0, sticky=tk.W, pady=2)
+        ttk.Label(f_ren, text="Size").grid(row=0, column=0, sticky=tk.W, pady=2)
         row_res = ttk.Frame(f_ren)
         row_res.grid(row=0, column=1, columnspan=2, sticky=tk.W, padx=4, pady=2)
         DarkSpinbox(row_res, from_=64, to=8192, increment=100, variable=self.var_res_w, width=5).pack(side=tk.LEFT)
@@ -1476,7 +1475,7 @@ class AtomicBlenderApp(tk.Tk):
 
         row_res_presets = ttk.Frame(f_ren)
         row_res_presets.grid(row=1, column=1, columnspan=2, sticky=tk.EW, padx=4, pady=(0, 3))
-        for c_idx, (label, w, h) in enumerate((("700 × 700", 700, 700), ("1400 × 1400", 1400, 1400), ("Slab 4:3", 1400, 1200))):
+        for c_idx, (label, w, h) in enumerate((("700²", 700, 700), ("1400²", 1400, 1400), ("Slab 4:3", 1400, 1200))):
             row_res_presets.columnconfigure(c_idx, weight=1, uniform="res_btn")
             ttk.Button(
                 row_res_presets, text=label, command=lambda ww=w, hh=h: self._set_resolution(ww, hh)
@@ -1489,15 +1488,15 @@ class AtomicBlenderApp(tk.Tk):
 
         ttk.Label(f_ren, text="Blender").grid(row=3, column=0, sticky=tk.W, pady=2)
         ttk.Entry(f_ren, textvariable=self.var_blender).grid(row=3, column=1, sticky=tk.EW, padx=4, pady=2)
-        ttk.Button(f_ren, text="Browse...", command=self._browse_blender).grid(row=3, column=2, pady=2)
+        ttk.Button(f_ren, text="Find", width=6, command=self._browse_blender).grid(row=3, column=2, pady=2)
 
-        # --- Tool Tab: Supercell & Framing + View File ---
-        self.f_geom = ttk.LabelFrame(self.tab_tool, text="Supercell & Framing", padding=8)
-        self.f_geom.pack(fill=tk.X, pady=(0, 6))
+        # --- Tool Tab: Supercell & Framing + View File + Quick Recipes ---
+        self.f_geom = ttk.LabelFrame(self.tab_tool, text="SUPERCELL & FRAMING", padding=(10, 8))
+        self.f_geom.pack(fill=tk.X, pady=(0, 8))
         self.f_geom_body = ttk.Frame(self.f_geom)
         self.f_geom_body.pack(fill=tk.X)
         f_geom = self.f_geom_body
-        f_geom.columnconfigure(0, minsize=72)
+        f_geom.columnconfigure(0, minsize=68)
         f_geom.columnconfigure(1, weight=1)
 
         ttk.Label(f_geom, text="Replicate").grid(row=0, column=0, sticky=tk.W, pady=2)
@@ -1506,7 +1505,7 @@ class AtomicBlenderApp(tk.Tk):
         for var in (self.var_rep_x, self.var_rep_y, self.var_rep_z):
             sb = DarkSpinbox(row_rep, from_=1, to=20, variable=var, width=3, command=self._schedule_inspect)
             sb.pack(side=tk.LEFT, padx=(0, 4))
-        DarkCheckbutton(row_rep, text="Wrap into cell", variable=self.var_wrap).pack(side=tk.LEFT, padx=(6, 0))
+        DarkCheckbutton(row_rep, text="Wrap", variable=self.var_wrap).pack(side=tk.LEFT, padx=(6, 0))
 
         ttk.Label(f_geom, text="Crop Z").grid(row=1, column=0, sticky=tk.W, pady=2)
         row_cz = ttk.Frame(f_geom)
@@ -1524,16 +1523,16 @@ class AtomicBlenderApp(tk.Tk):
         row_smart.grid(row=2, column=0, columnspan=2, sticky=tk.EW, pady=(6, 0))
         row_smart.columnconfigure(0, weight=1, uniform="preset_btn")
         row_smart.columnconfigure(1, weight=1, uniform="preset_btn")
-        ttk.Button(row_smart, text="Smart Slab Preset", command=self._apply_slab_preset).grid(
+        ttk.Button(row_smart, text="Slab View", command=self._apply_slab_preset).grid(
             row=0, column=0, sticky=tk.EW, padx=(0, 4)
         )
-        ttk.Button(row_smart, text="Cube / Bulk Preset", command=self._apply_bulk_preset).grid(
+        ttk.Button(row_smart, text="Bulk View", command=self._apply_bulk_preset).grid(
             row=0, column=1, sticky=tk.EW
         )
 
-        f_sv = ttk.LabelFrame(self.tab_tool, text="View File (view.json)", padding=8)
-        f_sv.pack(fill=tk.X, pady=(0, 6))
-        f_sv.columnconfigure(0, minsize=72)
+        f_sv = ttk.LabelFrame(self.tab_tool, text="CAMERA FILE", padding=(10, 8))
+        f_sv.pack(fill=tk.X, pady=(0, 8))
+        f_sv.columnconfigure(0, minsize=68)
         f_sv.columnconfigure(1, weight=1)
 
         row_vm = ttk.Frame(f_sv)
@@ -1552,52 +1551,52 @@ class AtomicBlenderApp(tk.Tk):
         self.combo_preset.grid(row=1, column=1, columnspan=2, sticky=tk.EW, padx=(4, 0), pady=2)
         self.combo_preset.bind("<<ComboboxSelected>>", lambda _e: self._pick_view_preset(self.var_view_preset.get()))
 
-        ttk.Label(f_sv, text="View JSON").grid(row=2, column=0, sticky=tk.W, pady=2)
+        ttk.Label(f_sv, text="JSON").grid(row=2, column=0, sticky=tk.W, pady=2)
         self.entry_view_file = ttk.Entry(f_sv, textvariable=self.var_view_file)
         self.entry_view_file.grid(row=2, column=1, sticky=tk.EW, padx=4, pady=2)
-        self.btn_view_file = ttk.Button(f_sv, text="Browse...", command=self._browse_view_file)
+        self.btn_view_file = ttk.Button(f_sv, text="Open", width=6, command=self._browse_view_file)
         self.btn_view_file.grid(row=2, column=2, pady=2)
 
         self.chk_fit_view = DarkCheckbutton(
-            f_sv, text="Re-fit view.json angle to structure (--fit-view)", variable=self.var_fit_view
+            f_sv, text="Fit view.json angle (--fit-view)", variable=self.var_fit_view
         )
         self.chk_fit_view.grid(row=3, column=1, columnspan=2, sticky=tk.W, padx=4, pady=2)
         self._sync_view_mode()
 
-        f_pub = ttk.LabelFrame(self.tab_tool, text="Publication Figure Recipes", padding=8)
-        f_pub.pack(fill=tk.X, pady=(0, 6))
+        f_pub = ttk.LabelFrame(self.tab_tool, text="QUICK RECIPES", padding=(10, 8))
+        f_pub.pack(fill=tk.X, pady=(0, 8))
         f_pub.columnconfigure(0, weight=1, uniform="pub_btn")
         f_pub.columnconfigure(1, weight=1, uniform="pub_btn")
         ttk.Button(
             f_pub,
-            text="Smart Slab Spotlight",
+            text="Slab Spotlight",
             command=self._apply_smart_slab_spotlight,
         ).grid(row=0, column=0, sticky=tk.EW, padx=(0, 4), pady=(0, 4))
         ttk.Button(
             f_pub,
-            text="Render Top + Side Panel",
+            text="Top + Side Panel",
             command=self._on_render_top_side_panel,
         ).grid(row=0, column=1, sticky=tk.EW, pady=(0, 4))
         row_ghost = ttk.Frame(f_pub)
         row_ghost.grid(row=1, column=0, sticky=tk.EW, padx=(0, 4))
         row_ghost.columnconfigure(0, weight=1)
         row_ghost.columnconfigure(1, weight=0)
-        ttk.Button(row_ghost, text="Ghost Overlay...", command=self._on_load_ghost_structure).grid(
+        ttk.Button(row_ghost, text="Ghost...", command=self._on_load_ghost_structure).grid(
             row=0, column=0, sticky=tk.EW, padx=(0, 3)
         )
         ttk.Button(row_ghost, text="Clear", width=5, command=self._clear_ghost_structure).grid(row=0, column=1)
         ttk.Button(
             f_pub,
-            text="Batch Render Files...",
+            text="Batch Render...",
             command=self._on_batch_render_files,
         ).grid(row=1, column=1, sticky=tk.EW)
 
-        # --- Selection Tab: Atom Labels, Opacity / Invert, Atom List ---
+        # --- Selection Tab ---
         self._build_selection_tab(self.tab_selection)
 
         self._switch_tab("view")
 
-        # 3. Pinned Actions (always anchored at bottom of sidebar)
+        # 3. Pinned Minimal Action Bar
         act_host = action_parent if action_parent is not None else parent
         f_act = ttk.Frame(act_host, style="Outer.TFrame")
         if action_parent is not None:
@@ -1605,7 +1604,7 @@ class AtomicBlenderApp(tk.Tk):
         else:
             f_act.pack(fill=tk.X, pady=(4, 4))
         self.btn_render = ttk.Button(
-            f_act, text="Render High-Res Output", style="Accent.TButton", command=self._on_render
+            f_act, text="Render Image", style="Accent.TButton", command=self._on_render
         )
         self.btn_render.pack(fill=tk.X, pady=(0, 4))
 
@@ -1613,9 +1612,9 @@ class AtomicBlenderApp(tk.Tk):
         row_sub.pack(fill=tk.X)
         row_sub.columnconfigure(0, weight=1, uniform="sub_act")
         row_sub.columnconfigure(1, weight=1, uniform="sub_act")
-        self.btn_blender = ttk.Button(row_sub, text="Open in Blender", command=self._on_open_in_blender)
+        self.btn_blender = ttk.Button(row_sub, text="Blender", command=self._on_open_in_blender)
         self.btn_blender.grid(row=0, column=0, sticky=tk.EW, padx=(0, 4))
-        self.btn_folder = ttk.Button(row_sub, text="Open Output Folder", command=self._on_open_folder)
+        self.btn_folder = ttk.Button(row_sub, text="Folder", command=self._on_open_folder)
         self.btn_folder.grid(row=0, column=1, sticky=tk.EW)
 
     def _switch_tab(self, tab_name: str) -> None:
@@ -1629,29 +1628,29 @@ class AtomicBlenderApp(tk.Tk):
         for key, (btn, bar) in self._tab_buttons.items():
             active = key == self._active_tab
             btn.configure(
-                bg="#1E2128" if active else "#14161B",
-                fg="#F8FAFC" if active else "#94A3B8",
-                activebackground="#262A34",
+                bg="#1C2029" if active else "#111318",
+                fg="#F8FAFC" if active else "#8B95A7",
+                activebackground="#222631",
                 activeforeground="#FFFFFF",
             )
-            bar.configure(bg="#14B8A6" if active else "#2E3440")
+            bar.configure(bg="#14B8A6" if active else "#111318")
 
     def _build_selection_tab(self, parent: ttk.Frame) -> None:
-        """Build the Selection tab with Atom Labels, Atom List, double-click hint, and opacity controls."""
-        f_lbl = ttk.LabelFrame(parent, text="Labels & Selection", padding=8)
-        f_lbl.pack(fill=tk.X, pady=(0, 6))
+        """Build the Selection tab with minimal cards for Labels, Recipes, Appearance, and Atom List."""
+        f_lbl = ttk.LabelFrame(parent, text="SELECTION", padding=(10, 8))
+        f_lbl.pack(fill=tk.X, pady=(0, 8))
 
         row_top = ttk.Frame(f_lbl)
         row_top.pack(fill=tk.X, pady=(0, 6))
         DarkCheckbutton(
             row_top,
-            text="Atom Labels (C1, H2, ...)",
+            text="Labels",
             variable=self.var_show_labels,
             command=self._on_labels_toggled,
         ).pack(side=tk.LEFT)
         DarkCheckbutton(
             row_top,
-            text="2D Callout",
+            text="Callout",
             variable=self.var_show_measure_overlay,
             command=self._on_labels_toggled,
         ).pack(side=tk.LEFT, padx=(10, 0))
@@ -1660,10 +1659,10 @@ class AtomicBlenderApp(tk.Tk):
         row_btns = ttk.Frame(f_lbl)
         row_btns.pack(fill=tk.X)
         for c_idx, (text, cb) in enumerate((
-            ("Select All", self._select_all_atoms),
+            ("All", self._select_all_atoms),
             ("Clear", self._clear_selection),
             ("Invert", self._invert_selection),
-            ("Same Elem", self._select_same_element),
+            ("Elem", self._select_same_element),
         )):
             row_btns.columnconfigure(c_idx, weight=1, uniform="sel_btn")
             ttk.Button(row_btns, text=text, command=cb).grid(
@@ -1676,10 +1675,10 @@ class AtomicBlenderApp(tk.Tk):
         ttk.Entry(row_shell, textvariable=self.var_neighbor_cutoff, width=4, justify=tk.CENTER).pack(
             side=tk.LEFT, padx=(3, 4)
         )
-        ttk.Button(row_shell, text="Expand Shell", command=self._expand_selection_neighbors).pack(
+        ttk.Button(row_shell, text="Shell", command=self._expand_selection_neighbors).pack(
             side=tk.LEFT, padx=(0, 4)
         )
-        ttk.Button(row_shell, text="Adsorbate Spotlight", command=self._apply_adsorbate_spotlight_recipe).pack(
+        ttk.Button(row_shell, text="Spotlight", command=self._apply_adsorbate_spotlight_recipe).pack(
             side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 4)
         )
         ttk.Button(row_shell, text="Z-Fade", command=self._apply_depth_fade_recipe).pack(side=tk.LEFT)
@@ -1705,9 +1704,9 @@ class AtomicBlenderApp(tk.Tk):
             wraplength=330,
         ).pack(fill=tk.X, pady=(6, 0))
 
-        f_op = ttk.LabelFrame(parent, text="Selection Transparency & Hybrid Size", padding=8)
-        f_op.pack(fill=tk.X, pady=(0, 6))
-        f_op.columnconfigure(0, minsize=72)
+        f_op = ttk.LabelFrame(parent, text="APPEARANCE", padding=(10, 8))
+        f_op.pack(fill=tk.X, pady=(0, 8))
+        f_op.columnconfigure(0, minsize=68)
         f_op.columnconfigure(1, weight=1)
 
         ttk.Label(f_op, text="Opacity").grid(row=0, column=0, sticky=tk.W, pady=2)
@@ -1725,14 +1724,14 @@ class AtomicBlenderApp(tk.Tk):
 
         DarkCheckbutton(
             f_op,
-            text="Fade Unselected (선택 반대 투명화)",
+            text="Fade Unselected",
             variable=self.var_alpha_invert,
             command=self._on_opacity_released,
         ).grid(row=1, column=0, columnspan=4, sticky=tk.W, pady=(4, 2))
 
         row_bg_sz = ttk.Frame(f_op)
         row_bg_sz.grid(row=2, column=0, columnspan=4, sticky=tk.EW, pady=(2, 0))
-        ttk.Label(row_bg_sz, text="Substrate:").pack(side=tk.LEFT, padx=(0, 6))
+        ttk.Label(row_bg_sz, text="Substrate").pack(side=tk.LEFT, padx=(0, 8))
         for txt, val in (("Same", "same"), ("Slim 0.55×", "slim"), ("VdW 1.35×", "vdw")):
             DarkRadiobutton(
                 row_bg_sz,
@@ -1740,21 +1739,21 @@ class AtomicBlenderApp(tk.Tk):
                 variable=self.var_unsel_scale_mode,
                 value=val,
                 command=lambda: self._sync_selection_and_alphas(trigger_blender=True),
-            ).pack(side=tk.LEFT, padx=(0, 6))
+            ).pack(side=tk.LEFT, padx=(0, 8))
 
-        f_list = ttk.LabelFrame(parent, text="Atom List", padding=6)
-        f_list.pack(fill=tk.BOTH, expand=True, pady=(0, 6))
+        f_list = ttk.LabelFrame(parent, text="ATOMS", padding=(8, 6))
+        f_list.pack(fill=tk.BOTH, expand=True, pady=(0, 8))
         list_wrap = ttk.Frame(f_list)
         list_wrap.pack(fill=tk.BOTH, expand=True)
         self.atom_listbox = tk.Listbox(
             list_wrap,
             height=14,
-            bg="#121418",
-            fg="#E5E7EB",
+            bg="#111318",
+            fg="#E2E8F0",
             selectbackground="#1E293B",
             selectforeground="#2DD4BF",
             activestyle="none",
-            highlightbackground="#323844",
+            highlightbackground="#262B36",
             highlightthickness=1,
             relief=tk.FLAT,
             font=("Consolas", 9),
@@ -1766,9 +1765,9 @@ class AtomicBlenderApp(tk.Tk):
         self.atom_listbox.bind("<ButtonRelease-1>", self._on_atom_list_click)
 
     def _build_display_types_panel(self, parent: ttk.Frame) -> None:
-        """Build unified Avogadro-inspired Display Types panel with inline appearance options."""
-        f_disp = ttk.LabelFrame(parent, text="Display Types", padding=(6, 4))
-        f_disp.pack(fill=tk.X, pady=(0, 6))
+        """Build minimal flat Display Types card with uniform hoverable rows and collapsible drawers."""
+        f_disp = ttk.LabelFrame(parent, text="DISPLAY", padding=(8, 6))
+        f_disp.pack(fill=tk.X, pady=(0, 8))
         self.f_rep = f_disp
 
         rows = (
@@ -1780,25 +1779,35 @@ class AtomicBlenderApp(tk.Tk):
             ("scale_bar", "Scale Bar (Å)", self.var_show_scale_bar, None),
             ("hbonds", "H-Bonds / Contacts", self.var_show_hbonds, self._toggle_hbond_options),
         )
-        for idx, (key, label_txt, var, dots_cb) in enumerate(rows):
-            row_bg = "#1E2128" if idx % 2 == 0 else "#232730"
-            row = tk.Frame(f_disp, bg=row_bg, padx=4, pady=2)
+        base_row_bg = "#171A21"
+        hover_row_bg = "#1E222B"
+        for key, label_txt, var, dots_cb in rows:
+            row = tk.Frame(f_disp, bg=base_row_bg, padx=4, pady=2)
             row.pack(fill=tk.X)
 
-            chk_canvas = tk.Canvas(row, width=22, height=22, bg=row_bg, highlightthickness=0, cursor="hand2")
+            chk_canvas = tk.Canvas(row, width=22, height=22, bg=base_row_bg, highlightthickness=0, cursor="hand2")
             chk_canvas.pack(side=tk.LEFT, padx=(0, 6))
             self._display_checks[key] = (chk_canvas, var)
 
             lbl = tk.Label(
                 row,
                 text=label_txt,
-                bg=row_bg,
-                fg="#E5E7EB",
+                bg=base_row_bg,
+                fg="#E2E8F0",
                 font=("Segoe UI", 9),
                 anchor=tk.W,
                 cursor="hand2",
             )
             lbl.pack(side=tk.LEFT, fill=tk.X, expand=True)
+
+            def _set_row_bg(c: str, r: tk.Frame = row, ch: tk.Canvas = chk_canvas, lb: tk.Label = lbl) -> None:
+                r.configure(bg=c)
+                ch.configure(bg=c)
+                lb.configure(bg=c)
+
+            for w_item in (row, chk_canvas, lbl):
+                w_item.bind("<Enter>", lambda _e, fn=_set_row_bg: fn(hover_row_bg))
+                w_item.bind("<Leave>", lambda _e, fn=_set_row_bg: fn(base_row_bg))
 
             chk_canvas.bind("<Button-1>", lambda _e, k=key: self._on_display_type_clicked(k))
             lbl.bind("<Button-1>", lambda _e, k=key: self._on_display_type_clicked(k))
@@ -1809,10 +1818,10 @@ class AtomicBlenderApp(tk.Tk):
 
         self._refresh_display_checks()
 
-        # Unified Style & Scale options (inline inside Display Types, toggled via •••)
+        # Minimal style & scale options (toggled via •••)
         self.f_rep_body = ttk.Frame(f_disp, padding=(2, 6, 2, 2))
         self.f_rep_body.pack(fill=tk.X)
-        self.f_rep_body.columnconfigure(0, minsize=72)
+        self.f_rep_body.columnconfigure(0, minsize=68)
         self.f_rep_body.columnconfigure(1, weight=1)
 
         ttk.Label(self.f_rep_body, text="Material").grid(row=0, column=0, sticky=tk.W, pady=2)
@@ -1821,7 +1830,7 @@ class AtomicBlenderApp(tk.Tk):
         )
         self.combo_style.grid(row=0, column=1, sticky=tk.EW, padx=4, pady=2)
         self.combo_style.bind("<<ComboboxSelected>>", lambda _e: self._on_repr_changed())
-        ttk.Button(self.f_rep_body, text="JSON...", command=self._browse_style).grid(row=0, column=2, pady=2)
+        ttk.Button(self.f_rep_body, text="JSON", width=6, command=self._browse_style).grid(row=0, column=2, pady=2)
 
         ttk.Label(self.f_rep_body, text="Scale").grid(row=1, column=0, sticky=tk.W, pady=2)
         row_sc = ttk.Frame(self.f_rep_body)
@@ -1837,7 +1846,7 @@ class AtomicBlenderApp(tk.Tk):
         self.slider_scale.pack(side=tk.LEFT, fill=tk.X, expand=True)
         ttk.Label(row_sc, textvariable=self.var_radius_label, width=6).pack(side=tk.LEFT, padx=(6, 0))
 
-        ttk.Label(self.f_rep_body, text="Bond Color").grid(row=2, column=0, sticky=tk.W, pady=2)
+        ttk.Label(self.f_rep_body, text="Bond").grid(row=2, column=0, sticky=tk.W, pady=2)
         cb_bcol = ttk.Combobox(
             self.f_rep_body,
             textvariable=self.var_bond_color,
@@ -1848,7 +1857,7 @@ class AtomicBlenderApp(tk.Tk):
         cb_bcol.grid(row=2, column=1, sticky=tk.W, padx=4, pady=2)
         cb_bcol.bind("<<ComboboxSelected>>", lambda _e: self._on_repr_changed())
 
-        ttk.Label(self.f_rep_body, text="Color Map").grid(row=3, column=0, sticky=tk.W, pady=2)
+        ttk.Label(self.f_rep_body, text="Color").grid(row=3, column=0, sticky=tk.W, pady=2)
         cb_cmap = ttk.Combobox(
             self.f_rep_body,
             textvariable=self.var_color_map,
@@ -1873,9 +1882,8 @@ class AtomicBlenderApp(tk.Tk):
                 row_fin, text=fin_lbl, command=lambda fk=fin_key: self._set_material_finish(fk)
             ).grid(row=0, column=c_i, sticky=tk.EW, padx=(0, 2 if c_i < 3 else 0))
 
-        self.f_axes_opts = tk.Frame(f_disp, bg="#181A20", padx=6, pady=4, highlightbackground="#2E3440", highlightthickness=1)
-        self.f_axes_opts.pack(fill=tk.X, pady=(4, 0))
-        tk.Label(self.f_axes_opts, text="Axes:", bg="#181A20", fg="#94A3B8", font=("Segoe UI", 8, "bold")).pack(
+        self.f_axes_opts = tk.Frame(f_disp, bg="#111318", padx=8, pady=5)
+        tk.Label(self.f_axes_opts, text="Axes:", bg="#111318", fg="#8B95A7", font=("Segoe UI", 8, "bold")).pack(
             side=tk.LEFT, padx=(0, 6)
         )
         DarkCheckbutton(
@@ -1883,19 +1891,19 @@ class AtomicBlenderApp(tk.Tk):
             text="x, y, z Labels",
             variable=self.var_axes_labels,
             command=self._on_axes_option_changed,
-            bg="#181A20",
+            bg="#111318",
         ).pack(side=tk.LEFT, padx=(0, 8))
         DarkCheckbutton(
             self.f_axes_opts,
-            text="Fix (Default)",
+            text="Fix",
             variable=self.var_axes_fixed,
             command=self._on_axes_fix_toggled,
-            bg="#181A20",
+            bg="#111318",
         ).pack(side=tk.LEFT)
-        self._axes_opts_visible = True
+        self._axes_opts_visible = False
 
-        self.f_hbond_opts = tk.Frame(f_disp, bg="#181A20", padx=6, pady=4, highlightbackground="#2E3440", highlightthickness=1)
-        tk.Label(self.f_hbond_opts, text="Contacts:", bg="#181A20", fg="#94A3B8", font=("Segoe UI", 8, "bold")).pack(
+        self.f_hbond_opts = tk.Frame(f_disp, bg="#111318", padx=8, pady=5)
+        tk.Label(self.f_hbond_opts, text="Mode:", bg="#111318", fg="#8B95A7", font=("Segoe UI", 8, "bold")).pack(
             side=tk.LEFT, padx=(0, 4)
         )
         cb_hb = ttk.Combobox(
@@ -1978,7 +1986,11 @@ class AtomicBlenderApp(tk.Tk):
     def _toggle_section(self, frame: ttk.Frame) -> None:
         if frame.winfo_manager():
             frame.pack_forget()
-        elif frame is getattr(self, "f_rep_body", None) and hasattr(self, "f_axes_opts"):
+        elif (
+            frame is getattr(self, "f_rep_body", None)
+            and hasattr(self, "f_axes_opts")
+            and self.f_axes_opts.winfo_manager()
+        ):
             frame.pack(fill=tk.X, before=self.f_axes_opts)
         else:
             frame.pack(fill=tk.X)
@@ -2001,8 +2013,8 @@ class AtomicBlenderApp(tk.Tk):
 
     def _draw_rounded_checkbox(self, canvas: tk.Canvas, checked: bool) -> None:
         canvas.delete("all")
-        fill = "#0D9488" if checked else "#14161A"
-        outline = "#14B8A6" if checked else "#64748B"
+        fill = "#0D9488" if checked else "#111318"
+        outline = "#14B8A6" if checked else "#475569"
         canvas.create_rectangle(3, 3, 18, 18, fill=fill, outline=outline, width=1.4)
         if checked:
             canvas.create_line(
@@ -2349,29 +2361,27 @@ class AtomicBlenderApp(tk.Tk):
     def _build_preview_and_log(self, parent: ttk.Frame) -> None:
         v_pane = ttk.PanedWindow(parent, orient=tk.VERTICAL)
         v_pane.pack(fill=tk.BOTH, expand=True)
+        self._v_pane = v_pane
 
-        f_prev = ttk.LabelFrame(v_pane, text="Viewport & Render Preview", padding=4)
-        tb = ttk.Frame(f_prev)
+        f_prev = ttk.Frame(v_pane, padding=(2, 2), style="Outer.TFrame")
+        tb = ttk.Frame(f_prev, padding=(4, 3))
         tb.pack(fill=tk.X, pady=(0, 4))
         DarkRadiobutton(
-            tb, text="3D Interactive", variable=self.var_canvas_mode, value="3d", command=self._redraw_canvas
+            tb, text="3D", variable=self.var_canvas_mode, value="3d", command=self._redraw_canvas
         ).pack(side=tk.LEFT)
         DarkRadiobutton(
-            tb, text="Rendered PNG", variable=self.var_canvas_mode, value="png", command=self._redraw_canvas
-        ).pack(side=tk.LEFT, padx=(8, 12))
-        ttk.Button(tb, text="Reset / Fit View", command=self._on_reset_view).pack(side=tk.LEFT, padx=(0, 4))
-        ttk.Button(tb, text="Save view.json...", command=self._on_save_view_json).pack(side=tk.LEFT, padx=(0, 4))
-        ttk.Button(tb, text="Copy Image", command=self._on_copy_image).pack(side=tk.LEFT, padx=(0, 8))
+            tb, text="Render", variable=self.var_canvas_mode, value="png", command=self._redraw_canvas
+        ).pack(side=tk.LEFT, padx=(6, 10))
+        ttk.Button(tb, text="Fit", width=5, command=self._on_reset_view).pack(side=tk.LEFT, padx=(0, 4))
+        ttk.Button(tb, text="Save View", command=self._on_save_view_json).pack(side=tk.LEFT, padx=(0, 4))
+        ttk.Button(tb, text="Copy", width=6, command=self._on_copy_image).pack(side=tk.LEFT, padx=(0, 8))
         DarkCheckbutton(
-            tb, text="Dark Backdrop", variable=self.var_dark_backdrop, command=self._on_backdrop_toggled
+            tb, text="Dark", variable=self.var_dark_backdrop, command=self._on_backdrop_toggled
         ).pack(side=tk.LEFT)
-        ttk.Label(
-            tb,
-            text="Drag: Rotate/Axes | R: Reset | L: Labels | Ctrl+C: Copy",
-            style="Muted.TLabel",
-        ).pack(side=tk.RIGHT)
+        self._btn_log_toggle = ttk.Button(tb, text="Log", width=5, command=self._toggle_log_panel)
+        self._btn_log_toggle.pack(side=tk.RIGHT)
 
-        self.canvas = tk.Canvas(f_prev, bg="#15171C", highlightthickness=0)
+        self.canvas = tk.Canvas(f_prev, bg="#0F1115", highlightthickness=0)
         self.canvas.pack(fill=tk.BOTH, expand=True)
         self.canvas.bind("<Configure>", lambda _e: self._redraw_canvas())
         self.canvas.bind("<ButtonPress-1>", self._on_canvas_lbutton_down)
@@ -2388,22 +2398,32 @@ class AtomicBlenderApp(tk.Tk):
         self.canvas.bind("<Button-5>", lambda _e: self._zoom_3d(1.111))
         self.canvas.bind("<Double-Button-1>", self._on_canvas_double_click)
 
-        f_log = ttk.LabelFrame(v_pane, text="Console Log", padding=4)
+        self._f_log = ttk.LabelFrame(v_pane, text="LOG", padding=(6, 4))
         self.log_text = scrolledtext.ScrolledText(
-            f_log,
+            self._f_log,
             height=5,
             state=tk.DISABLED,
             wrap=tk.WORD,
-            bg="#121418",
+            bg="#111318",
             fg="#CBD5E1",
-            insertbackground="#E5E7EB",
+            insertbackground="#E2E8F0",
             relief=tk.FLAT,
             font=("Consolas", 9),
         )
         self.log_text.pack(fill=tk.BOTH, expand=True)
 
         v_pane.add(f_prev, weight=6)
-        v_pane.add(f_log, weight=1)
+        self._log_visible = False
+
+    def _toggle_log_panel(self) -> None:
+        if not hasattr(self, "_v_pane") or not hasattr(self, "_f_log"):
+            return
+        if self._log_visible:
+            self._v_pane.forget(self._f_log)
+            self._log_visible = False
+        else:
+            self._v_pane.add(self._f_log, weight=1)
+            self._log_visible = True
 
     def _on_scale_changed(self, _val: str) -> None:
         self.var_radius_label.set(f"{self.var_radius_scale.get():.2f}×")
@@ -2925,7 +2945,7 @@ class AtomicBlenderApp(tk.Tk):
             elif any_sel:
                 bg, fg, active = "#1B3B3A", "#5EEAD4", "#244D4B"
             else:
-                bg, fg, active = "#2B303B", "#CBD5E1", "#363C49"
+                bg, fg, active = "#222631", "#CBD5E1", "#2D3342"
             btn.configure(bg=bg, fg=fg, activebackground=active, activeforeground="#FFFFFF")
 
     def _toggle_element_selection(self, symbol: str) -> None:
@@ -3002,9 +3022,9 @@ class AtomicBlenderApp(tk.Tk):
             line = f"{mark} {lbl:<5} ({x:6.2f},{y:6.2f},{z:6.2f})  {a_pct:3d}%"
             self.atom_listbox.insert(tk.END, line)
             if idx in self._selected_atoms:
-                self.atom_listbox.itemconfig(idx, fg="#2DD4BF", bg="#1B2832")
+                self.atom_listbox.itemconfig(idx, fg="#2DD4BF", bg="#162A2C")
             else:
-                self.atom_listbox.itemconfig(idx, fg="#E5E7EB", bg="#121418")
+                self.atom_listbox.itemconfig(idx, fg="#E2E8F0", bg="#111318")
         self.atom_listbox.yview_moveto(top_frac)
 
     def _sync_selection_and_alphas(
