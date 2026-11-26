@@ -505,6 +505,7 @@ class TestAtomicBlender(unittest.TestCase):
 
     def test_dark_widgets_type_map_visibility_and_nonperiodic_replicate(self) -> None:
         import time
+        import numpy as np
         from atomic_blender.gui import AtomicBlenderApp, DarkCheckbutton, DarkSpinbox
 
         with tempfile.TemporaryDirectory() as tmp:
@@ -524,14 +525,49 @@ class TestAtomicBlender(unittest.TestCase):
                 app.var_input.set(str(lmp))
                 self.assertEqual(app.lbl_type_map.winfo_manager(), "grid")
 
-                # Collapsing Style & Representation body keeps f_rep packed in its original place
+                # Verify View / Tool tabs, unified Display Types, and step camera
+                self.assertEqual(app._active_tab, "view")
+                self.assertEqual(app.f_rep.master, app.tab_view)
+                self.assertEqual(app.f_geom.master, app.tab_tool)
                 self.assertTrue(bool(app.f_rep_body.winfo_manager()))
                 app._toggle_section(app.f_rep_body)
                 self.assertFalse(bool(app.f_rep_body.winfo_manager()))
                 app._toggle_section(app.f_rep_body)
                 self.assertTrue(bool(app.f_rep_body.winfo_manager()))
-                siblings = list(app.f_rep.master.pack_slaves())  # type: ignore[union-attr]
-                self.assertLess(siblings.index(app.f_rep), siblings.index(app.f_geom))
+
+                app._switch_tab("tool")
+                self.assertEqual(app._active_tab, "tool")
+                self.assertEqual(app.tab_tool.winfo_manager(), "pack")
+                self.assertEqual(app.tab_view.winfo_manager(), "")
+                app._switch_tab("view")
+                self.assertEqual(app._active_tab, "view")
+                self.assertEqual(app.tab_view.winfo_manager(), "pack")
+
+                # Verify step rotation (default 45 deg + custom 30 deg) and step move (1.0 A + 2.5 A)
+                app._structure_cache = {
+                    "symbols": ["H", "H"],
+                    "positions": [[0.0, 0.0, 0.0], [0.0, 0.0, 0.74]],
+                    "cell": [[10.0, 0.0, 0.0], [0.0, 10.0, 0.0], [0.0, 0.0, 10.0]],
+                    "pbc": [False, False, False],
+                    "has_cell": False,
+                    "origin": [0.0, 0.0, 0.0],
+                }
+                app._rebuild_viewport(reset_camera=True, trigger_preview=False)
+                assert app._vp_scene is not None
+                self.assertAlmostEqual(app.var_rot_step.get(), 45.0)
+                self.assertAlmostEqual(app.var_pan_step.get(), 1.0)
+                q_before = app._vp_scene.quat
+                t_before = app._vp_scene.target.copy()
+                app._on_step_rotate(1.0, 0.0, 0.0)
+                self.assertNotEqual(app._vp_scene.quat, q_before)
+                q_after_yaw = app._vp_scene.quat
+                app.var_rot_step.set(30.0)
+                app._on_step_rotate(0.0, 0.0, 1.0)
+                self.assertNotEqual(app._vp_scene.quat, q_after_yaw)
+                app.var_pan_step.set(2.5)
+                app._on_step_move(1.0, 0.0)
+                self.assertGreater(float(np.linalg.norm(app._vp_scene.target - t_before)), 2.4)
+                app._structure_cache = None
 
                 # Non-periodic .xyz loads cleanly even when Replicate is set > 1
                 app.var_input.set(str(xyz))
