@@ -784,6 +784,113 @@ class TestAtomicBlender(unittest.TestCase):
             finally:
                 app.destroy()
 
+    def test_stage2_colormaps_hbonds_material_presets_and_ghost_overlay(self) -> None:
+        from PIL import Image
+        from atomic_blender.gui import AtomicBlenderApp, MATERIAL_FINISH_PRESETS
+        from atomic_blender.viewport3d import (
+            ViewportScene,
+            _find_bonds,
+            compute_z_colormap_colors,
+            find_dashed_contacts,
+            merge_ghost_structure,
+            render_colorbar_overlay,
+            sample_colormap_hex,
+        )
+
+        # 1. Colormaps + Colorbar overlay
+        self.assertEqual(sample_colormap_hex("viridis", 0.0), "#440154")
+        self.assertEqual(sample_colormap_hex("viridis", 1.0), "#FDE725")
+        pos_z = [[0.0, 0.0, 0.0], [0.0, 0.0, 5.0], [0.0, 0.0, 10.0]]
+        cols, zlo, zhi = compute_z_colormap_colors(pos_z, "coolwarm")
+        self.assertEqual(len(cols), 3)
+        self.assertEqual((zlo, zhi), (0.0, 10.0))
+        img = Image.new("RGBA", (600, 600), (21, 23, 28, 255))
+        render_colorbar_overlay(img, "coolwarm", zlo, zhi, dark_backdrop=True)
+
+        # 2. H-bonds & interface contacts detection (excluding covalent bonds)
+        hb_syms = ["O", "H", "O", "H"]
+        hb_pos = [
+            [0.0, 0.0, 0.0],   # O1
+            [0.98, 0.0, 0.0],  # H2 bonded to O1
+            [2.80, 0.0, 0.0],  # O3 (H-bond acceptor from H2: dist=1.82 A)
+            [3.78, 0.0, 0.0],  # H4 bonded to O3
+        ]
+        import numpy as np
+
+        bi, bj = _find_bonds(hb_syms, np.asarray(hb_pos), {"mode": "auto", "enabled": True})
+        hb_pairs = find_dashed_contacts(hb_syms, hb_pos, bond_i=bi, bond_j=bj, mode="hbond", d_min=1.55, d_max=2.55)
+        self.assertEqual(hb_pairs, [(1, 2)])
+        iface_pairs = find_dashed_contacts(
+            hb_syms, hb_pos, bond_i=bi, bond_j=bj, mode="interface", d_min=1.5, d_max=3.0, focal_indices={2, 3}
+        )
+        self.assertEqual(iface_pairs, [(0, 2), (1, 2), (1, 3)])
+
+        # 3. Ghost reference overlay (no cross-bonds, preserves displacement vectors)
+        main_struct = {
+            "symbols": ["O", "H", "H"],
+            "positions": [[0.0, 0.0, 0.0], [0.96, 0.0, 0.0], [-0.96, 0.0, 1.0]],
+            "cell": [[10.0, 0.0, 0.0], [0.0, 10.0, 0.0], [0.0, 0.0, 10.0]],
+            "pbc": [False, False, False],
+            "has_cell": False,
+            "origin": [0.0, 0.0, 0.0],
+        }
+        ghost_struct = {
+            "symbols": ["O", "H", "H"],
+            "positions": [[0.0, 0.0, 0.0], [0.96, 0.0, 0.0], [-0.96, 0.0, 0.0]],
+        }
+        merged = merge_ghost_structure(main_struct, ghost_struct, disp_threshold_a=0.2)
+        self.assertEqual(len(merged["symbols"]), 6)
+        self.assertEqual(merged["ghost_start_index"], 3)
+        self.assertEqual(merged["dashed_bonds"], [[2, 5]])
+        vp_g = ViewportScene.from_neutral_dict(merged, style={"bonds": {"mode": "auto", "enabled": True}})
+        for i_b, j_b in zip(vp_g.bond_i, vp_g.bond_j):
+            self.assertEqual(int(i_b) < 3, int(j_b) < 3)
+
+        # 4. GUI integration: Z colormap, H-bonds, Finish preset, Ghost overlay, CLI payload
+        with tempfile.TemporaryDirectory() as tmp:
+            xyz = Path(tmp) / "hb.xyz"
+            xyz.write_text("4\n\nO 0 0 0\nH 0.98 0 0\nO 2.8 0 0\nH 3.78 0 0\n", encoding="utf-8")
+            app = AtomicBlenderApp()
+            app.withdraw()
+            try:
+                app.var_blender.set("")
+                app.var_input.set(str(xyz))
+                app.canvas.configure(width=600, height=600)
+                app.update_idletasks()
+                hb_struct = {
+                    "symbols": hb_syms,
+                    "positions": hb_pos,
+                    "cell": [[10.0, 0.0, 0.0], [0.0, 10.0, 0.0], [0.0, 0.0, 10.0]],
+                    "pbc": [False, False, False],
+                    "has_cell": False,
+                    "origin": [0.0, 0.0, 0.0],
+                }
+                app._base_structure_cache = dict(hb_struct)
+                app._structure_cache = dict(hb_struct)
+                app._structure_version = 1
+                app.var_bonds.set("auto")
+
+                app.var_color_map.set("viridis")
+                app._on_colormap_changed()
+                self.assertEqual(len(app._structure_cache["colors"]), 4)
+                self.assertIsNotNone(app._vp_scene.colormap_info)
+
+                app._on_display_type_clicked("hbonds")
+                self.assertTrue(app.var_show_hbonds.get())
+                self.assertEqual(app._structure_cache["dashed_bonds"], [[1, 2]])
+
+                app._set_material_finish("chalk")
+                eff = app._effective_cfg_for_cli(app._collect_config())
+                style_out = json.loads(Path(eff.style).read_text(encoding="utf-8"))
+                self.assertAlmostEqual(
+                    style_out["material"]["roughness"], MATERIAL_FINISH_PRESETS["chalk"]["roughness"]
+                )
+                struct_out = json.loads(Path(eff.input_path).read_text(encoding="utf-8"))
+                self.assertEqual(struct_out["dashed_bonds"], [[1, 2]])
+                self.assertEqual(len(struct_out["colors"]), 4)
+            finally:
+                app.destroy()
+
     def test_turnkey_recipes_overlays_hybrid_scales_and_dual_panel(self) -> None:
         from PIL import Image
         from atomic_blender.gui import (
