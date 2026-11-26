@@ -25,8 +25,10 @@ from atomic_blender.convert import atoms_to_neutral_dict, read_structure
 from atomic_blender.elements import VIEW_PRESETS, classify_dropped_file
 from atomic_blender.viewport3d import (
     ViewportScene,
+    atom_label,
     preset_to_quat,
     quat_to_axes,
+    render_atom_labels_and_selection_overlay,
     render_reference_axes_overlay,
 )
 
@@ -380,6 +382,127 @@ class DarkSpinbox(tk.Frame):
             self._cmd()
 
 
+class DarkSlider(tk.Canvas):
+    """Sleek modern horizontal slider with prominent circular thumb for dark themes."""
+
+    def __init__(
+        self,
+        parent: Any,
+        from_: float,
+        to: float,
+        variable: tk.DoubleVar,
+        command: Any = None,
+        release_command: Any = None,
+        bg: str = "#1E2128",
+        height: int = 26,
+    ) -> None:
+        super().__init__(parent, height=height, bg=bg, highlightthickness=0, cursor="hand2")
+        self._from = float(from_)
+        self._to = float(to)
+        self._var = variable
+        self._cmd = command
+        self._release_cmd = release_command
+        self._bg = bg
+        self._hover = False
+        self._dragging = False
+        self._pad_x = 11
+
+        self.bind("<Configure>", lambda _e: self._redraw())
+        self.bind("<Enter>", lambda _e: self._set_hover(True))
+        self.bind("<Leave>", lambda _e: self._set_hover(False))
+        self.bind("<ButtonPress-1>", self._on_press)
+        self.bind("<B1-Motion>", self._on_motion)
+        self.bind("<ButtonRelease-1>", self._on_release)
+        self._trace_id = self._var.trace_add("write", lambda *_: self._safe_redraw())
+        self.bind("<Destroy>", self._on_destroy)
+
+    def _on_destroy(self, event: tk.Event) -> None:
+        if event.widget is self:
+            try:
+                self._var.trace_remove("write", self._trace_id)
+            except Exception:
+                pass
+
+    def _set_hover(self, state: bool) -> None:
+        self._hover = state
+        self._redraw()
+
+    def _value_from_x(self, x: float) -> float:
+        w = max(40, self.winfo_width())
+        span = max(1.0, float(w - 2 * self._pad_x))
+        frac = max(0.0, min(1.0, (x - self._pad_x) / span))
+        return self._from + frac * (self._to - self._from)
+
+    def _on_press(self, event: tk.Event) -> None:
+        self._dragging = True
+        self.set_value(self._value_from_x(event.x))
+
+    def _on_motion(self, event: tk.Event) -> None:
+        if self._dragging:
+            self.set_value(self._value_from_x(event.x))
+
+    def _on_release(self, _event: tk.Event) -> None:
+        if self._dragging:
+            self._dragging = False
+            self._redraw()
+            if self._release_cmd is not None:
+                self._release_cmd()
+
+    def set_value(self, val: float) -> None:
+        clamped = max(self._from, min(self._to, float(val)))
+        self._var.set(clamped)
+        self._redraw()
+        if self._cmd is not None:
+            self._cmd(f"{clamped:.4f}")
+
+    def _safe_redraw(self) -> None:
+        if self.winfo_exists():
+            self._redraw()
+
+    def _redraw(self) -> None:
+        self.delete("all")
+        w = max(40, self.winfo_width())
+        h = max(20, self.winfo_height())
+        cy = h * 0.5
+        x0 = self._pad_x
+        x1 = w - self._pad_x
+        if x1 <= x0:
+            return
+        try:
+            cur = float(self._var.get())
+        except Exception:
+            cur = self._from
+        frac = max(0.0, min(1.0, (cur - self._from) / max(1e-9, self._to - self._from)))
+        tx = x0 + frac * (x1 - x0)
+
+        # Recessed track + glowing teal active segment
+        self.create_line(x0, cy, x1, cy, fill="#2B303B", width=6, capstyle=tk.ROUND)
+        if tx > x0 + 1:
+            self.create_line(x0, cy, tx, cy, fill="#0D9488", width=6, capstyle=tk.ROUND)
+
+        r = 8 if (self._hover or self._dragging) else 7
+        thumb_fill = "#2DD4BF" if (self._hover or self._dragging) else "#14B8A6"
+        self.create_oval(tx - r, cy - r, tx + r, cy + r, fill=thumb_fill, outline="#F8FAFC", width=1.6)
+        self.create_oval(tx - 2.5, cy - 2.5, tx + 2.5, cy + 2.5, fill="#0F172A", outline="")
+
+
+def compute_atom_alphas(
+    n_atoms: int,
+    selected: set[int],
+    opacity: float,
+    invert: bool,
+) -> list[float]:
+    """Compute per-atom alpha values from selection set, opacity slider, and invert flag."""
+    if n_atoms <= 0:
+        return []
+    if not selected:
+        return [1.0] * n_atoms
+    op = max(0.05, min(1.0, float(opacity)))
+    if invert:
+        return [1.0 if i in selected else op for i in range(n_atoms)]
+    return [op if i in selected else 1.0 for i in range(n_atoms)]
+
+
 class BlenderPreviewWorker:
     """Coalescing persistent Blender subprocess for fast low-res camera previews."""
 
@@ -623,6 +746,7 @@ class AtomicBlenderApp(tk.Tk):
         self._drag_last: tuple[int, int] = (0, 0)
         self._axes_pos: tuple[float, float] = (0.12, 0.86)
         self._show_atoms = True
+        self._selected_atoms: set[int] = set()
         self._display_checks: dict[str, tuple[tk.Canvas, tk.BooleanVar]] = {}
         self._temp_view_files: list[Path] = []
         self._preview_tmp_dir = tempfile.TemporaryDirectory(prefix="atomic_blender_prev_")
@@ -839,6 +963,9 @@ class AtomicBlenderApp(tk.Tk):
         self.var_canvas_mode = tk.StringVar(value="3d")
         self.var_rot_step = tk.DoubleVar(value=45.0)
         self.var_pan_step = tk.DoubleVar(value=1.0)
+        self.var_sel_opacity = tk.DoubleVar(value=0.30)
+        self.var_sel_opacity_label = tk.StringVar(value="30%")
+        self.var_alpha_invert = tk.BooleanVar(value=False)
         self._active_tab = "view"
         self.var_status = tk.StringVar(value="Ready")
         self.var_input.trace_add("write", lambda *_: self._sync_type_map_visibility())
@@ -910,16 +1037,19 @@ class AtomicBlenderApp(tk.Tk):
         self.btn_inspect_tm.grid(row=2, column=2, pady=2)
         self._sync_type_map_visibility()
 
-        # 2. View / Tool Tab Switcher
+        # 2. View / Tool / Selection Tab Switcher
         tab_bar = tk.Frame(parent, bg="#14161B")
         tab_bar.pack(fill=tk.X, pady=(0, 6))
         tab_bar.columnconfigure(0, weight=1)
         tab_bar.columnconfigure(1, weight=1)
+        tab_bar.columnconfigure(2, weight=1)
 
         self._tab_buttons: dict[str, tuple[tk.Button, tk.Frame]] = {}
-        for col_idx, (tab_key, tab_label) in enumerate((("view", "View"), ("tool", "Tool"))):
+        for col_idx, (tab_key, tab_label) in enumerate(
+            (("view", "View"), ("tool", "Tool"), ("selection", "Selection"))
+        ):
             holder = tk.Frame(tab_bar, bg="#14161B")
-            holder.grid(row=0, column=col_idx, sticky=tk.EW, padx=(0, 4) if col_idx == 0 else (0, 0))
+            holder.grid(row=0, column=col_idx, sticky=tk.EW, padx=(0, 4) if col_idx < 2 else (0, 0))
             btn = tk.Button(
                 holder,
                 text=tab_label,
@@ -939,6 +1069,7 @@ class AtomicBlenderApp(tk.Tk):
         self.tab_container.pack(fill=tk.BOTH, expand=True)
         self.tab_view = ttk.Frame(self.tab_container, style="Outer.TFrame")
         self.tab_tool = ttk.Frame(self.tab_container, style="Outer.TFrame")
+        self.tab_selection = ttk.Frame(self.tab_container, style="Outer.TFrame")
 
         # --- View Tab: Unified Display Types, Step Camera View, Cycles Render ---
         self._build_display_types_panel(self.tab_view)
@@ -1079,6 +1210,9 @@ class AtomicBlenderApp(tk.Tk):
         self.chk_fit_view.grid(row=3, column=1, columnspan=2, sticky=tk.W, padx=4, pady=2)
         self._sync_view_mode()
 
+        # --- Selection Tab: Atom Labels, Opacity / Invert, Atom List ---
+        self._build_selection_tab(self.tab_selection)
+
         self._switch_tab("view")
 
         # 3. Pinned Actions (always visible at bottom)
@@ -1097,13 +1231,13 @@ class AtomicBlenderApp(tk.Tk):
         self.btn_folder.pack(side=tk.LEFT, fill=tk.X, expand=True)
 
     def _switch_tab(self, tab_name: str) -> None:
-        self._active_tab = "tool" if tab_name == "tool" else "view"
-        if self._active_tab == "view":
-            self.tab_tool.pack_forget()
-            self.tab_view.pack(fill=tk.X)
-        else:
-            self.tab_view.pack_forget()
-            self.tab_tool.pack(fill=tk.X)
+        self._active_tab = tab_name if tab_name in ("view", "tool", "selection") else "view"
+        tabs = {"view": self.tab_view, "tool": self.tab_tool, "selection": self.tab_selection}
+        for key, frm in tabs.items():
+            if key == self._active_tab:
+                frm.pack(fill=tk.X)
+            else:
+                frm.pack_forget()
         for key, (btn, bar) in self._tab_buttons.items():
             active = key == self._active_tab
             btn.configure(
@@ -1113,6 +1247,78 @@ class AtomicBlenderApp(tk.Tk):
                 activeforeground="#FFFFFF",
             )
             bar.configure(bg="#14B8A6" if active else "#2E3440")
+
+    def _build_selection_tab(self, parent: ttk.Frame) -> None:
+        """Build the Selection tab with Atom Labels, Atom List, double-click hint, and opacity controls."""
+        f_lbl = ttk.LabelFrame(parent, text="Labels & Selection", padding=8)
+        f_lbl.pack(fill=tk.X, pady=(0, 6))
+
+        row_top = ttk.Frame(f_lbl)
+        row_top.pack(fill=tk.X, pady=(0, 6))
+        DarkCheckbutton(
+            row_top,
+            text="Atom Labels (C1, H2, ...)",
+            variable=self.var_show_labels,
+            command=self._on_labels_toggled,
+        ).pack(side=tk.LEFT)
+        ttk.Label(row_top, text="Double-click atom in viewport", style="Muted.TLabel").pack(side=tk.RIGHT)
+
+        row_btns = ttk.Frame(f_lbl)
+        row_btns.pack(fill=tk.X)
+        for text, cb in (
+            ("Select All", self._select_all_atoms),
+            ("Clear", self._clear_selection),
+            ("Invert", self._invert_selection),
+            ("Same Elem", self._select_same_element),
+        ):
+            ttk.Button(row_btns, text=text, command=cb).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 3))
+
+        f_op = ttk.LabelFrame(parent, text="Selection Transparency", padding=8)
+        f_op.pack(fill=tk.X, pady=(0, 6))
+        f_op.columnconfigure(1, weight=1)
+
+        ttk.Label(f_op, text="Opacity").grid(row=0, column=0, sticky=tk.W, pady=2)
+        self.slider_opacity = DarkSlider(
+            f_op,
+            from_=0.05,
+            to=1.0,
+            variable=self.var_sel_opacity,
+            command=self._on_opacity_changed,
+            release_command=self._on_opacity_released,
+        )
+        self.slider_opacity.grid(row=0, column=1, sticky=tk.EW, padx=6, pady=2)
+        ttk.Label(f_op, textvariable=self.var_sel_opacity_label, width=5).grid(row=0, column=2, pady=2)
+        ttk.Button(f_op, text="100%", width=5, command=self._reset_opacity).grid(row=0, column=3, padx=(4, 0), pady=2)
+
+        DarkCheckbutton(
+            f_op,
+            text="Fade Unselected (선택 반대 투명화)",
+            variable=self.var_alpha_invert,
+            command=self._on_opacity_released,
+        ).grid(row=1, column=0, columnspan=4, sticky=tk.W, pady=(4, 0))
+
+        f_list = ttk.LabelFrame(parent, text="Atom List", padding=6)
+        f_list.pack(fill=tk.BOTH, expand=True, pady=(0, 6))
+        list_wrap = ttk.Frame(f_list)
+        list_wrap.pack(fill=tk.BOTH, expand=True)
+        self.atom_listbox = tk.Listbox(
+            list_wrap,
+            height=12,
+            bg="#121418",
+            fg="#E5E7EB",
+            selectbackground="#1E293B",
+            selectforeground="#2DD4BF",
+            activestyle="none",
+            highlightbackground="#323844",
+            highlightthickness=1,
+            relief=tk.FLAT,
+            font=("Consolas", 9),
+        )
+        atom_scroll = ttk.Scrollbar(list_wrap, orient=tk.VERTICAL, command=self.atom_listbox.yview)
+        self.atom_listbox.configure(yscrollcommand=atom_scroll.set)
+        self.atom_listbox.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        atom_scroll.pack(side=tk.RIGHT, fill=tk.Y)
+        self.atom_listbox.bind("<ButtonRelease-1>", self._on_atom_list_click)
 
     def _build_display_types_panel(self, parent: ttk.Frame) -> None:
         """Build unified Avogadro-inspired Display Types panel with inline appearance options."""
@@ -1125,7 +1331,6 @@ class AtomicBlenderApp(tk.Tk):
             ("licorice", "Licorice", self.var_disp_licorice, lambda: self._toggle_section(self.f_rep_body)),
             ("vdw", "Van der Waals", self.var_disp_vdw, lambda: self._toggle_section(self.f_rep_body)),
             ("crystal_lattice", "Crystal Lattice", self.var_show_cell, lambda: self._switch_tab("tool")),
-            ("atom_labels", "Atom Labels", self.var_show_labels, None),
             ("reference_axes", "Reference Axes", self.var_show_axes, self._toggle_axes_options),
         )
         for idx, (key, label_txt, var, dots_cb) in enumerate(rows):
@@ -1173,11 +1378,15 @@ class AtomicBlenderApp(tk.Tk):
         ttk.Label(self.f_rep_body, text="Scale").grid(row=1, column=0, sticky=tk.W, pady=2)
         row_sc = ttk.Frame(self.f_rep_body)
         row_sc.grid(row=1, column=1, columnspan=2, sticky=tk.EW, padx=4, pady=2)
-        scale_w = ttk.Scale(
-            row_sc, from_=0.4, to=1.6, variable=self.var_radius_scale, command=self._on_scale_changed
+        self.slider_scale = DarkSlider(
+            row_sc,
+            from_=0.4,
+            to=1.6,
+            variable=self.var_radius_scale,
+            command=self._on_scale_changed,
+            release_command=self._on_repr_changed,
         )
-        scale_w.pack(side=tk.LEFT, fill=tk.X, expand=True)
-        scale_w.bind("<ButtonRelease-1>", lambda _e: self._on_repr_changed())
+        self.slider_scale.pack(side=tk.LEFT, fill=tk.X, expand=True)
         ttk.Label(row_sc, textvariable=self.var_radius_label, width=6).pack(side=tk.LEFT, padx=(6, 0))
 
         ttk.Label(self.f_rep_body, text="Bond Color").grid(row=2, column=0, sticky=tk.W, pady=2)
@@ -1404,6 +1613,7 @@ class AtomicBlenderApp(tk.Tk):
         self.canvas.bind("<MouseWheel>", self._on_canvas_wheel)
         self.canvas.bind("<Button-4>", lambda _e: self._zoom_3d(0.9))
         self.canvas.bind("<Button-5>", lambda _e: self._zoom_3d(1.111))
+        self.canvas.bind("<Double-Button-1>", self._on_canvas_double_click)
 
         f_log = ttk.LabelFrame(v_pane, text="Console Log", padding=4)
         self.log_text = scrolledtext.ScrolledText(
@@ -1424,6 +1634,144 @@ class AtomicBlenderApp(tk.Tk):
 
     def _on_scale_changed(self, _val: str) -> None:
         self.var_radius_label.set(f"{self.var_radius_scale.get():.2f}×")
+
+    def _on_labels_toggled(self) -> None:
+        if self._vp_scene is not None:
+            self._vp_scene.show_labels = bool(self.var_show_labels.get())
+        self._redraw_canvas()
+
+    def _on_opacity_changed(self, _val: str) -> None:
+        pct = int(round(float(self.var_sel_opacity.get()) * 100.0))
+        self.var_sel_opacity_label.set(f"{pct}%")
+        self._sync_selection_and_alphas(trigger_blender=False)
+
+    def _on_opacity_released(self) -> None:
+        pct = int(round(float(self.var_sel_opacity.get()) * 100.0))
+        self.var_sel_opacity_label.set(f"{pct}%")
+        self._sync_selection_and_alphas(trigger_blender=True)
+
+    def _reset_opacity(self) -> None:
+        self.var_sel_opacity.set(1.0)
+        self.var_sel_opacity_label.set("100%")
+        self._sync_selection_and_alphas(trigger_blender=True)
+
+    def _select_all_atoms(self) -> None:
+        if self._structure_cache is None:
+            return
+        self._selected_atoms = set(range(len(self._structure_cache.get("symbols", []))))
+        self._sync_selection_and_alphas(trigger_blender=True)
+
+    def _clear_selection(self) -> None:
+        self._selected_atoms.clear()
+        self._sync_selection_and_alphas(trigger_blender=True)
+
+    def _invert_selection(self) -> None:
+        if self._structure_cache is None:
+            return
+        n = len(self._structure_cache.get("symbols", []))
+        self._selected_atoms = set(range(n)) - self._selected_atoms
+        self._sync_selection_and_alphas(trigger_blender=True)
+
+    def _select_same_element(self) -> None:
+        if self._structure_cache is None or not self._selected_atoms:
+            return
+        syms = self._structure_cache.get("symbols", [])
+        target_syms = {syms[i] for i in self._selected_atoms if i < len(syms)}
+        self._selected_atoms = {i for i, s in enumerate(syms) if s in target_syms}
+        self._sync_selection_and_alphas(trigger_blender=True)
+
+    def _on_atom_list_click(self, event: tk.Event) -> None:
+        if self._structure_cache is None or not hasattr(self, "atom_listbox"):
+            return
+        idx = int(self.atom_listbox.nearest(event.y))
+        n = len(self._structure_cache.get("symbols", []))
+        if idx < 0 or idx >= n:
+            return
+        if idx in self._selected_atoms:
+            self._selected_atoms.remove(idx)
+        else:
+            self._selected_atoms.add(idx)
+        self._sync_selection_and_alphas(trigger_blender=True)
+
+    def _refresh_atom_list(self) -> None:
+        if not hasattr(self, "atom_listbox"):
+            return
+        top_frac = 0.0
+        try:
+            top_frac = float(self.atom_listbox.yview()[0])
+        except Exception:
+            pass
+        self.atom_listbox.delete(0, tk.END)
+        if self._structure_cache is None:
+            return
+        syms = self._structure_cache.get("symbols", [])
+        pos = self._structure_cache.get("positions", [])
+        alphas = self._structure_cache.get("alphas", [1.0] * len(syms))
+        for idx, sym in enumerate(syms):
+            mark = "●" if idx in self._selected_atoms else "○"
+            lbl = atom_label(idx, sym)
+            x, y, z = pos[idx] if idx < len(pos) else (0.0, 0.0, 0.0)
+            a_pct = int(round((alphas[idx] if idx < len(alphas) else 1.0) * 100.0))
+            line = f"{mark} {lbl:<5} ({x:6.2f},{y:6.2f},{z:6.2f})  {a_pct:3d}%"
+            self.atom_listbox.insert(tk.END, line)
+            if idx in self._selected_atoms:
+                self.atom_listbox.itemconfig(idx, fg="#2DD4BF", bg="#1B2832")
+            else:
+                self.atom_listbox.itemconfig(idx, fg="#E5E7EB", bg="#121418")
+        self.atom_listbox.yview_moveto(top_frac)
+
+    def _sync_selection_and_alphas(self, trigger_blender: bool = False) -> None:
+        if self._structure_cache is None:
+            self._refresh_atom_list()
+            return
+        syms = self._structure_cache.get("symbols", [])
+        n = len(syms)
+        prev_alphas = self._structure_cache.get("alphas")
+        alphas = compute_atom_alphas(
+            n_atoms=n,
+            selected=self._selected_atoms,
+            opacity=float(self.var_sel_opacity.get()),
+            invert=bool(self.var_alpha_invert.get()),
+        )
+        alphas_changed = prev_alphas != alphas
+        self._structure_cache["alphas"] = alphas
+        if alphas_changed:
+            self._written_struct_version = -1
+
+        if self._vp_scene is not None:
+            self._vp_scene.atom_alphas = np.asarray(alphas, dtype=np.float64)
+            self._vp_scene.selected_atoms = set(self._selected_atoms)
+        self._refresh_atom_list()
+        self._redraw_canvas()
+        if trigger_blender and (alphas_changed or any(a < 0.995 for a in alphas)):
+            self._request_blender_preview()
+
+    def _on_canvas_double_click(self, event: tk.Event) -> None:
+        self._dragging = False
+        self._drag_mode = None
+        if self._vp_scene is None:
+            return
+        rect = self._frame_rect()
+        if rect is None:
+            return
+        x0, y0, fw, fh = rect
+        u = (event.x - x0) / max(1.0, fw)
+        v = (event.y - y0) / max(1.0, fh)
+        if not (0.0 <= u <= 1.0 and 0.0 <= v <= 1.0):
+            return
+        res_w = max(16, int(self.var_res_w.get()))
+        res_h = max(16, int(self.var_res_h.get()))
+        picked = self._vp_scene.pick_atom_at(u, v, res_w, res_h, fw, fh)
+        if picked is None:
+            return
+        if picked in self._selected_atoms:
+            self._selected_atoms.remove(picked)
+        else:
+            self._selected_atoms.add(picked)
+        syms = self._structure_cache.get("symbols", []) if self._structure_cache else []
+        lbl = atom_label(picked, syms[picked]) if picked < len(syms) else str(picked + 1)
+        self.var_status.set(f"{lbl} toggled ({len(self._selected_atoms)} selected)")
+        self._sync_selection_and_alphas(trigger_blender=True)
 
     def _on_repr_changed(self) -> None:
         self._rebuild_viewport(reset_camera=False, trigger_preview=True)
@@ -1641,9 +1989,45 @@ class AtomicBlenderApp(tk.Tk):
         threading.Thread(target=worker, daemon=True).start()
 
     def _effective_cfg_for_cli(self, cfg: GuiRenderConfig) -> GuiRenderConfig:
-        """If the user orbited/zoomed the 3D viewport, materialize its camera as a temp ``view.json``."""
+        """Materialize interactive camera view.json and per-atom transparency structure JSON if active."""
+        eff_input = cfg.input_path
+        eff_rep = cfg.replicate
+        if self._structure_cache is not None:
+            alphas = self._structure_cache.get("alphas")
+            if isinstance(alphas, list) and any(a < 0.995 for a in alphas):
+                tmp_sfd, tmp_sname = tempfile.mkstemp(prefix="atomic_sel_", suffix=".json")
+                os.close(tmp_sfd)
+                tmp_spath = Path(tmp_sname)
+                tmp_spath.write_text(json.dumps(self._structure_cache), encoding="utf-8")
+                self._temp_view_files.append(tmp_spath)
+                eff_input = str(tmp_spath)
+                eff_rep = (1, 1, 1)
+
         if self._vp_scene is None or not self._use_interactive_cam:
-            return cfg
+            if eff_input == cfg.input_path:
+                return cfg
+            return GuiRenderConfig(
+                input_path=eff_input,
+                output_path=cfg.output_path,
+                style=cfg.style,
+                view_mode=cfg.view_mode,
+                view_preset=cfg.view_preset,
+                view_file=cfg.view_file,
+                fit_view=cfg.fit_view,
+                type_map=cfg.type_map,
+                replicate=eff_rep,
+                wrap=cfg.wrap,
+                crop_z_mode=cfg.crop_z_mode,
+                crop_z_custom=cfg.crop_z_custom,
+                bonds=cfg.bonds,
+                bond_color=cfg.bond_color,
+                radius_scale=cfg.radius_scale,
+                show_cell=cfg.show_cell,
+                resolution=cfg.resolution,
+                samples=cfg.samples,
+                blender_exe=cfg.blender_exe,
+                save_blend=cfg.save_blend,
+            )
         view_dict = self._vp_scene.to_view_dict(cfg.resolution[0], cfg.resolution[1])
         tmp_fd, tmp_name = tempfile.mkstemp(prefix="atomic_vp_", suffix=".json")
         os.close(tmp_fd)
@@ -1651,7 +2035,7 @@ class AtomicBlenderApp(tk.Tk):
         tmp_path.write_text(json.dumps(view_dict, indent=2), encoding="utf-8")
         self._temp_view_files.append(tmp_path)
         return GuiRenderConfig(
-            input_path=cfg.input_path,
+            input_path=eff_input,
             output_path=cfg.output_path,
             style=cfg.style,
             view_mode="file",
@@ -1659,7 +2043,7 @@ class AtomicBlenderApp(tk.Tk):
             view_file=str(tmp_path),
             fit_view=False,
             type_map=cfg.type_map,
-            replicate=cfg.replicate,
+            replicate=eff_rep,
             wrap=cfg.wrap,
             crop_z_mode=cfg.crop_z_mode,
             crop_z_custom=cfg.crop_z_custom,
@@ -1807,8 +2191,10 @@ class AtomicBlenderApp(tk.Tk):
             axes_labels=bool(self.var_axes_labels.get()),
             axes_pos=self._axes_pos,
             dark_backdrop=bool(self.var_dark_backdrop.get()),
+            selected_atoms=self._selected_atoms,
         )
         self._refresh_display_checks()
+        self._refresh_atom_list()
         if prev_cam is not None:
             vp.quat, vp.target, vp.ortho_scale = prev_cam
         else:
@@ -1871,6 +2257,7 @@ class AtomicBlenderApp(tk.Tk):
                 bool(self.var_show_cell.get()),
                 crop_z,
                 bool(self.var_fit_view.get()),
+                [round(float(a), 3) for a in self._structure_cache.get("alphas", [])],
             ]
         )
 
@@ -2232,6 +2619,15 @@ class AtomicBlenderApp(tk.Tk):
             nw = max(1, int(iw * scale))
             nh = max(1, int(ih * scale))
             resized = self._pil_image.resize((nw, nh), Image.Resampling.LANCZOS).copy()
+            if self._vp_scene is not None and (self.var_show_labels.get() or self._selected_atoms):
+                render_atom_labels_and_selection_overlay(
+                    resized,
+                    self._vp_scene,
+                    max(16, int(self.var_res_w.get())),
+                    max(16, int(self.var_res_h.get())),
+                    draw_labels=bool(self.var_show_labels.get()),
+                    draw_selection=bool(self._selected_atoms),
+                )
             if self.var_show_axes.get():
                 quat = self._vp_scene.quat if self._vp_scene is not None else (1.0, 0.0, 0.0, 0.0)
                 render_reference_axes_overlay(
@@ -2288,6 +2684,7 @@ class AtomicBlenderApp(tk.Tk):
             elif kind == "structure":
                 summary, neutral = payload
                 self.var_inspector.set(str(summary))
+                self._selected_atoms.clear()
                 self._structure_cache = neutral
                 self._structure_version += 1
                 self._use_interactive_cam = False

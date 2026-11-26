@@ -72,6 +72,7 @@ def make_material(
     coat_roughness: float = 0.1,
     ao_factor: float = 0.0,
     ao_distance: float = 2.5,
+    alpha: float = 1.0,
 ) -> bpy.types.Material:
     """Create a Principled BSDF material with optional metallic, SSS, clearcoat, and AO shading."""
     mat = bpy.data.materials.new(name)
@@ -131,6 +132,13 @@ def make_material(
             bsdf.inputs["Coat Roughness"].default_value = float(coat_roughness)
         elif "Clearcoat Roughness" in bsdf.inputs:
             bsdf.inputs["Clearcoat Roughness"].default_value = float(coat_roughness)
+    if "Alpha" in bsdf.inputs:
+        bsdf.inputs["Alpha"].default_value = max(0.0, min(1.0, float(alpha)))
+    if float(alpha) < 0.995 and hasattr(mat, "blend_method"):
+        try:
+            mat.blend_method = "BLEND"
+        except Exception:
+            pass
     return mat
 
 
@@ -721,32 +729,39 @@ def build_scene(
 
     symbols: list[str] = list(structure["symbols"])
     positions = [Vector(p) for p in structure["positions"]]
+    raw_alphas = structure.get("alphas")
+    if isinstance(raw_alphas, list) and len(raw_alphas) == len(symbols):
+        alphas = [max(0.02, min(1.0, float(a))) for a in raw_alphas]
+    else:
+        alphas = [1.0] * len(symbols)
     has_cell = bool(structure.get("has_cell", True))
     origin = Vector(structure.get("origin", [0.0, 0.0, 0.0]))
     cell_vecs = [Vector(v) for v in structure.get("cell", [[0, 0, 0], [0, 0, 0], [0, 0, 0]])]
 
-    # Atom meshes instanced per element
+    # Atom meshes instanced per (element, alpha) pair for per-atom transparency
     eff_radius_scale = float(style.get("elements", {}).get("radius_scale", 1.0)) * float(radius_scale)
     mesh_cfg = style.get("atom_mesh", {})
     segments = int(mesh_cfg.get("segments", 24))
     ring_count = int(mesh_cfg.get("ring_count", 12))
     smooth = bool(mesh_cfg.get("smooth", True))
 
-    proto_meshes: dict[str, bpy.types.Mesh] = {}
+    proto_meshes: dict[tuple[str, float], bpy.types.Mesh] = {}
     elem_radii_cache: dict[str, float] = {}
-    elem_materials: dict[str, bpy.types.Material] = {}
-    for elem in sorted(set(symbols)):
-        rad = resolve_element_radius(elem, style) * eff_radius_scale
-        elem_radii_cache[elem] = rad
+    elem_materials: dict[tuple[str, float], bpy.types.Material] = {}
+    for elem, a_val in sorted({(sym, round(a, 3)) for sym, a in zip(symbols, alphas)}):
+        if elem not in elem_radii_cache:
+            elem_radii_cache[elem] = resolve_element_radius(elem, style) * eff_radius_scale
+        rad = elem_radii_cache[elem]
         mat_kwargs = _element_material_kwargs(elem, style)
         mat = make_material(
-            f"mat_{elem}",
+            f"mat_{elem}_{int(round(a_val * 1000))}",
             resolve_element_color(elem, style),
+            alpha=a_val,
             **mat_kwargs,
         )
-        elem_materials[elem] = mat
-        proto_meshes[elem] = _create_uv_sphere_mesh(
-            name=f"proto_{elem}",
+        elem_materials[(elem, a_val)] = mat
+        proto_meshes[(elem, a_val)] = _create_uv_sphere_mesh(
+            name=f"proto_{elem}_{int(round(a_val * 1000))}",
             radius=rad,
             segments=segments,
             ring_count=ring_count,
@@ -754,8 +769,8 @@ def build_scene(
             mat=mat,
         )
 
-    for idx, (elem, pos) in enumerate(zip(symbols, positions)):
-        obj = bpy.data.objects.new(f"atom_{idx}_{elem}", proto_meshes[elem])
+    for idx, (elem, pos, a_val) in enumerate(zip(symbols, positions, alphas)):
+        obj = bpy.data.objects.new(f"atom_{idx}_{elem}", proto_meshes[(elem, round(a_val, 3))])
         obj.location = pos
         col.objects.link(obj)
 
@@ -779,19 +794,39 @@ def build_scene(
                 pi, pj = positions[i], positions[j]
                 pm = (pi + pj) * 0.5
                 _create_cylinder_mesh(
-                    pi, pm, b_rad, elem_materials[symbols[i]], f"bond_{i}_{j}_a", col, segments=b_seg, smooth=b_smooth
+                    pi,
+                    pm,
+                    b_rad,
+                    elem_materials[(symbols[i], round(alphas[i], 3))],
+                    f"bond_{i}_{j}_a",
+                    col,
+                    segments=b_seg,
+                    smooth=b_smooth,
                 )
                 _create_cylinder_mesh(
-                    pm, pj, b_rad, elem_materials[symbols[j]], f"bond_{i}_{j}_b", col, segments=b_seg, smooth=b_smooth
+                    pm,
+                    pj,
+                    b_rad,
+                    elem_materials[(symbols[j], round(alphas[j], 3))],
+                    f"bond_{i}_{j}_b",
+                    col,
+                    segments=b_seg,
+                    smooth=b_smooth,
                 )
         else:
-            bond_mat = make_material(
-                "mat_bond",
-                str(bond_cfg.get("color", "#9CA3AF")),
-                roughness=float(bond_cfg.get("roughness", 0.45)),
-                specular=float(bond_cfg.get("specular", 0.25)),
-            )
+            single_bond_mats: dict[float, bpy.types.Material] = {}
             for i, j in bond_pairs:
+                b_alpha = round(min(alphas[i], alphas[j]), 3)
+                bond_mat = single_bond_mats.get(b_alpha)
+                if bond_mat is None:
+                    bond_mat = make_material(
+                        f"mat_bond_{int(round(b_alpha * 1000))}",
+                        str(bond_cfg.get("color", "#9CA3AF")),
+                        roughness=float(bond_cfg.get("roughness", 0.45)),
+                        specular=float(bond_cfg.get("specular", 0.25)),
+                        alpha=b_alpha,
+                    )
+                    single_bond_mats[b_alpha] = bond_mat
                 _create_cylinder_mesh(
                     positions[i],
                     positions[j],

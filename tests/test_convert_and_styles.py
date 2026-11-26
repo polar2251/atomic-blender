@@ -601,6 +601,92 @@ class TestAtomicBlender(unittest.TestCase):
             finally:
                 app.destroy()
 
+    def test_selection_tab_double_click_opacity_and_dark_slider(self) -> None:
+        import numpy as np
+        from atomic_blender.gui import AtomicBlenderApp, DarkSlider, compute_atom_alphas
+
+        self.assertEqual(compute_atom_alphas(3, set(), 0.3, False), [1.0, 1.0, 1.0])
+        self.assertEqual(compute_atom_alphas(3, {0}, 0.3, False), [0.3, 1.0, 1.0])
+        self.assertEqual(compute_atom_alphas(3, {0}, 0.3, True), [1.0, 0.3, 0.3])
+
+        structure = {
+            "symbols": ["O", "H", "H"],
+            "positions": [[0.0, 0.0, 0.0], [1.8, 0.0, 0.0], [-1.8, 0.0, 0.0]],
+            "cell": [[10.0, 0.0, 0.0], [0.0, 10.0, 0.0], [0.0, 0.0, 10.0]],
+            "pbc": [False, False, False],
+            "has_cell": False,
+            "origin": [0.0, 0.0, 0.0],
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            xyz = Path(tmp) / "h2o.xyz"
+            xyz.write_text("3\n\nO 0 0 0\nH 1.8 0 0\nH -1.8 0 0\n", encoding="utf-8")
+
+            app = AtomicBlenderApp()
+            app.withdraw()
+            try:
+                app.var_blender.set("")
+                app.var_input.set(str(xyz))
+                app.canvas.configure(width=600, height=600)
+                app.update_idletasks()
+                app._structure_cache = dict(structure)
+                app._structure_version = 1
+                app._rebuild_viewport(reset_camera=True, trigger_preview=False)
+                assert app._vp_scene is not None
+
+                # Atom Labels moved out of View tab's Display Types into Selection tab
+                self.assertNotIn("atom_labels", app._display_checks)
+                app._switch_tab("selection")
+                self.assertEqual(app._active_tab, "selection")
+                self.assertEqual(app.tab_selection.winfo_manager(), "pack")
+
+                # Atom List matches 1-based labels (O1, H2, H3)
+                items = [app.atom_listbox.get(i) for i in range(app.atom_listbox.size())]
+                self.assertEqual(len(items), 3)
+                self.assertIn("O1", items[0])
+                self.assertIn("H2", items[1])
+                self.assertIn("H3", items[2])
+
+                # Toggle Atom Labels in Selection tab
+                app.var_show_labels.set(True)
+                app._on_labels_toggled()
+                self.assertTrue(app._vp_scene.show_labels)
+
+                # Double-click at canvas center hits O1 (index 0) and updates alphas + Selection list
+                app._vp_scene.quat = (1.0, 0.0, 0.0, 0.0)
+                app._vp_scene.target = np.zeros(3)
+                cx_px = app.canvas.winfo_width() // 2
+                cy_px = app.canvas.winfo_height() // 2
+                ev_dbl = type("E", (), {"x": cx_px, "y": cy_px, "state": 0})()
+                app._dragging = True
+                app._on_canvas_double_click(ev_dbl)  # type: ignore[arg-type]
+                self.assertFalse(app._dragging)
+                self.assertEqual(app._selected_atoms, {0})
+                self.assertEqual(app._structure_cache["alphas"], [0.3, 1.0, 1.0])
+
+                # Fade Unselected flips opacity to unselected atoms [1.0, 0.3, 0.3]
+                app.var_alpha_invert.set(True)
+                app._on_opacity_released()
+                self.assertEqual(app._structure_cache["alphas"], [1.0, 0.3, 0.3])
+
+                # Effective CLI config writes temp structure JSON carrying per-atom alphas
+                eff = app._effective_cfg_for_cli(app._collect_config())
+                self.assertTrue(eff.input_path.endswith(".json"))
+                payload = json.loads(Path(eff.input_path).read_text(encoding="utf-8"))
+                self.assertEqual(payload["alphas"], [1.0, 0.3, 0.3])
+
+                # Same Element with H2 selected selects H2 and H3
+                app._selected_atoms = {1}
+                app._select_same_element()
+                self.assertEqual(app._selected_atoms, {1, 2})
+
+                # DarkSlider programmatically updates variable
+                sl = DarkSlider(app, from_=0.05, to=1.0, variable=app.var_sel_opacity, command=app._on_opacity_changed)
+                sl.set_value(0.50)
+                self.assertAlmostEqual(app.var_sel_opacity.get(), 0.50, places=2)
+                self.assertEqual(app.var_sel_opacity_label.get(), "50%")
+            finally:
+                app.destroy()
+
 
 if __name__ == "__main__":
     unittest.main()
