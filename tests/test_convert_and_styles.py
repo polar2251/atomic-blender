@@ -292,19 +292,16 @@ class TestAtomicBlender(unittest.TestCase):
             app._structure_cache = structure
             app._rebuild_viewport(reset_camera=True)
             self.assertIsNotNone(app._vp_scene)
-            app._draw_3d_viewport()
-            items_before = app.canvas.find_all()
-            self.assertGreater(len(items_before), 5)
-            coords_before = [app.canvas.coords(cid) for cid in items_before if app.canvas.type(cid) == "oval"]
-            self.assertGreater(len(coords_before), 0)
+            img_before = app._vp_scene.render_image(300, 300, 800, 800, interactive=False)
+            self.assertEqual(img_before.size, (300, 300))
 
             app._vp_scene.orbit(0.4, 0.25)
             app._use_interactive_cam = True
-            app._draw_3d_viewport()
-            items_after = app.canvas.find_all()
-            self.assertGreater(len(items_after), 5)
-            coords_after = [app.canvas.coords(cid) for cid in items_after if app.canvas.type(cid) == "oval"]
-            self.assertNotEqual(coords_before, coords_after)
+            img_after = app._vp_scene.render_image(300, 300, 800, 800, interactive=False)
+            self.assertNotEqual(img_before.tobytes(), img_after.tobytes())
+
+            app._draw_3d_viewport(interactive=False)
+            self.assertGreater(len(app.canvas.find_all()), 0)
 
             # Verify _redraw_preview runs cleanly without AttributeError
             app._redraw_preview()

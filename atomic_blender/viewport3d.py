@@ -1,4 +1,4 @@
-"""Lightweight NumPy 3D orthographic camera and scene model for the desktop GUI viewport.
+"""Lightweight NumPy/Pillow 3D orthographic camera and shaded viewport renderer.
 
 Matches Blender's camera quaternion and orthographic framing math so views
 rotated interactively in the desktop GUI reproduce 1:1 in Blender Cycles.
@@ -7,7 +7,7 @@ rotated interactively in the desktop GUI reproduce 1:1 in Blender Cycles.
 from __future__ import annotations
 
 from collections import defaultdict
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import math
 from typing import Any
 
@@ -15,9 +15,17 @@ import numpy as np
 
 from atomic_blender.elements import (
     COVALENT_RADII,
+    METAL_ELEMENTS,
     resolve_element_color,
     resolve_element_radius,
 )
+
+try:
+    from PIL import Image, ImageDraw
+
+    _HAS_PIL = True
+except Exception:
+    _HAS_PIL = False
 
 Quat = tuple[float, float, float, float]
 
@@ -150,9 +158,13 @@ def orbit_quat(q: Quat, d_yaw_rad: float, d_pitch_rad: float) -> Quat:
     return quat_mul(q_pitch, q_next)
 
 
-def _shade_hex(hex_color: str, factor: float, mix_white: float = 0.0) -> str:
+def _hex_to_rgb(hex_color: str) -> tuple[int, int, int]:
     h = hex_color.lstrip("#")
-    r, g, b = int(h[0:2], 16), int(h[2:4], 16), int(h[4:6], 16)
+    return (int(h[0:2], 16), int(h[2:4], 16), int(h[4:6], 16))
+
+
+def _shade_hex(hex_color: str, factor: float, mix_white: float = 0.0) -> str:
+    r, g, b = _hex_to_rgb(hex_color)
     if mix_white > 0.0:
         r = int(round(r + (255 - r) * mix_white))
         g = int(round(g + (255 - g) * mix_white))
@@ -161,6 +173,105 @@ def _shade_hex(hex_color: str, factor: float, mix_white: float = 0.0) -> str:
     g = max(0, min(255, int(round(g * factor))))
     b = max(0, min(255, int(round(b * factor))))
     return f"#{r:02X}{g:02X}{b:02X}"
+
+
+def _shade_rgba_tuple(hex_color: str, factor: float, mix_white: float = 0.0) -> tuple[int, int, int, int]:
+    r, g, b = _hex_to_rgb(_shade_hex(hex_color, factor, mix_white))
+    return (r, g, b, 255)
+
+
+def build_sphere_sprite(
+    hex_color: str,
+    roughness: float = 0.35,
+    specular: float = 0.4,
+    metallic: float = 0.0,
+    subsurface_weight: float = 0.0,
+    coat_weight: float = 0.0,
+    ao_factor: float = 0.0,
+    has_rim: bool = False,
+    depth_shade: float = 1.0,
+    size: int = 192,
+) -> Any:
+    """Render an anti-aliased 3D PBR-shaded sphere sprite as a ``PIL.Image`` (RGBA)."""
+    lin = np.linspace(-1.0, 1.0, size, dtype=np.float32)
+    u, v = np.meshgrid(lin, lin)
+    r2 = u * u + v * v
+    dist = np.sqrt(r2)
+    nz = np.sqrt(np.maximum(0.0, 1.0 - r2))
+    nx, ny = u, -v
+
+    # Anti-aliased sub-pixel alpha at the silhouette edge
+    alpha = np.clip((1.0 - dist) * (size * 0.5) + 0.5, 0.0, 1.0)
+
+    r_s, g_s, b_s = _hex_to_rgb(hex_color)
+    base_rgb = np.array([r_s / 255.0, g_s / 255.0, b_s / 255.0], dtype=np.float32) ** 2.2
+
+    # Key Sun light (top-left front), Fill light (lower-right), View (0, 0, 1)
+    l1 = np.array([-0.42, 0.54, 0.73], dtype=np.float32)
+    l1 /= float(np.linalg.norm(l1))
+    l2 = np.array([0.62, -0.35, 0.70], dtype=np.float32)
+    l2 /= float(np.linalg.norm(l2))
+
+    ndotl1_raw = nx * l1[0] + ny * l1[1] + nz * l1[2]
+    ndotl1 = np.maximum(0.0, ndotl1_raw)
+    ndotl2 = np.maximum(0.0, nx * l2[0] + ny * l2[1] + nz * l2[2])
+
+    # Wrap lighting simulates subtle subsurface scattering on non-metals
+    sss = float(np.clip(subsurface_weight * 1.4, 0.0, 0.45))
+    diff1 = np.maximum(0.0, (ndotl1_raw + sss) / (1.0 + sss))
+
+    # Grazing edge darkening (AO / spherical curvature) + Fresnel rim light
+    ao_rim = 1.0 - float(np.clip(ao_factor, 0.0, 0.8)) * 0.45 * ((1.0 - nz) ** 1.4)
+    rim_boost = (0.28 if has_rim else 0.10) * ((1.0 - nz) ** 2.8)
+
+    ambient = 0.30 * (1.0 - 0.30 * metallic)
+    diffuse_weight = 1.0 - 0.45 * metallic
+    lit_factor = (ambient + diffuse_weight * (0.72 * diff1 + 0.24 * ndotl2)) * ao_rim * depth_shade
+
+    # Blinn-Phong specular highlight
+    h_vec = l1 + np.array([0.0, 0.0, 1.0], dtype=np.float32)
+    h_vec /= float(np.linalg.norm(h_vec))
+    ndoth = np.maximum(0.0, nx * h_vec[0] + ny * h_vec[1] + nz * h_vec[2])
+    shininess = max(8.0, 220.0 * ((1.0 - float(np.clip(roughness, 0.05, 0.95))) ** 2))
+    spec = (ndoth ** shininess) * float(specular) * (0.70 + 0.60 * metallic)
+
+    if coat_weight > 0.0:
+        spec = spec + (ndoth ** 95.0) * float(coat_weight) * 0.38
+
+    spec_tint = (1.0 - metallic) * np.array([1.0, 1.0, 1.0], dtype=np.float32) + metallic * np.clip(
+        base_rgb * 1.35, 0.0, 1.0
+    )
+
+    rgb_lin = (
+        base_rgb[None, None, :] * lit_factor[:, :, None]
+        + spec_tint[None, None, :] * spec[:, :, None]
+        + (0.7 * base_rgb + 0.3)[None, None, :] * rim_boost[:, :, None] * depth_shade
+    )
+    rgb_lin = rgb_lin / (1.0 + 0.12 * rgb_lin)
+    rgb_srgb = np.clip(np.power(np.clip(rgb_lin, 0.0, 1.0), 1.0 / 2.2) * 255.0, 0.0, 255.0).astype(np.uint8)
+    alpha_u8 = np.clip(alpha * 255.0, 0.0, 255.0).astype(np.uint8)
+    rgba = np.dstack((rgb_srgb, alpha_u8))
+    return Image.fromarray(rgba, mode="RGBA")
+
+
+def _blit_rgba(canvas: Any, sprite: Any, x0: int, y0: int) -> None:
+    """Composite ``sprite`` onto ``canvas`` at ``(x0, y0)`` clipping to canvas bounds."""
+    cw, ch = canvas.size
+    sw, sh = sprite.size
+    if x0 >= cw or y0 >= ch or x0 + sw <= 0 or y0 + sh <= 0:
+        return
+    sx0 = max(0, -x0)
+    sy0 = max(0, -y0)
+    dx0 = max(0, x0)
+    dy0 = max(0, y0)
+    sx1 = min(sw, cw - x0)
+    sy1 = min(sh, ch - y0)
+    if sx1 <= sx0 or sy1 <= sy0:
+        return
+    if sx0 == 0 and sy0 == 0 and sx1 == sw and sy1 == sh:
+        canvas.alpha_composite(sprite, dest=(dx0, dy0))
+    else:
+        canvas.alpha_composite(sprite.crop((sx0, sy0, sx1, sy1)), dest=(dx0, dy0))
 
 
 def _find_bonds(
@@ -260,6 +371,8 @@ class ViewportScene:
     target: np.ndarray = None  # type: ignore[assignment]
     ortho_scale: float = 20.0
     margin: float = 1.08
+    _base_sprites: dict[tuple[str, int], Any] = field(default_factory=dict)
+    _resized_sprites: dict[tuple[str, int, int], Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         if self.target is None:
@@ -282,16 +395,45 @@ class ViewportScene:
         cell_vecs = np.asarray(structure.get("cell", [[0, 0, 0], [0, 0, 0], [0, 0, 0]]), dtype=np.float64)
 
         eff_scale = float(style.get("elements", {}).get("radius_scale", 1.0)) * float(radius_scale)
+        mat_cfg = style.get("material", {})
+        has_rim = isinstance(style.get("lighting", {}).get("rim"), dict)
+
         elem_r: dict[str, float] = {}
         elem_c: dict[str, str] = {}
         elem_out: dict[str, str] = {}
         elem_hi: dict[str, str] = {}
+        base_sprites: dict[tuple[str, int], Any] = {}
+
         for sym in set(symbols):
             c = resolve_element_color(sym, style)
             elem_c[sym] = c
             elem_out[sym] = _shade_hex(c, 0.62)
             elem_hi[sym] = _shade_hex(c, 1.0, mix_white=0.42)
             elem_r[sym] = resolve_element_radius(sym, style) * eff_scale
+
+            if _HAS_PIL:
+                profile = mat_cfg.get("metal" if sym in METAL_ELEMENTS else "nonmetal", {})
+                if not isinstance(profile, dict):
+                    profile = {}
+                roughness = float(profile.get("roughness", mat_cfg.get("roughness", 0.35)))
+                specular = float(profile.get("specular", mat_cfg.get("specular", 0.4)))
+                metallic = float(profile.get("metallic", mat_cfg.get("metallic", 0.0)))
+                sss = float(profile.get("subsurface_weight", mat_cfg.get("subsurface_weight", 0.0)))
+                coat = float(profile.get("coat_weight", mat_cfg.get("coat_weight", 0.0)))
+                ao_factor = float(mat_cfg.get("ao_factor", 0.0))
+                for bucket, d_shade in enumerate((0.88, 0.94, 1.00)):
+                    base_sprites[(sym, bucket)] = build_sphere_sprite(
+                        hex_color=c,
+                        roughness=roughness,
+                        specular=specular,
+                        metallic=metallic,
+                        subsurface_weight=sss,
+                        coat_weight=coat,
+                        ao_factor=ao_factor,
+                        has_rim=has_rim,
+                        depth_shade=d_shade,
+                        size=192,
+                    )
 
         radii = np.array([elem_r[s] for s in symbols], dtype=np.float64)
         colors = [elem_c[s] for s in symbols]
@@ -348,7 +490,22 @@ class ViewportScene:
             origin=origin,
             cell_vecs=cell_vecs,
             margin=float(cam_cfg.get("margin", 1.08)),
+            _base_sprites=base_sprites,
         )
+
+    def _get_sprite(self, symbol: str, diameter_px: int, bucket: int) -> Any:
+        key = (symbol, diameter_px, bucket)
+        cached = self._resized_sprites.get(key)
+        if cached is not None:
+            return cached
+        base = self._base_sprites.get((symbol, bucket))
+        if base is None:
+            return None
+        if len(self._resized_sprites) > 600:
+            self._resized_sprites.clear()
+        resized = base.resize((diameter_px, diameter_px), Image.Resampling.LANCZOS)
+        self._resized_sprites[key] = resized
+        return resized
 
     def _framing_points(self, crop_z: tuple[float, float] | None) -> tuple[np.ndarray, np.ndarray]:
         if self.has_cell:
@@ -422,6 +579,161 @@ class ViewportScene:
 
     def zoom(self, factor: float) -> None:
         self.ortho_scale = max(0.5, min(2000.0, self.ortho_scale * factor))
+
+    def render_image(
+        self,
+        canvas_w: int,
+        canvas_h: int,
+        res_w: int,
+        res_h: int,
+        interactive: bool = False,
+    ) -> Any:
+        """Render an anti-aliased shaded 3D view into an RGBA ``PIL.Image``."""
+        if not _HAS_PIL:
+            raise RuntimeError("Pillow is required for shaded image rendering.")
+
+        cw = max(16, int(canvas_w))
+        ch = max(16, int(canvas_h))
+        ss = 1.0 if interactive else (1.5 if max(cw, ch) <= 1100 else 1.25)
+        rw = max(16, int(round(cw * ss)))
+        rh = max(16, int(round(ch * ss)))
+
+        # Background canvas + clipped camera output frame
+        img = Image.new("RGBA", (rw, rh), (232, 234, 237, 255))
+        pad = min(24.0 * ss, min(rw, rh) * 0.2)
+        scale = max(1e-4, min((rw - pad) / max(1, res_w), (rh - pad) / max(1, res_h)))
+        fw = res_w * scale
+        fh = res_h * scale
+        fw_i = max(4, int(round(fw)))
+        fh_i = max(4, int(round(fh)))
+        frame = Image.new("RGBA", (fw_i, fh_i), (250, 251, 252, 255))
+        draw = ImageDraw.Draw(frame, "RGBA")
+        cx0 = fw_i * 0.5
+        cy0 = fh_i * 0.5
+
+        px_per_a = (fw / max(1e-3, self.ortho_scale)) if res_w >= res_h else (fh / max(1e-3, self.ortho_scale))
+        right, up, back = quat_to_axes(self.quat)
+
+        draw_items: list[tuple[float, int, Any]] = []
+
+        # 1. Cell wireframe edges
+        if len(self.cell_edges) > 0:
+            ce_rel = self.cell_edges - self.target
+            ce_x = cx0 + (ce_rel @ right) * px_per_a
+            ce_y = cy0 - (ce_rel @ up) * px_per_a
+            ce_z = ce_rel @ back
+            cell_w = max(1, min(4, int(round(0.11 * px_per_a))))
+            c_rgba = _shade_rgba_tuple(self.cell_color, 1.0)
+            for idx in range(len(self.cell_edges)):
+                z_mid = float(0.5 * (ce_z[idx, 0] + ce_z[idx, 1]))
+                draw_items.append((
+                    z_mid,
+                    0,
+                    ("cell", float(ce_x[idx, 0]), float(ce_y[idx, 0]), float(ce_x[idx, 1]), float(ce_y[idx, 1]), cell_w, c_rgba),
+                ))
+
+        # 2. Atoms & surface-trimmed, depth-subdivided shaded bonds
+        if len(self.positions) > 0:
+            rel = self.positions - self.target
+            ax = cx0 + (rel @ right) * px_per_a
+            ay = cy0 - (rel @ up) * px_per_a
+            az = rel @ back
+            z_min, z_max = float(np.min(az)), float(np.max(az))
+            z_span = max(1e-3, z_max - z_min)
+
+            if len(self.bond_i) > 0:
+                bond_w = max(2, min(20, int(round(2.0 * self.bond_radius * px_per_a))))
+                bi, bj = self.bond_i, self.bond_j
+                for k in range(len(bi)):
+                    i_idx, j_idx = int(bi[k]), int(bj[k])
+                    pi3 = self.positions[i_idx]
+                    pj3 = self.positions[j_idx]
+                    dv = pj3 - pi3
+                    dist3 = float(np.linalg.norm(dv))
+                    if dist3 < 1e-6:
+                        continue
+                    d_hat = dv / dist3
+                    # Trim bond endpoints inside sphere surfaces for clean 3D junction occlusion
+                    trim_i = min(0.55 * float(self.radii[i_idx]), dist3 * 0.45)
+                    trim_j = min(0.55 * float(self.radii[j_idx]), dist3 * 0.45)
+                    if dist3 - trim_i - trim_j <= 0.02:
+                        continue
+                    p_start = pi3 + d_hat * trim_i
+                    p_end = pj3 - d_hat * trim_j
+                    p_mid = 0.5 * (pi3 + pj3)
+
+                    if self.bond_color_mode == "bicolor":
+                        pts3 = [
+                            (p_start, p_mid, self.colors[i_idx]),
+                            (p_mid, p_end, self.colors[j_idx]),
+                        ]
+                    else:
+                        pts3 = [(p_start, p_end, self.single_bond_color)]
+                    for s0, s1, b_hex in pts3:
+                        r0 = s0 - self.target
+                        r1 = s1 - self.target
+                        sx0 = float(cx0 + np.dot(r0, right) * px_per_a)
+                        sy0 = float(cy0 - np.dot(r0, up) * px_per_a)
+                        sz0 = float(np.dot(r0, back))
+                        sx1 = float(cx0 + np.dot(r1, right) * px_per_a)
+                        sy1 = float(cy0 - np.dot(r1, up) * px_per_a)
+                        sz1 = float(np.dot(r1, back))
+                        draw_items.append((
+                            0.5 * (sz0 + sz1),
+                            1,
+                            ("bond", sx0, sy0, sx1, sy1, bond_w, b_hex),
+                        ))
+
+            for idx in range(len(self.positions)):
+                diam_px = max(2, int(round(2.0 * float(self.radii[idx]) * px_per_a)))
+                z_norm = (float(az[idx]) - z_min) / z_span
+                bucket = min(2, max(0, int(z_norm * 2.999)))
+                draw_items.append((float(az[idx]), 2, ("atom", float(ax[idx]), float(ay[idx]), diam_px, idx, bucket)))
+
+        draw_items.sort(key=lambda item: (item[0], item[1]))
+
+        # Two-phase render: draw vector segments onto `draw`, flushing before compositing sprites
+        for _z, _ord, payload in draw_items:
+            tag = payload[0]
+            if tag == "cell":
+                _, px0, py0, px1, py1, w, c_rgba = payload
+                draw.line((px0, py0, px1, py1), fill=c_rgba, width=w)
+            elif tag == "bond":
+                _, px0, py0, px1, py1, bw, b_hex = payload
+                body_col = _shade_rgba_tuple(b_hex, 0.90)
+                hi_col = _shade_rgba_tuple(b_hex, 1.0, mix_white=0.45)
+                draw.line((px0, py0, px1, py1), fill=body_col, width=bw)
+                r_cap = bw * 0.45
+                if r_cap >= 1.2:
+                    draw.ellipse((px0 - r_cap, py0 - r_cap, px0 + r_cap, py0 + r_cap), fill=body_col)
+                    draw.ellipse((px1 - r_cap, py1 - r_cap, px1 + r_cap, py1 + r_cap), fill=body_col)
+                if bw >= 3:
+                    off = max(0.8, bw * 0.16)
+                    draw.line(
+                        (px0 - off, py0 - off, px1 - off, py1 - off),
+                        fill=hi_col,
+                        width=max(1, int(round(bw * 0.28))),
+                    )
+            else:
+                _, sx, sy, diam_px, idx, bucket = payload
+                sprite = self._get_sprite(self.symbols[idx], diam_px, bucket)
+                if sprite is not None:
+                    _blit_rgba(frame, sprite, int(round(sx - diam_px * 0.5)), int(round(sy - diam_px * 0.5)))
+
+        # Composite clipped camera frame onto canvas and draw crisp border
+        fx0 = int(round((rw - fw_i) * 0.5))
+        fy0 = int(round((rh - fh_i) * 0.5))
+        img.paste(frame, (fx0, fy0))
+        outer_draw = ImageDraw.Draw(img, "RGBA")
+        outer_draw.rectangle(
+            (fx0, fy0, fx0 + fw_i - 1, fy0 + fh_i - 1),
+            outline=(148, 163, 184, 255),
+            width=max(1, int(ss)),
+        )
+
+        if ss > 1.0:
+            img = img.resize((cw, ch), Image.Resampling.LANCZOS)
+        return img
 
     def to_view_dict(
         self,
