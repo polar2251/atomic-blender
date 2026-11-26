@@ -416,12 +416,22 @@ def _apply_thin_outline(
     return Image.fromarray(np.clip(arr, 0.0, 255.0).astype(np.uint8), mode="RGBA")
 
 
-def _blit_rgba(canvas: Any, sprite: Any, x0: int, y0: int) -> None:
+def atom_label(idx: int, symbol: str) -> str:
+    """Return 1-based indexed atom label shared between viewport and atom list."""
+    return f"{symbol}{idx + 1}"
+
+
+def _blit_rgba(canvas: Any, sprite: Any, x0: int, y0: int, alpha_scale: float = 1.0) -> None:
     """Composite ``sprite`` onto ``canvas`` at ``(x0, y0)`` clipping to canvas bounds."""
     cw, ch = canvas.size
     sw, sh = sprite.size
-    if x0 >= cw or y0 >= ch or x0 + sw <= 0 or y0 + sh <= 0:
+    if x0 >= cw or y0 >= ch or x0 + sw <= 0 or y0 + sh <= 0 or alpha_scale <= 0.01:
         return
+    if alpha_scale < 0.995:
+        s_copy = sprite.copy()
+        a_band = s_copy.getchannel("A").point(lambda v, f=float(alpha_scale): int(round(v * f)))
+        s_copy.putalpha(a_band)
+        sprite = s_copy
     sx0 = max(0, -x0)
     sy0 = max(0, -y0)
     dx0 = max(0, x0)
@@ -543,10 +553,15 @@ class ViewportScene:
     axes_labels: bool = True
     axes_pos: tuple[float, float] = (0.12, 0.86)
     dark_backdrop: bool = True
+    atom_alphas: np.ndarray = None  # type: ignore[assignment]
+    selected_atoms: set[int] = field(default_factory=set)
+    show_selection_highlight: bool = True
 
     def __post_init__(self) -> None:
         if self.target is None:
             self.target = np.zeros(3, dtype=np.float64)
+        if self.atom_alphas is None or len(self.atom_alphas) != len(self.positions):
+            self.atom_alphas = np.ones(len(self.positions), dtype=np.float64)
 
     @classmethod
     def from_neutral_dict(
@@ -563,9 +578,17 @@ class ViewportScene:
         axes_labels: bool = True,
         axes_pos: tuple[float, float] = (0.12, 0.86),
         dark_backdrop: bool = True,
+        atom_alphas: Any = None,
+        selected_atoms: set[int] | None = None,
+        show_selection_highlight: bool = True,
     ) -> ViewportScene:
         symbols = list(structure["symbols"])
         positions = np.asarray(structure["positions"], dtype=np.float64).reshape(-1, 3)
+        raw_alphas = atom_alphas if atom_alphas is not None else structure.get("alphas")
+        if raw_alphas is not None and len(raw_alphas) == len(symbols):
+            alphas_arr = np.clip(np.asarray(raw_alphas, dtype=np.float64), 0.02, 1.0)
+        else:
+            alphas_arr = np.ones(len(symbols), dtype=np.float64)
         has_cell = bool(structure.get("has_cell", True))
         origin = np.asarray(structure.get("origin", [0.0, 0.0, 0.0]), dtype=np.float64)
         cell_vecs = np.asarray(structure.get("cell", [[0, 0, 0], [0, 0, 0], [0, 0, 0]]), dtype=np.float64)
@@ -680,6 +703,9 @@ class ViewportScene:
             axes_labels=axes_labels,
             axes_pos=axes_pos,
             dark_backdrop=dark_backdrop,
+            atom_alphas=alphas_arr,
+            selected_atoms=set(selected_atoms or ()),
+            show_selection_highlight=show_selection_highlight,
         )
 
     def _get_sprite(
@@ -787,6 +813,44 @@ class ViewportScene:
     def zoom(self, factor: float) -> None:
         self.ortho_scale = max(0.5, min(2000.0, self.ortho_scale * factor))
 
+    def pick_atom_at(
+        self,
+        u_norm: float,
+        v_norm: float,
+        res_w: int,
+        res_h: int,
+        frame_w_px: float = 600.0,
+        frame_h_px: float = 600.0,
+    ) -> int | None:
+        """Return index of the front-most atom hit at normalized frame coordinates ``(u_norm, v_norm)``."""
+        if not self.show_atoms or len(self.positions) == 0:
+            return None
+        fw = max(4.0, float(frame_w_px))
+        fh = max(4.0, float(frame_h_px))
+        cx0 = fw * 0.5
+        cy0 = fh * 0.5
+        px_per_a = (fw / max(1e-3, self.ortho_scale)) if res_w >= res_h else (fh / max(1e-3, self.ortho_scale))
+        right, up, back = quat_to_axes(self.quat)
+        rel = self.positions - self.target
+        ax = cx0 + (rel @ right) * px_per_a
+        ay = cy0 - (rel @ up) * px_per_a
+        az = rel @ back
+
+        px = float(u_norm) * fw
+        py = float(v_norm) * fh
+        best_idx: int | None = None
+        best_z = -1e18
+        for idx in range(len(self.positions)):
+            r_px = max(7.0, float(self.radii[idx]) * px_per_a)
+            dx = px - float(ax[idx])
+            dy = py - float(ay[idx])
+            if dx * dx + dy * dy <= r_px * r_px:
+                z_val = float(az[idx])
+                if best_idx is None or z_val > best_z:
+                    best_z = z_val
+                    best_idx = idx
+        return best_idx
+
     def render_image(
         self,
         canvas_w: int,
@@ -877,13 +941,19 @@ class ViewportScene:
                     p_mid = 0.5 * (pi3 + pj3)
 
                     if self.bond_color_mode == "bicolor":
+                        a_i = float(self.atom_alphas[i_idx]) if i_idx < len(self.atom_alphas) else 1.0
+                        a_j = float(self.atom_alphas[j_idx]) if j_idx < len(self.atom_alphas) else 1.0
                         pts3 = [
-                            (p_start, p_mid, self.colors[i_idx]),
-                            (p_mid, p_end, self.colors[j_idx]),
+                            (p_start, p_mid, self.colors[i_idx], a_i),
+                            (p_mid, p_end, self.colors[j_idx], a_j),
                         ]
                     else:
-                        pts3 = [(p_start, p_end, self.single_bond_color)]
-                    for s0, s1, b_hex in pts3:
+                        a_ij = min(
+                            float(self.atom_alphas[i_idx]) if i_idx < len(self.atom_alphas) else 1.0,
+                            float(self.atom_alphas[j_idx]) if j_idx < len(self.atom_alphas) else 1.0,
+                        )
+                        pts3 = [(p_start, p_end, self.single_bond_color, a_ij)]
+                    for s0, s1, b_hex, b_alpha in pts3:
                         r0 = s0 - self.target
                         r1 = s1 - self.target
                         sx0 = float(cx0 + np.dot(r0, right) * px_per_a)
@@ -895,7 +965,7 @@ class ViewportScene:
                         draw_items.append((
                             0.5 * (sz0 + sz1),
                             1,
-                            ("bond", sx0, sy0, sx1, sy1, bond_w, b_hex),
+                            ("bond", sx0, sy0, sx1, sy1, bond_w, b_hex, b_alpha),
                         ))
 
             for idx in range(len(self.positions)):
@@ -913,9 +983,12 @@ class ViewportScene:
                 _, px0, py0, px1, py1, w, c_rgba = payload
                 draw.line((px0, py0, px1, py1), fill=c_rgba, width=w)
             elif tag == "bond":
-                _, px0, py0, px1, py1, bw, b_hex = payload
-                body_col = _shade_rgba_tuple(b_hex, 0.90)
-                hi_col = _shade_rgba_tuple(b_hex, 1.0, mix_white=0.45)
+                _, px0, py0, px1, py1, bw, b_hex, b_alpha = payload
+                a_u8 = max(8, min(255, int(round(255.0 * b_alpha))))
+                br, bg_c, bb, _ = _shade_rgba_tuple(b_hex, 0.90)
+                hr, hg, hb, _ = _shade_rgba_tuple(b_hex, 1.0, mix_white=0.45)
+                body_col = (br, bg_c, bb, a_u8)
+                hi_col = (hr, hg, hb, a_u8)
                 draw.line((px0, py0, px1, py1), fill=body_col, width=bw)
                 r_cap = bw * 0.45
                 if r_cap >= 1.2:
@@ -932,10 +1005,25 @@ class ViewportScene:
                 _, sx, sy, diam_px, idx, bucket = payload
                 sprite = self._get_sprite(self.symbols[idx], diam_px, bucket, interactive=interactive)
                 if sprite is not None:
-                    _blit_rgba(frame, sprite, int(round(sx - diam_px * 0.5)), int(round(sy - diam_px * 0.5)))
-                    if self.show_labels and diam_px >= 12:
-                        lbl = self.symbols[idx]
-                        lfont = _load_overlay_font(max(9, min(22, int(round(diam_px * 0.42)))))
+                    a_scale = float(self.atom_alphas[idx]) if idx < len(self.atom_alphas) else 1.0
+                    _blit_rgba(
+                        frame,
+                        sprite,
+                        int(round(sx - diam_px * 0.5)),
+                        int(round(sy - diam_px * 0.5)),
+                        alpha_scale=a_scale,
+                    )
+                    if self.show_selection_highlight and idx in self.selected_atoms and diam_px >= 6:
+                        r_ring = diam_px * 0.5 + 1.5
+                        draw.ellipse(
+                            (sx - r_ring, sy - r_ring, sx + r_ring, sy + r_ring),
+                            outline=(45, 212, 191, 240),
+                            width=max(2, min(4, int(round(diam_px * 0.08)))),
+                        )
+                    if self.show_labels and diam_px >= 10:
+                        lbl = atom_label(idx, self.symbols[idx])
+                        px_font = max(9, min(18, int(round(diam_px * (0.34 if len(lbl) >= 3 else 0.40)))))
+                        lfont = _load_overlay_font(px_font)
                         if lfont is not None:
                             bbox = draw.textbbox((0, 0), lbl, font=lfont)
                             tw_l = bbox[2] - bbox[0]
@@ -943,7 +1031,7 @@ class ViewportScene:
                             ar, ag, ab = _hex_to_rgb(self.colors[idx])
                             alum = 0.299 * ar + 0.587 * ag + 0.114 * ab
                             tfill = (15, 23, 42, 245) if alum > 155.0 else (248, 250, 252, 245)
-                            tstroke = (248, 250, 252, 200) if alum > 155.0 else (15, 23, 42, 220)
+                            tstroke = (248, 250, 252, 210) if alum > 155.0 else (15, 23, 42, 225)
                             draw.text(
                                 (sx - tw_l * 0.5 - bbox[0], sy - th_l * 0.5 - bbox[1]),
                                 lbl,
@@ -1002,3 +1090,58 @@ class ViewportScene:
             "resolution": [int(res_x), int(res_y)],
             "fit_to_scene": False,
         }
+
+
+def render_atom_labels_and_selection_overlay(
+    target_img: Any,
+    vp: ViewportScene,
+    res_w: int,
+    res_h: int,
+    draw_labels: bool = True,
+    draw_selection: bool = True,
+) -> None:
+    """Composite indexed atom labels and selection rings onto a rendered preview image."""
+    if not _HAS_PIL or len(vp.positions) == 0 or (not draw_labels and not draw_selection):
+        return
+    fw, fh = target_img.size
+    cx0 = fw * 0.5
+    cy0 = fh * 0.5
+    px_per_a = (fw / max(1e-3, vp.ortho_scale)) if res_w >= res_h else (fh / max(1e-3, vp.ortho_scale))
+    right, up, back = quat_to_axes(vp.quat)
+    rel = vp.positions - vp.target
+    ax = cx0 + (rel @ right) * px_per_a
+    ay = cy0 - (rel @ up) * px_per_a
+    az = rel @ back
+
+    draw = ImageDraw.Draw(target_img, "RGBA")
+    for idx in sorted(range(len(vp.positions)), key=lambda i: float(az[i])):
+        sx = float(ax[idx])
+        sy = float(ay[idx])
+        diam_px = max(2, int(round(2.0 * float(vp.radii[idx]) * px_per_a)))
+        if draw_selection and idx in vp.selected_atoms and diam_px >= 6:
+            r_ring = diam_px * 0.5 + 1.5
+            draw.ellipse(
+                (sx - r_ring, sy - r_ring, sx + r_ring, sy + r_ring),
+                outline=(45, 212, 191, 240),
+                width=max(2, min(4, int(round(diam_px * 0.08)))),
+            )
+        if draw_labels and diam_px >= 10:
+            lbl = atom_label(idx, vp.symbols[idx])
+            px_font = max(9, min(18, int(round(diam_px * (0.34 if len(lbl) >= 3 else 0.40)))))
+            lfont = _load_overlay_font(px_font)
+            if lfont is not None:
+                bbox = draw.textbbox((0, 0), lbl, font=lfont)
+                tw_l = bbox[2] - bbox[0]
+                th_l = bbox[3] - bbox[1]
+                ar, ag, ab = _hex_to_rgb(vp.colors[idx])
+                alum = 0.299 * ar + 0.587 * ag + 0.114 * ab
+                tfill = (15, 23, 42, 245) if alum > 155.0 else (248, 250, 252, 245)
+                tstroke = (248, 250, 252, 210) if alum > 155.0 else (15, 23, 42, 225)
+                draw.text(
+                    (sx - tw_l * 0.5 - bbox[0], sy - th_l * 0.5 - bbox[1]),
+                    lbl,
+                    font=lfont,
+                    fill=tfill,
+                    stroke_width=1,
+                    stroke_fill=tstroke,
+                )
