@@ -17,7 +17,7 @@ from typing import Any
 
 from atomic_blender.cli import _collect_style_files, find_blender_executable
 from atomic_blender.convert import read_structure
-from atomic_blender.elements import VIEW_PRESETS
+from atomic_blender.elements import VIEW_PRESETS, classify_dropped_file
 
 try:
     from PIL import Image, ImageTk  # type: ignore
@@ -209,6 +209,10 @@ class AtomicBlenderApp(tk.Tk):
 
         self._init_variables(initial_input)
         self._build_layout()
+        self._wndproc_ref: Any = None
+        self._orig_wndproc: Any = None
+        self.update_idletasks()
+        self._enable_file_drop()
         self.after(100, self._poll_queue)
         if initial_input:
             self._schedule_inspect()
@@ -710,7 +714,8 @@ class AtomicBlenderApp(tk.Tk):
             self.canvas.create_text(
                 cw // 2,
                 ch // 2,
-                text="Select a structure and click 'Render & Preview'",
+                text="Drag & drop a structure file (or view.json / style.json) anywhere on this window\nor click 'Browse...' and 'Render & Preview'",
+                justify=tk.CENTER,
                 fill="#555555",
             )
             return
@@ -753,6 +758,125 @@ class AtomicBlenderApp(tk.Tk):
                     self._set_busy(False, f"Opening {target_path.name} in Blender...")
                     subprocess.Popen([self._pending_blender_exe, str(target_path)])
         self.after(100, self._poll_queue)
+
+    def handle_dropped_files(self, paths: list[str]) -> None:
+        """Apply dropped structure, view.json, or style.json files to the GUI state."""
+        for raw_path in paths:
+            p = Path(raw_path).expanduser()
+            if not p.is_file():
+                continue
+            kind = classify_dropped_file(p)
+            if kind == "view":
+                self.var_view_mode.set("file")
+                self.var_view_file.set(str(p))
+                self._sync_view_mode()
+                self.var_status.set(f"Loaded view.json via drop: {p.name}")
+                self._append_log(f"Dropped view file: {p}")
+            elif kind == "style":
+                self.var_style.set(str(p))
+                self.var_status.set(f"Loaded style JSON via drop: {p.name}")
+                self._append_log(f"Dropped style file: {p}")
+            else:
+                self.var_input.set(str(p))
+                self.var_output.set(str(p.with_suffix(".png")))
+                self._schedule_inspect()
+                self.var_status.set(f"Loaded structure via drop: {p.name}")
+                self._append_log(f"Dropped structure file: {p}")
+
+    def _enable_file_drop(self) -> None:
+        """Enable native OS file drag-and-drop onto this Tkinter window."""
+        if sys.platform.startswith("win") or os.name == "nt":
+            try:
+                import ctypes
+                from ctypes import wintypes
+
+                user32 = ctypes.windll.user32
+                shell32 = ctypes.windll.shell32
+
+                long_ptr = ctypes.c_ssize_t
+                wndproc_type = ctypes.WINFUNCTYPE(long_ptr, wintypes.HWND, wintypes.UINT, wintypes.WPARAM, wintypes.LPARAM)
+
+                set_window_long = (
+                    user32.SetWindowLongPtrW if hasattr(user32, "SetWindowLongPtrW") else user32.SetWindowLongW
+                )
+                set_window_long.argtypes = [wintypes.HWND, ctypes.c_int, long_ptr]
+                set_window_long.restype = long_ptr
+
+                user32.CallWindowProcW.argtypes = [
+                    long_ptr,
+                    wintypes.HWND,
+                    wintypes.UINT,
+                    wintypes.WPARAM,
+                    wintypes.LPARAM,
+                ]
+                user32.CallWindowProcW.restype = long_ptr
+
+                user32.GetParent.argtypes = [wintypes.HWND]
+                user32.GetParent.restype = wintypes.HWND
+
+                shell32.DragAcceptFiles.argtypes = [wintypes.HWND, wintypes.BOOL]
+                shell32.DragAcceptFiles.restype = None
+
+                shell32.DragQueryFileW.argtypes = [
+                    wintypes.HANDLE,
+                    wintypes.UINT,
+                    wintypes.LPWSTR,
+                    wintypes.UINT,
+                ]
+                shell32.DragQueryFileW.restype = wintypes.UINT
+
+                shell32.DragFinish.argtypes = [wintypes.HANDLE]
+                shell32.DragFinish.restype = None
+
+                hwnd_val = user32.GetParent(wintypes.HWND(self.winfo_id())) or self.winfo_id()
+                hwnd = wintypes.HWND(hwnd_val)
+                shell32.DragAcceptFiles(hwnd, True)
+
+                if hasattr(user32, "ChangeWindowMessageFilterEx"):
+                    user32.ChangeWindowMessageFilterEx.argtypes = [
+                        wintypes.HWND,
+                        wintypes.UINT,
+                        wintypes.DWORD,
+                        ctypes.c_void_p,
+                    ]
+                    user32.ChangeWindowMessageFilterEx.restype = wintypes.BOOL
+                    for msg_id in (0x0233, 0x0049):  # WM_DROPFILES, WM_COPYGLOBALDATA
+                        user32.ChangeWindowMessageFilterEx(hwnd, msg_id, 1, None)
+
+                wm_dropfiles = 0x0233
+                gwl_wndproc = -4
+
+                def _wndproc(h_wnd, msg, wparam, lparam):
+                    if msg == wm_dropfiles:
+                        hdrop = wintypes.HANDLE(wparam)
+                        count = shell32.DragQueryFileW(hdrop, 0xFFFFFFFF, None, 0)
+                        dropped: list[str] = []
+                        for idx in range(count):
+                            length = shell32.DragQueryFileW(hdrop, idx, None, 0)
+                            buf = ctypes.create_unicode_buffer(length + 1)
+                            shell32.DragQueryFileW(hdrop, idx, buf, length + 1)
+                            if buf.value:
+                                dropped.append(buf.value)
+                        shell32.DragFinish(hdrop)
+                        if dropped:
+                            self.after(0, self.handle_dropped_files, dropped)
+                        return 0
+                    return user32.CallWindowProcW(self._orig_wndproc, h_wnd, msg, wparam, lparam)
+
+                cb = wndproc_type(_wndproc)
+                self._wndproc_ref = cb
+                cb_ptr = ctypes.cast(cb, ctypes.c_void_p).value
+                self._orig_wndproc = set_window_long(hwnd, gwl_wndproc, cb_ptr)
+            except Exception as exc:
+                self._append_log(f"Drag-and-drop hook unavailable: {exc}")
+            return
+
+        # Optional tkinterdnd2 support on macOS / Linux if installed
+        try:
+            self.tk.eval("package require tkdnd")
+            self.tk.eval(f"tkdnd::drop_target register {self._w} DND_Files")
+        except Exception:
+            pass
 
 
 def launch_gui(initial_input: str | None = None) -> int:
