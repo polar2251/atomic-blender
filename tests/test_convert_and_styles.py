@@ -687,6 +687,103 @@ class TestAtomicBlender(unittest.TestCase):
             finally:
                 app.destroy()
 
+    def test_qol_measurements_chips_z_range_recent_and_shortcuts(self) -> None:
+        import math
+        from atomic_blender.gui import AtomicBlenderApp, compute_selection_measurement
+
+        # 1. Pure measurement calculations (1-atom, 2-atom, 3-atom, 4-atom dihedral)
+        syms4 = ["C", "O", "H", "H"]
+        pos4 = [
+            [0.0, 0.0, 0.0],
+            [1.5, 0.0, 0.0],
+            [1.5, 1.0, 0.0],
+            [0.0, 0.0, 2.0],
+        ]
+        self.assertIn("C1:", compute_selection_measurement(syms4, pos4, [0]))
+        m2 = compute_selection_measurement(syms4, pos4, [0, 1])
+        self.assertIn("Dist C1–O2: 1.500 Å", m2)
+        m3 = compute_selection_measurement(syms4, pos4, [0, 1, 2])
+        self.assertIn("Angle C1–O2–H3: 90.00°", m3)
+
+        # Dihedral test with known 90 deg torsion along Y axis
+        dih_syms = ["A", "B", "C", "D"]
+        dih_pos = [
+            [1.0, 0.0, 0.0],
+            [0.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0],
+            [0.0, 1.0, 1.0],
+        ]
+        m4 = compute_selection_measurement(dih_syms, dih_pos, [0, 1, 2, 3])
+        self.assertIn("Dihedral A1–B2–C3–D4:", m4)
+        self.assertIn("90.00°", m4)
+        self.assertTrue(math.isfinite(float(m4.split(":")[-1].strip().rstrip("°"))))
+
+        structure = {
+            "symbols": ["C", "H", "H", "O"],
+            "positions": [[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [-1.0, 0.0, 0.0], [0.0, 0.0, 3.5]],
+            "cell": [[10.0, 0.0, 0.0], [0.0, 10.0, 0.0], [0.0, 0.0, 10.0]],
+            "pbc": [False, False, False],
+            "has_cell": False,
+            "origin": [0.0, 0.0, 0.0],
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            xyz = Path(tmp) / "mol.xyz"
+            xyz.write_text("4\n\nC 0 0 0\nH 1 0 0\nH -1 0 0\nO 0 0 3.5\n", encoding="utf-8")
+            prefs_file = Path(tmp) / "prefs.json"
+
+            app = AtomicBlenderApp()
+            app.withdraw()
+            try:
+                app._recent_prefs_path = lambda: prefs_file  # type: ignore[method-assign]
+                app.var_blender.set("")
+                app.var_input.set(str(xyz))
+                app.canvas.configure(width=600, height=600)
+                app.update_idletasks()
+                app._structure_cache = dict(structure)
+                app._structure_version = 1
+                app._rebuild_viewport(reset_camera=True, trigger_preview=False)
+
+                # Element chips built dynamically for C, H, O
+                self.assertEqual(set(app._elem_chip_buttons.keys()), {"C", "H", "O"})
+                app._toggle_element_selection("H")
+                self.assertEqual(app._selected_atoms, {1, 2})
+                self.assertIn("Dist H2–H3: 2.000 Å", app.var_measurement.get())
+                app._toggle_element_selection("H")
+                self.assertEqual(app._selected_atoms, set())
+
+                # Z-range selection filters to top O atom only
+                app.var_z_min.set("2.0")
+                app.var_z_max.set("4.0")
+                app._select_by_z_range()
+                self.assertEqual(app._selected_atoms, {3})
+                self.assertIn("O4:", app.var_measurement.get())
+
+                # Escape clears selection via keyboard shortcut dispatcher
+                app._on_key_shortcut("Escape")
+                self.assertEqual(app._selected_atoms, set())
+
+                # L and A toggle labels and axes
+                prev_lbl = app.var_show_labels.get()
+                app._on_key_shortcut("l")
+                self.assertEqual(app.var_show_labels.get(), not prev_lbl)
+                prev_ax = app.var_show_axes.get()
+                app._on_key_shortcut("a")
+                self.assertEqual(app.var_show_axes.get(), not prev_ax)
+
+                # Current viewport produces a valid PIL image for clipboard copy
+                img = app._current_canvas_pil_image()
+                self.assertIsNotNone(img)
+                self.assertGreaterEqual(img.size[0], 600)
+
+                # Recent files persist cleanly into prefs_file
+                app._recent_files = []
+                app._add_recent_file(xyz)
+                saved = json.loads(prefs_file.read_text(encoding="utf-8"))
+                self.assertEqual(len(saved["recent_files"]), 1)
+                self.assertEqual(Path(saved["recent_files"][0]).name, "mol.xyz")
+            finally:
+                app.destroy()
+
 
 if __name__ == "__main__":
     unittest.main()

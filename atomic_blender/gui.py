@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 from dataclasses import dataclass
+import io
 import json
 import math
 import os
@@ -503,6 +504,134 @@ def compute_atom_alphas(
     return [op if i in selected else 1.0 for i in range(n_atoms)]
 
 
+def compute_selection_measurement(
+    symbols: list[str],
+    positions: Any,
+    selected_order: list[int],
+) -> str:
+    """Compute live coordinates, bond distance, angle, or dihedral from 1-4 ordered atoms."""
+    n = min(len(symbols), len(positions))
+    order: list[int] = []
+    seen: set[int] = set()
+    for idx in selected_order:
+        if 0 <= idx < n and idx not in seen:
+            seen.add(idx)
+            order.append(idx)
+
+    count = len(order)
+    if count == 0:
+        return "Double-click 1–4 atoms for coords / distance / angle / dihedral"
+
+    pos = np.asarray(positions, dtype=np.float64)
+    labels = [atom_label(i, symbols[i]) for i in order]
+
+    if count == 1:
+        x, y, z = pos[order[0]]
+        return f"{labels[0]}: ({x:.3f}, {y:.3f}, {z:.3f}) Å"
+
+    if count == 2:
+        delta = pos[order[1]] - pos[order[0]]
+        dist = float(np.linalg.norm(delta))
+        dz = abs(float(delta[2]))
+        return f"Dist {labels[0]}–{labels[1]}: {dist:.3f} Å  (Δz {dz:.3f} Å)"
+
+    if count == 3:
+        v1 = pos[order[0]] - pos[order[1]]
+        v2 = pos[order[2]] - pos[order[1]]
+        d1 = float(np.linalg.norm(v1))
+        d2 = float(np.linalg.norm(v2))
+        if d1 < 1e-9 or d2 < 1e-9:
+            return f"Angle {labels[0]}–{labels[1]}–{labels[2]}: undefined (coincident atoms)"
+        cos_a = max(-1.0, min(1.0, float(np.dot(v1, v2) / (d1 * d2))))
+        ang = math.degrees(math.acos(cos_a))
+        return f"Angle {labels[0]}–{labels[1]}–{labels[2]}: {ang:.2f}°  ({d1:.3f}, {d2:.3f} Å)"
+
+    if count == 4:
+        p0, p1, p2, p3 = pos[order[0]], pos[order[1]], pos[order[2]], pos[order[3]]
+        b0 = -(p1 - p0)
+        b1 = p2 - p1
+        b2 = p3 - p2
+        b1_norm = float(np.linalg.norm(b1))
+        if b1_norm < 1e-9:
+            return f"Dihedral {labels[0]}–{labels[1]}–{labels[2]}–{labels[3]}: undefined"
+        b1_u = b1 / b1_norm
+        v = b0 - np.dot(b0, b1_u) * b1_u
+        w = b2 - np.dot(b2, b1_u) * b1_u
+        if float(np.linalg.norm(v)) < 1e-9 or float(np.linalg.norm(w)) < 1e-9:
+            return f"Dihedral {labels[0]}–{labels[1]}–{labels[2]}–{labels[3]}: collinear"
+        x_val = float(np.dot(v, w))
+        y_val = float(np.dot(np.cross(b1_u, v), w))
+        dih = math.degrees(math.atan2(y_val, x_val))
+        return f"Dihedral {labels[0]}–{labels[1]}–{labels[2]}–{labels[3]}: {dih:.2f}°"
+
+    return f"{count} atoms selected (select 1–4 atoms to measure geometry)"
+
+
+def copy_pil_image_to_clipboard(img: Any) -> bool:
+    """Copy a PIL Image to the Windows clipboard as CF_DIB. Returns True on success."""
+    if not _HAS_PIL or img is None:
+        return False
+    if not (sys.platform.startswith("win") or os.name == "nt"):
+        return False
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        buf = io.BytesIO()
+        img.convert("RGB").save(buf, "BMP")
+        dib = buf.getvalue()[14:]  # Strip 14-byte BITMAPFILEHEADER for CF_DIB
+        if not dib:
+            return False
+
+        kernel32 = ctypes.windll.kernel32
+        user32 = ctypes.windll.user32
+
+        kernel32.GlobalAlloc.argtypes = [wintypes.UINT, ctypes.c_size_t]
+        kernel32.GlobalAlloc.restype = wintypes.HGLOBAL
+        kernel32.GlobalLock.argtypes = [wintypes.HGLOBAL]
+        kernel32.GlobalLock.restype = wintypes.LPVOID
+        kernel32.GlobalUnlock.argtypes = [wintypes.HGLOBAL]
+        kernel32.GlobalUnlock.restype = wintypes.BOOL
+        kernel32.GlobalFree.argtypes = [wintypes.HGLOBAL]
+        kernel32.GlobalFree.restype = wintypes.HGLOBAL
+
+        user32.OpenClipboard.argtypes = [wintypes.HWND]
+        user32.OpenClipboard.restype = wintypes.BOOL
+        user32.EmptyClipboard.argtypes = []
+        user32.EmptyClipboard.restype = wintypes.BOOL
+        user32.SetClipboardData.argtypes = [wintypes.UINT, wintypes.HANDLE]
+        user32.SetClipboardData.restype = wintypes.HANDLE
+        user32.CloseClipboard.argtypes = []
+        user32.CloseClipboard.restype = wintypes.BOOL
+
+        gmem_moveable = 0x0002
+        cf_dib = 8
+        h_mem = kernel32.GlobalAlloc(gmem_moveable, len(dib))
+        if not h_mem:
+            return False
+        ptr = kernel32.GlobalLock(h_mem)
+        if not ptr:
+            kernel32.GlobalFree(h_mem)
+            return False
+        ctypes.memmove(ptr, dib, len(dib))
+        kernel32.GlobalUnlock(h_mem)
+
+        if not user32.OpenClipboard(None):
+            kernel32.GlobalFree(h_mem)
+            return False
+        try:
+            user32.EmptyClipboard()
+            if not user32.SetClipboardData(cf_dib, h_mem):
+                kernel32.GlobalFree(h_mem)
+                return False
+            # Clipboard owns h_mem after SetClipboardData succeeds
+            return True
+        finally:
+            user32.CloseClipboard()
+    except Exception:
+        return False
+
+
 class BlenderPreviewWorker:
     """Coalescing persistent Blender subprocess for fast low-res camera previews."""
 
@@ -747,6 +876,8 @@ class AtomicBlenderApp(tk.Tk):
         self._axes_pos: tuple[float, float] = (0.12, 0.86)
         self._show_atoms = True
         self._selected_atoms: set[int] = set()
+        self._selection_order: list[int] = []
+        self._recent_files: list[str] = self._load_recent_files()
         self._display_checks: dict[str, tuple[tk.Canvas, tk.BooleanVar]] = {}
         self._temp_view_files: list[Path] = []
         self._preview_tmp_dir = tempfile.TemporaryDirectory(prefix="atomic_blender_prev_")
@@ -765,6 +896,7 @@ class AtomicBlenderApp(tk.Tk):
         self.update_idletasks()
         self._enable_dark_titlebar()
         self._enable_file_drop()
+        self._bind_keyboard_shortcuts()
         self._poll_after_id = self.after(100, self._poll_queue)
         if initial_input:
             self._schedule_inspect()
@@ -966,6 +1098,9 @@ class AtomicBlenderApp(tk.Tk):
         self.var_sel_opacity = tk.DoubleVar(value=0.30)
         self.var_sel_opacity_label = tk.StringVar(value="30%")
         self.var_alpha_invert = tk.BooleanVar(value=False)
+        self.var_measurement = tk.StringVar(value="Double-click 1–4 atoms for coords / distance / angle / dihedral")
+        self.var_z_min = tk.StringVar(value="")
+        self.var_z_max = tk.StringVar(value="")
         self._active_tab = "view"
         self.var_status = tk.StringVar(value="Ready")
         self.var_input.trace_add("write", lambda *_: self._sync_type_map_visibility())
@@ -1037,7 +1172,37 @@ class AtomicBlenderApp(tk.Tk):
         entry_in = ttk.Entry(f_io, textvariable=self.var_input, width=34)
         entry_in.grid(row=0, column=1, sticky=tk.EW, padx=4, pady=2)
         entry_in.bind("<FocusOut>", lambda _e: self._schedule_inspect())
-        ttk.Button(f_io, text="Browse...", command=self._browse_input).grid(row=0, column=2, pady=2)
+        row_in_btns = ttk.Frame(f_io)
+        row_in_btns.grid(row=0, column=2, sticky=tk.EW, pady=2)
+        ttk.Button(row_in_btns, text="Browse...", command=self._browse_input).pack(side=tk.LEFT)
+        self.btn_recent = tk.Menubutton(
+            row_in_btns,
+            text="▾",
+            bg="#2B303B",
+            fg="#E5E7EB",
+            activebackground="#363C49",
+            activeforeground="#FFFFFF",
+            relief=tk.FLAT,
+            borderwidth=1,
+            highlightbackground="#323844",
+            highlightthickness=1,
+            padx=5,
+            pady=2,
+            cursor="hand2",
+            font=("Segoe UI", 9),
+        )
+        self.recent_menu = tk.Menu(
+            self.btn_recent,
+            tearoff=0,
+            bg="#1E2128",
+            fg="#E5E7EB",
+            activebackground="#0D9488",
+            activeforeground="#FFFFFF",
+            disabledforeground="#64748B",
+        )
+        self.btn_recent.configure(menu=self.recent_menu)
+        self.btn_recent.pack(side=tk.LEFT, padx=(3, 0))
+        self._rebuild_recent_menu()
 
         ttk.Label(f_io, text="Output PNG").grid(row=1, column=0, sticky=tk.W, pady=2)
         ttk.Entry(f_io, textvariable=self.var_output, width=34).grid(row=1, column=1, sticky=tk.EW, padx=4, pady=2)
@@ -1312,6 +1477,26 @@ class AtomicBlenderApp(tk.Tk):
             ttk.Button(row_btns, text=text, command=cb).grid(
                 row=0, column=c_idx, sticky=tk.EW, padx=(0, 3 if c_idx < 3 else 0)
             )
+
+        self.f_elem_chips = ttk.Frame(f_lbl)
+        self.f_elem_chips.pack(fill=tk.X, pady=(6, 0))
+        self._elem_chip_buttons: dict[str, tk.Button] = {}
+
+        row_z = ttk.Frame(f_lbl)
+        row_z.pack(fill=tk.X, pady=(6, 0))
+        ttk.Label(row_z, text="Z (Å)").pack(side=tk.LEFT)
+        ttk.Entry(row_z, textvariable=self.var_z_min, width=7).pack(side=tk.LEFT, padx=(6, 2))
+        ttk.Label(row_z, text="~").pack(side=tk.LEFT)
+        ttk.Entry(row_z, textvariable=self.var_z_max, width=7).pack(side=tk.LEFT, padx=(2, 6))
+        ttk.Button(row_z, text="Select Z", command=self._select_by_z_range).pack(side=tk.LEFT)
+
+        ttk.Label(
+            f_lbl,
+            textvariable=self.var_measurement,
+            foreground="#2DD4BF",
+            font=("Segoe UI", 9, "bold"),
+            wraplength=330,
+        ).pack(fill=tk.X, pady=(6, 0))
 
         f_op = ttk.LabelFrame(parent, text="Selection Transparency", padding=8)
         f_op.pack(fill=tk.X, pady=(0, 6))
@@ -1618,6 +1803,230 @@ class AtomicBlenderApp(tk.Tk):
             self._vp_scene.dark_backdrop = bool(self.var_dark_backdrop.get())
         self._redraw_canvas()
 
+    def _recent_prefs_path(self) -> Path:
+        return Path.home() / ".atomic_blender_gui.json"
+
+    def _load_recent_files(self) -> list[str]:
+        try:
+            p = self._recent_prefs_path()
+            if p.is_file():
+                data = json.loads(p.read_text(encoding="utf-8"))
+                items = data.get("recent_files", [])
+                if isinstance(items, list):
+                    return [str(x) for x in items if isinstance(x, str) and x.strip()][:10]
+        except Exception:
+            pass
+        return []
+
+    def _save_recent_files(self) -> None:
+        try:
+            p = self._recent_prefs_path()
+            payload: dict[str, Any] = {}
+            if p.is_file():
+                try:
+                    loaded = json.loads(p.read_text(encoding="utf-8"))
+                    if isinstance(loaded, dict):
+                        payload = loaded
+                except Exception:
+                    payload = {}
+            payload["recent_files"] = self._recent_files[:10]
+            p.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+        except Exception:
+            pass
+
+    def _add_recent_file(self, raw_path: str | Path) -> None:
+        raw = str(raw_path).strip()
+        if not raw:
+            return
+        try:
+            p = Path(raw).expanduser().resolve()
+            if not p.is_file():
+                return
+            norm = os.path.normcase(str(p))
+            self._recent_files = [str(p)] + [
+                x for x in self._recent_files if os.path.normcase(x) != norm
+            ]
+            self._recent_files = self._recent_files[:10]
+            self._save_recent_files()
+            self._rebuild_recent_menu()
+        except Exception:
+            pass
+
+    def _rebuild_recent_menu(self) -> None:
+        if not hasattr(self, "recent_menu"):
+            return
+        self.recent_menu.delete(0, tk.END)
+        existing = [x for x in self._recent_files if Path(x).is_file()]
+        if not existing:
+            self.recent_menu.add_command(label="(No recent structures)", state=tk.DISABLED)
+            return
+        for path_str in existing:
+            p = Path(path_str)
+            self.recent_menu.add_command(
+                label=f"{p.name}  ({p.parent.name})",
+                command=lambda s=path_str: self._open_recent_file(s),
+            )
+        self.recent_menu.add_separator()
+        self.recent_menu.add_command(label="Clear Recent List", command=self._clear_recent_files)
+
+    def _clear_recent_files(self) -> None:
+        self._recent_files = []
+        self._save_recent_files()
+        self._rebuild_recent_menu()
+
+    def _open_recent_file(self, path_str: str) -> None:
+        p = Path(path_str).expanduser()
+        if not p.is_file():
+            self.var_status.set(f"Recent file missing: {p.name}")
+            self._rebuild_recent_menu()
+            return
+        self.var_input.set(str(p))
+        self.var_output.set(str(p.with_suffix(".png")))
+        self._schedule_inspect()
+        self.var_status.set(f"Loading recent structure: {p.name}")
+
+    def _current_canvas_pil_image(self) -> Any:
+        if not _HAS_PIL:
+            return None
+        if self.var_canvas_mode.get() == "png" and isinstance(self._pil_image, Image.Image):
+            out = self._pil_image.convert("RGBA").copy()
+            res_w = max(16, int(self.var_res_w.get()))
+            res_h = max(16, int(self.var_res_h.get()))
+            if self._vp_scene is not None and (self.var_show_labels.get() or self._selected_atoms):
+                render_atom_labels_and_selection_overlay(
+                    out,
+                    self._vp_scene,
+                    res_w,
+                    res_h,
+                    draw_labels=bool(self.var_show_labels.get()),
+                    draw_selection=bool(self._selected_atoms),
+                )
+            from_tmp_preview = (
+                self._preview_path is not None
+                and hasattr(self, "_preview_tmp_dir")
+                and str(self._preview_path).startswith(str(self._preview_tmp_dir.name))
+            )
+            if self.var_show_axes.get() and from_tmp_preview:
+                quat = self._vp_scene.quat if self._vp_scene is not None else (1.0, 0.0, 0.0, 0.0)
+                render_reference_axes_overlay(
+                    out,
+                    quat,
+                    axes_pos=self._axes_pos,
+                    show_labels=bool(self.var_axes_labels.get()),
+                    dark_backdrop=bool(self.var_dark_backdrop.get()),
+                )
+            return out
+        if self._vp_scene is not None:
+            cw = max(600, int(self.canvas.winfo_width()))
+            ch = max(600, int(self.canvas.winfo_height()))
+            res_w = max(16, int(self.var_res_w.get()))
+            res_h = max(16, int(self.var_res_h.get()))
+            return self._vp_scene.render_image(cw, ch, res_w, res_h, interactive=False)
+        return None
+
+    def _on_copy_image(self) -> None:
+        img = self._current_canvas_pil_image()
+        if img is None:
+            self.var_status.set("Nothing in viewport to copy")
+            return
+        if copy_pil_image_to_clipboard(img):
+            w, h = img.size
+            self.var_status.set(f"Copied {w}×{h} image to clipboard")
+        else:
+            self.var_status.set("Clipboard image copy is unavailable on this platform")
+
+    def _is_typing_focus(self) -> bool:
+        try:
+            w = self.focus_get()
+        except Exception:
+            return False
+        if w is None:
+            return False
+        return w.winfo_class() in {"Entry", "TEntry", "Spinbox", "TSpinbox", "Text", "TCombobox"}
+
+    def _bind_keyboard_shortcuts(self) -> None:
+        self.bind("<Control-o>", lambda _e: self._on_key_shortcut("o", ctrl=True))
+        self.bind("<Control-O>", lambda _e: self._on_key_shortcut("o", ctrl=True))
+        self.bind("<Control-r>", lambda _e: self._on_key_shortcut("r", ctrl=True))
+        self.bind("<Control-R>", lambda _e: self._on_key_shortcut("r", ctrl=True))
+        self.bind("<Control-s>", lambda _e: self._on_key_shortcut("s", ctrl=True))
+        self.bind("<Control-S>", lambda _e: self._on_key_shortcut("s", ctrl=True))
+        self.bind("<Control-c>", lambda _e: self._on_key_shortcut("c", ctrl=True))
+        self.bind("<Control-C>", lambda _e: self._on_key_shortcut("c", ctrl=True))
+        for keysym, norm_key in (
+            ("<KeyPress-r>", "r"),
+            ("<KeyPress-R>", "r"),
+            ("<Home>", "Home"),
+            ("<KeyPress-l>", "l"),
+            ("<KeyPress-L>", "l"),
+            ("<KeyPress-a>", "a"),
+            ("<KeyPress-A>", "a"),
+            ("<Escape>", "Escape"),
+            ("<Left>", "Left"),
+            ("<Right>", "Right"),
+            ("<Up>", "Up"),
+            ("<Down>", "Down"),
+            ("<Shift-Left>", "Left"),
+            ("<Shift-Right>", "Right"),
+            ("<Shift-Up>", "Up"),
+            ("<Shift-Down>", "Down"),
+            ("<KeyPress-plus>", "+"),
+            ("<KeyPress-equal>", "+"),
+            ("<KP_Add>", "+"),
+            ("<KeyPress-minus>", "-"),
+            ("<KeyPress-underscore>", "-"),
+            ("<KP_Subtract>", "-"),
+        ):
+            is_shift = keysym.startswith("<Shift-")
+            self.bind(keysym, lambda _e, k=norm_key, sh=is_shift: self._on_key_shortcut(k, shift=sh))
+
+    def _on_key_shortcut(self, key: str, ctrl: bool = False, shift: bool = False) -> str | None:
+        if ctrl:
+            if key == "o":
+                self._browse_input()
+                return "break"
+            if key in ("r", "s"):
+                self._on_render()
+                return "break"
+            if key == "c":
+                if self._is_typing_focus():
+                    return None
+                self._on_copy_image()
+                return "break"
+            return None
+
+        if self._is_typing_focus():
+            return None
+
+        if key in ("r", "Home"):
+            self._on_reset_view()
+            return "break"
+        if key == "l":
+            self.var_show_labels.set(not bool(self.var_show_labels.get()))
+            self._on_labels_toggled()
+            return "break"
+        if key == "a":
+            self._on_display_type_clicked("reference_axes")
+            return "break"
+        if key == "Escape":
+            self._clear_selection()
+            return "break"
+        if key in ("Left", "Right", "Up", "Down"):
+            dx = -1.0 if key == "Left" else (1.0 if key == "Right" else 0.0)
+            dy = 1.0 if key == "Up" else (-1.0 if key == "Down" else 0.0)
+            if shift:
+                self._on_step_move(dx, dy)
+            else:
+                self._on_step_rotate(dx, dy, 0.0)
+            return "break"
+        if key == "+":
+            self._zoom_3d(0.85)
+            return "break"
+        if key == "-":
+            self._zoom_3d(1.176)
+            return "break"
+        return None
+
     def _build_preview_and_log(self, parent: ttk.Frame) -> None:
         v_pane = ttk.PanedWindow(parent, orient=tk.VERTICAL)
         v_pane.pack(fill=tk.BOTH, expand=True)
@@ -1632,12 +2041,15 @@ class AtomicBlenderApp(tk.Tk):
             tb, text="Rendered PNG", variable=self.var_canvas_mode, value="png", command=self._redraw_canvas
         ).pack(side=tk.LEFT, padx=(8, 12))
         ttk.Button(tb, text="Reset / Fit View", command=self._on_reset_view).pack(side=tk.LEFT, padx=(0, 4))
-        ttk.Button(tb, text="Save view.json...", command=self._on_save_view_json).pack(side=tk.LEFT, padx=(0, 8))
+        ttk.Button(tb, text="Save view.json...", command=self._on_save_view_json).pack(side=tk.LEFT, padx=(0, 4))
+        ttk.Button(tb, text="Copy Image", command=self._on_copy_image).pack(side=tk.LEFT, padx=(0, 8))
         DarkCheckbutton(
             tb, text="Dark Backdrop", variable=self.var_dark_backdrop, command=self._on_backdrop_toggled
         ).pack(side=tk.LEFT)
         ttk.Label(
-            tb, text="Left-drag: Rotate / Drag Axes  |  Right-drag: Pan  |  Scroll: Zoom", style="Muted.TLabel"
+            tb,
+            text="Drag: Rotate/Axes | R: Reset | L: Labels | Ctrl+C: Copy",
+            style="Muted.TLabel",
         ).pack(side=tk.RIGHT)
 
         self.canvas = tk.Canvas(f_prev, bg="#15171C", highlightthickness=0)
@@ -1697,14 +2109,41 @@ class AtomicBlenderApp(tk.Tk):
         self.var_sel_opacity_label.set("100%")
         self._sync_selection_and_alphas(trigger_blender=True)
 
+    def _update_measurement_banner(self) -> None:
+        if not hasattr(self, "var_measurement"):
+            return
+        if self._structure_cache is None:
+            self.var_measurement.set("Double-click 1–4 atoms for coords / distance / angle / dihedral")
+            return
+        syms = self._structure_cache.get("symbols", [])
+        pos = self._structure_cache.get("positions", [])
+        n = min(len(syms), len(pos))
+        self._selection_order = [i for i in self._selection_order if 0 <= i < n and i in self._selected_atoms]
+        for idx in sorted(self._selected_atoms):
+            if 0 <= idx < n and idx not in self._selection_order:
+                self._selection_order.append(idx)
+        self.var_measurement.set(compute_selection_measurement(syms, pos, self._selection_order))
+
+    def _toggle_atom_selection(self, idx: int) -> None:
+        if idx in self._selected_atoms:
+            self._selected_atoms.remove(idx)
+            self._selection_order = [i for i in self._selection_order if i != idx]
+        else:
+            self._selected_atoms.add(idx)
+            if idx not in self._selection_order:
+                self._selection_order.append(idx)
+
     def _select_all_atoms(self) -> None:
         if self._structure_cache is None:
             return
-        self._selected_atoms = set(range(len(self._structure_cache.get("symbols", []))))
+        n = len(self._structure_cache.get("symbols", []))
+        self._selected_atoms = set(range(n))
+        self._selection_order = list(range(n))
         self._sync_selection_and_alphas(trigger_blender=True)
 
     def _clear_selection(self) -> None:
         self._selected_atoms.clear()
+        self._selection_order.clear()
         self._sync_selection_and_alphas(trigger_blender=True)
 
     def _invert_selection(self) -> None:
@@ -1712,6 +2151,7 @@ class AtomicBlenderApp(tk.Tk):
             return
         n = len(self._structure_cache.get("symbols", []))
         self._selected_atoms = set(range(n)) - self._selected_atoms
+        self._selection_order = sorted(self._selected_atoms)
         self._sync_selection_and_alphas(trigger_blender=True)
 
     def _select_same_element(self) -> None:
@@ -1719,7 +2159,103 @@ class AtomicBlenderApp(tk.Tk):
             return
         syms = self._structure_cache.get("symbols", [])
         target_syms = {syms[i] for i in self._selected_atoms if i < len(syms)}
-        self._selected_atoms = {i for i, s in enumerate(syms) if s in target_syms}
+        new_sel = {i for i, s in enumerate(syms) if s in target_syms}
+        self._selected_atoms = new_sel
+        self._selection_order = [i for i in self._selection_order if i in new_sel]
+        for i in sorted(new_sel):
+            if i not in self._selection_order:
+                self._selection_order.append(i)
+        self._sync_selection_and_alphas(trigger_blender=True)
+
+    def _rebuild_element_chips(self) -> None:
+        if not hasattr(self, "f_elem_chips"):
+            return
+        for child in self.f_elem_chips.winfo_children():
+            child.destroy()
+        self._elem_chip_buttons = {}
+        if self._structure_cache is None:
+            return
+        syms = self._structure_cache.get("symbols", [])
+        counts: dict[str, int] = {}
+        for s in syms:
+            counts[s] = counts.get(s, 0) + 1
+        row_frame: ttk.Frame | None = None
+        for idx, (sym, cnt) in enumerate(counts.items()):
+            if idx % 4 == 0:
+                row_frame = ttk.Frame(self.f_elem_chips)
+                row_frame.pack(fill=tk.X, pady=1)
+            assert row_frame is not None
+            btn = tk.Button(
+                row_frame,
+                text=f"{sym} ({cnt})",
+                command=lambda s=sym: self._toggle_element_selection(s),
+                relief=tk.FLAT,
+                bd=1,
+                padx=6,
+                pady=2,
+                cursor="hand2",
+                font=("Segoe UI", 8, "bold"),
+            )
+            btn.pack(side=tk.LEFT, padx=(0, 4))
+            self._elem_chip_buttons[sym] = btn
+        self._refresh_element_chip_styles()
+
+    def _refresh_element_chip_styles(self) -> None:
+        if not getattr(self, "_elem_chip_buttons", None) or self._structure_cache is None:
+            return
+        syms = self._structure_cache.get("symbols", [])
+        for sym, btn in self._elem_chip_buttons.items():
+            indices = [i for i, s in enumerate(syms) if s == sym]
+            all_sel = bool(indices) and all(i in self._selected_atoms for i in indices)
+            any_sel = any(i in self._selected_atoms for i in indices)
+            if all_sel:
+                bg, fg, active = "#0D9488", "#FFFFFF", "#14B8A6"
+            elif any_sel:
+                bg, fg, active = "#1B3B3A", "#5EEAD4", "#244D4B"
+            else:
+                bg, fg, active = "#2B303B", "#CBD5E1", "#363C49"
+            btn.configure(bg=bg, fg=fg, activebackground=active, activeforeground="#FFFFFF")
+
+    def _toggle_element_selection(self, symbol: str) -> None:
+        if self._structure_cache is None:
+            return
+        syms = self._structure_cache.get("symbols", [])
+        indices = [i for i, s in enumerate(syms) if s == symbol]
+        if not indices:
+            return
+        if all(i in self._selected_atoms for i in indices):
+            for i in indices:
+                self._selected_atoms.discard(i)
+            idx_set = set(indices)
+            self._selection_order = [i for i in self._selection_order if i not in idx_set]
+        else:
+            for i in indices:
+                self._selected_atoms.add(i)
+                if i not in self._selection_order:
+                    self._selection_order.append(i)
+        self._sync_selection_and_alphas(trigger_blender=True)
+
+    def _select_by_z_range(self) -> None:
+        if self._structure_cache is None:
+            return
+        pos = self._structure_cache.get("positions", [])
+        if not pos:
+            return
+        zs = [float(p[2]) for p in pos]
+        raw_min = self.var_z_min.get().strip()
+        raw_max = self.var_z_max.get().strip()
+        try:
+            z_lo = float(raw_min) if raw_min else min(zs)
+            z_hi = float(raw_max) if raw_max else max(zs)
+        except ValueError:
+            self.var_status.set("Invalid Z range number")
+            return
+        if z_lo > z_hi:
+            z_lo, z_hi = z_hi, z_lo
+        picked = [i for i, p in enumerate(pos) if z_lo - 1e-6 <= float(p[2]) <= z_hi + 1e-6]
+        self._selected_atoms = set(picked)
+        self._selection_order = list(picked)
+        self.var_status.set(f"Selected {len(picked)} atoms in Z=[{z_lo:.2f}, {z_hi:.2f}] Å")
         self._sync_selection_and_alphas(trigger_blender=True)
 
     def _on_atom_list_click(self, event: tk.Event) -> None:
@@ -1729,10 +2265,7 @@ class AtomicBlenderApp(tk.Tk):
         n = len(self._structure_cache.get("symbols", []))
         if idx < 0 or idx >= n:
             return
-        if idx in self._selected_atoms:
-            self._selected_atoms.remove(idx)
-        else:
-            self._selected_atoms.add(idx)
+        self._toggle_atom_selection(idx)
         self._sync_selection_and_alphas(trigger_blender=True)
 
     def _refresh_atom_list(self) -> None:
@@ -1765,6 +2298,8 @@ class AtomicBlenderApp(tk.Tk):
     def _sync_selection_and_alphas(self, trigger_blender: bool = False) -> None:
         if self._structure_cache is None:
             self._refresh_atom_list()
+            self._refresh_element_chip_styles()
+            self._update_measurement_banner()
             return
         syms = self._structure_cache.get("symbols", [])
         n = len(syms)
@@ -1784,6 +2319,8 @@ class AtomicBlenderApp(tk.Tk):
             self._vp_scene.atom_alphas = np.asarray(alphas, dtype=np.float64)
             self._vp_scene.selected_atoms = set(self._selected_atoms)
         self._refresh_atom_list()
+        self._refresh_element_chip_styles()
+        self._update_measurement_banner()
         self._redraw_canvas()
         if trigger_blender and (alphas_changed or any(a < 0.995 for a in alphas)):
             self._request_blender_preview()
@@ -1806,14 +2343,12 @@ class AtomicBlenderApp(tk.Tk):
         picked = self._vp_scene.pick_atom_at(u, v, res_w, res_h, fw, fh)
         if picked is None:
             return
-        if picked in self._selected_atoms:
-            self._selected_atoms.remove(picked)
-        else:
-            self._selected_atoms.add(picked)
+        self._toggle_atom_selection(picked)
         syms = self._structure_cache.get("symbols", []) if self._structure_cache else []
         lbl = atom_label(picked, syms[picked]) if picked < len(syms) else str(picked + 1)
-        self.var_status.set(f"{lbl} toggled ({len(self._selected_atoms)} selected)")
         self._sync_selection_and_alphas(trigger_blender=True)
+        meas = self.var_measurement.get() if len(self._selected_atoms) in (1, 2, 3, 4) else f"{len(self._selected_atoms)} selected"
+        self.var_status.set(f"{lbl} toggled | {meas}")
 
     def _on_repr_changed(self) -> None:
         self._rebuild_viewport(reset_camera=False, trigger_preview=True)
@@ -2236,7 +2771,15 @@ class AtomicBlenderApp(tk.Tk):
             selected_atoms=self._selected_atoms,
         )
         self._refresh_display_checks()
+        self._rebuild_element_chips()
         self._refresh_atom_list()
+        self._update_measurement_banner()
+        if reset_camera and self._structure_cache is not None:
+            pos = self._structure_cache.get("positions", [])
+            if pos:
+                zs = [float(p[2]) for p in pos]
+                self.var_z_min.set(f"{min(zs):.2f}")
+                self.var_z_max.set(f"{max(zs):.2f}")
         if prev_cam is not None:
             vp.quat, vp.target, vp.ortho_scale = prev_cam
         else:
@@ -2729,9 +3272,13 @@ class AtomicBlenderApp(tk.Tk):
                 summary, neutral = payload
                 self.var_inspector.set(str(summary))
                 self._selected_atoms.clear()
+                self._selection_order.clear()
                 self._structure_cache = neutral
                 self._structure_version += 1
                 self._use_interactive_cam = False
+                in_raw = self.var_input.get().strip()
+                if in_raw:
+                    self._add_recent_file(in_raw)
                 self._rebuild_viewport(reset_camera=True, trigger_preview=True)
             elif kind == "preview_done":
                 seq, png_path = payload
