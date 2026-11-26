@@ -743,6 +743,8 @@ class AtomicBlenderApp(tk.Tk):
                 break
             if kind == "inspect":
                 self.var_inspector.set(str(payload))
+            elif kind == "drop":
+                self.handle_dropped_files(list(payload))
             elif kind == "log":
                 self._append_log(str(payload))
             elif kind == "done":
@@ -844,6 +846,7 @@ class AtomicBlenderApp(tk.Tk):
                         user32.ChangeWindowMessageFilterEx(hwnd, msg_id, 1, None)
 
                 wm_dropfiles = 0x0233
+                wm_ncdestroy = 0x0082
                 gwl_wndproc = -4
 
                 def _wndproc(h_wnd, msg, wparam, lparam):
@@ -859,9 +862,13 @@ class AtomicBlenderApp(tk.Tk):
                                 dropped.append(buf.value)
                         shell32.DragFinish(hdrop)
                         if dropped:
-                            self.after(0, self.handle_dropped_files, dropped)
+                            # Never call Tkinter/Tcl from a Win32 WNDPROC while mainloop holds ENTER_TCL
+                            self._queue.put(("drop", dropped))
                         return 0
-                    return user32.CallWindowProcW(self._orig_wndproc, h_wnd, msg, wparam, lparam)
+                    orig = self._orig_wndproc
+                    if msg == wm_ncdestroy and orig:
+                        set_window_long(h_wnd, gwl_wndproc, orig)
+                    return user32.CallWindowProcW(orig, h_wnd, msg, wparam, lparam)
 
                 cb = wndproc_type(_wndproc)
                 self._wndproc_ref = cb

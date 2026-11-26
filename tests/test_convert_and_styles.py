@@ -244,8 +244,18 @@ class TestAtomicBlender(unittest.TestCase):
                 self.assertEqual(app.var_view_mode.get(), "file")
                 self.assertEqual(app.var_view_file.get(), str(view_json))
                 self.assertEqual(app.var_style.get(), str(style_json))
-            finally:
-                app.destroy()
+
+                # Verify queued drop dispatch inside a real mainloop tick (no WNDPROC GIL crash)
+                app._queue.put(("drop", [str(struct_json)]))
+                app.after(150, app.destroy)
+                app.mainloop()
+                self.assertEqual(app.var_input.get(), str(struct_json))
+            except Exception:
+                try:
+                    app.destroy()
+                except Exception:
+                    pass
+                raise
 
 
 if __name__ == "__main__":
