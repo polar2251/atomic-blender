@@ -89,15 +89,16 @@ def atoms_to_neutral_dict(
         raise ValueError(f"Replication counts must be >= 1, got {replicate}")
 
     has_cell = bool(work.cell.rank == 3)
-    if wrap and has_cell and any(work.pbc):
-        work.wrap()
+    eff_pbc = [bool(p) for p in work.pbc] if any(work.pbc) else ([True, True, True] if has_cell else [False, False, False])
+    if wrap and has_cell:
+        work.wrap(pbc=eff_pbc)
 
     if (rx, ry, rz) != (1, 1, 1):
         if not has_cell:
             raise ValueError("Cannot replicate a non-periodic structure without a 3D cell.")
         work = work.repeat((rx, ry, rz))
-        if wrap and any(work.pbc):
-            work.wrap()
+        if wrap:
+            work.wrap(pbc=eff_pbc)
 
     return {
         "schema_version": 1,
@@ -109,6 +110,36 @@ def atoms_to_neutral_dict(
         "has_cell": has_cell,
         "origin": [0.0, 0.0, 0.0],
     }
+
+
+def read_structure_frames(
+    input_path: Path,
+    fmt: str | None = None,
+    type_map: str | list[str] | None = None,
+    lammps_style: str | None = None,
+    replicate: tuple[int, int, int] = (1, 1, 1),
+    wrap: bool = True,
+) -> list[dict[str, Any]]:
+    """Read single or multi-frame trajectory files into a list of neutral structure dicts."""
+    if input_path.suffix.lower() == ".json":
+        data = json.loads(input_path.read_text(encoding="utf-8"))
+        if isinstance(data, list):
+            return [dict(item) for item in data]
+        return [dict(data)]
+
+    frames = read_structure(
+        input_path=input_path,
+        fmt=fmt,
+        type_map=type_map,
+        lammps_style=lammps_style,
+        index=":",
+    )
+    atoms_list = frames if isinstance(frames, list) else [frames]
+    out: list[dict[str, Any]] = []
+    for atoms in atoms_list:
+        eff_rep = replicate if atoms.cell.rank == 3 else (1, 1, 1)
+        out.append(atoms_to_neutral_dict(atoms, source=str(input_path), replicate=eff_rep, wrap=wrap))
+    return out
 
 
 def convert_file(

@@ -386,7 +386,7 @@ def resolve_preset_orientation(
     preset: str,
     cell_vecs: list[Vector] | None = None,
 ) -> Quaternion:
-    """Return camera quaternion for a named view preset (``iso``, ``side-oblique``, ``a``, ``b``, ``c``)."""
+    """Return camera quaternion for a named view preset (``iso``, ``side-oblique``, ``a/b/c``, ``a*/b*/c*``)."""
     name = preset.lower().strip()
     if name == "iso":
         az, el = math.radians(35.0), math.radians(20.0)
@@ -404,7 +404,19 @@ def resolve_preset_orientation(
     if name == "b":
         return _direction_to_quaternion(b.normalized(), c.normalized())
     if name == "c":
-        return _direction_to_quaternion(c.normalized(), b.normalized())
+        up_c = c.cross(a)
+        return _direction_to_quaternion(c.normalized(), up_c.normalized() if up_c.length > 1e-6 else b.normalized())
+    if name == "a*":
+        na = b.cross(c)
+        return _direction_to_quaternion((na if na.length > 1e-6 else a).normalized(), c.normalized())
+    if name == "b*":
+        nb = c.cross(a)
+        return _direction_to_quaternion((nb if nb.length > 1e-6 else b).normalized(), c.normalized())
+    if name == "c*":
+        nc = a.cross(b)
+        nc_v = (nc if nc.length > 1e-6 else c).normalized()
+        up_nc = nc_v.cross(a)
+        return _direction_to_quaternion(nc_v, up_nc.normalized() if up_nc.length > 1e-6 else b.normalized())
     raise ValueError(f"Unknown view preset {preset!r}. Expected one of {VIEW_PRESETS}.")
 
 
@@ -426,12 +438,13 @@ def compute_framing_points(
             zmin = min(zs) - pad_bot
             zmax = max(zs) + pad_top
             base = [origin, origin + a, origin + a + b, origin + b]
-            pts_frame = [Vector((p.x, p.y, zmin)) for p in base] + [
-                Vector((p.x, p.y, zmax)) for p in base
-            ]
-            cx = sum(p.x for p in base) * 0.25
-            cy = sum(p.y for p in base) * 0.25
-            target = Vector((cx, cy, 0.5 * (zmin + zmax)))
+            if abs(c.z) > 1e-6:
+                t_min = (zmin - origin.z) / c.z
+                t_max = (zmax - origin.z) / c.z
+                pts_frame = [p + c * t_min for p in base] + [p + c * t_max for p in base]
+            else:
+                pts_frame = [Vector((p.x, p.y, zmin)) for p in base] + [Vector((p.x, p.y, zmax)) for p in base]
+            target = sum(pts_frame, Vector((0.0, 0.0, 0.0))) * (1.0 / len(pts_frame))
             return target, pts_frame
         target = origin + 0.5 * (a + b + c)
         return target, corners
@@ -925,6 +938,72 @@ def build_scene(
                 segments=c_seg,
                 smooth=c_smooth,
             )
+
+        if bool(structure.get("show_cell_vectors", False)):
+            vec_specs = (
+                ("a", cell_vecs[0], "#EF4444"),
+                ("b", cell_vecs[1], "#22C55E"),
+                ("c", cell_vecs[2], "#3B82F6"),
+            )
+            import bmesh
+
+            v_rad = max(0.08, c_rad * 1.65)
+            for v_lbl, v_vec, v_hex in vec_specs:
+                v_len = v_vec.length
+                if v_len < 1e-4:
+                    continue
+                tip_len = min(0.42 * v_len, 2.8)
+                v_dir = v_vec.normalized()
+                shaft_end = origin + v_dir * max(0.2, tip_len - 0.35)
+                cone_tip = origin + v_dir * tip_len
+                v_mat = make_material(f"mat_cellvec_{v_lbl}", v_hex, roughness=0.35, specular=0.25)
+                _create_cylinder_mesh(origin, shaft_end, v_rad, v_mat, f"cellvec_{v_lbl}_shaft", col, segments=14, smooth=True)
+                cone_mesh = bpy.data.meshes.new(f"cellvec_{v_lbl}_head_mesh")
+                bm_c = bmesh.new()
+                bmesh.ops.create_cone(
+                    bm_c,
+                    cap_ends=True,
+                    cap_tris=False,
+                    segments=14,
+                    radius1=v_rad * 2.2,
+                    radius2=0.0,
+                    depth=0.45,
+                )
+                bm_c.to_mesh(cone_mesh)
+                bm_c.free()
+                cone_mesh.materials.append(v_mat)
+                c_obj = bpy.data.objects.new(f"cellvec_{v_lbl}_head", cone_mesh)
+                c_obj.location = (shaft_end + cone_tip) * 0.5
+                c_obj.rotation_mode = "QUATERNION"
+                c_obj.rotation_quaternion = v_dir.to_track_quat("Z", "Y")
+                col.objects.link(c_obj)
+
+    raw_poly = structure.get("polyhedra", [])
+    if isinstance(raw_poly, list) and raw_poly:
+        poly_mats: dict[tuple[str, float], bpy.types.Material] = {}
+        for p_idx, poly in enumerate(raw_poly):
+            verts = poly.get("vertices", [])
+            faces = poly.get("faces", [])
+            if len(verts) < 4 or not faces:
+                continue
+            p_hex = str(poly.get("color", "#38BDF8"))
+            p_alpha = round(max(0.05, min(0.95, float(poly.get("alpha", 0.36)))), 3)
+            p_mat = poly_mats.get((p_hex, p_alpha))
+            if p_mat is None:
+                p_mat = make_material(
+                    f"mat_poly_{p_hex.lstrip('#')}_{int(p_alpha * 1000)}",
+                    p_hex,
+                    roughness=0.25,
+                    specular=0.4,
+                    alpha=p_alpha,
+                )
+                poly_mats[(p_hex, p_alpha)] = p_mat
+            pmesh = bpy.data.meshes.new(f"poly_{p_idx}_mesh")
+            pmesh.from_pydata([tuple(float(x) for x in v) for v in verts], [], [tuple(int(i) for i in f) for f in faces])
+            pmesh.update()
+            pmesh.materials.append(p_mat)
+            p_obj = bpy.data.objects.new(f"poly_{p_idx}", pmesh)
+            col.objects.link(p_obj)
 
     # Framing & camera
     radii_list = [elem_radii_cache[s] for s in symbols]

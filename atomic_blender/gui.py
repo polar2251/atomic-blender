@@ -22,15 +22,20 @@ from typing import Any
 import numpy as np
 
 from atomic_blender.cli import _collect_style_files, find_blender_executable, resolve_style_path
-from atomic_blender.convert import atoms_to_neutral_dict, read_structure
+from atomic_blender.convert import atoms_to_neutral_dict, read_structure, read_structure_frames
 from atomic_blender.elements import METAL_ELEMENTS, VIEW_PRESETS, classify_dropped_file
 from atomic_blender.viewport3d import (
     ViewportScene,
     atom_label,
     choose_scale_bar_angstrom,
     compose_dual_view_panel,
+    compose_multi_panel_strip,
+    compute_cell_parameters,
+    compute_slice_mask,
     compute_z_colormap_colors,
+    find_coordination_polyhedra,
     find_dashed_contacts,
+    is_tilted_cell,
     merge_ghost_structure,
     preset_to_quat,
     quat_to_axes,
@@ -940,13 +945,12 @@ def inspect_structure_summary(
         eff_rep = replicate if data.get("has_cell", False) else (1, 1, 1)
         n_atoms = len(syms) * max(1, eff_rep[0]) * max(1, eff_rep[1]) * max(1, eff_rep[2])
         if data.get("has_cell", False):
-            import math
-
             vecs = data.get("cell", [[0, 0, 0], [0, 0, 0], [0, 0, 0]])
-            lens = [math.sqrt(sum(c * c for c in v)) for v in vecs]
+            la, lb, lc, alpha, beta, gamma = compute_cell_parameters(vecs)
             return (
                 f"{p.name} | {n_atoms} atoms ({elems}) | "
-                f"cell {lens[0]*eff_rep[0]:.2f}×{lens[1]*eff_rep[1]:.2f}×{lens[2]*eff_rep[2]:.2f} Å"
+                f"cell {la*eff_rep[0]:.2f}×{lb*eff_rep[1]:.2f}×{lc*eff_rep[2]:.2f} Å "
+                f"({alpha:.1f}°, {beta:.1f}°, {gamma:.1f}°)"
             )
         return f"{p.name} | {n_atoms} atoms ({elems}) | no periodic cell"
 
@@ -1013,6 +1017,8 @@ class AtomicBlenderApp(tk.Tk):
         self._structure_cache: dict[str, Any] | None = None
         self._base_structure_cache: dict[str, Any] | None = None
         self._ghost_structure_cache: dict[str, Any] | None = None
+        self._trajectory_frames: list[dict[str, Any]] = []
+        self._trajectory_index: int = 0
         self._structure_version = 0
         self._written_struct_version = -1
         self._vp_scene: ViewportScene | None = None
@@ -1237,6 +1243,13 @@ class AtomicBlenderApp(tk.Tk):
         self.var_axes_fixed = tk.BooleanVar(value=True)
         self.var_show_scale_bar = tk.BooleanVar(value=False)
         self.var_show_hbonds = tk.BooleanVar(value=False)
+        self.var_show_polyhedra = tk.BooleanVar(value=False)
+        self.var_show_cell_vectors = tk.BooleanVar(value=False)
+        self.var_slice_mode = tk.StringVar(value="none")
+        self.var_slice_depth = tk.DoubleVar(value=0.60)
+        self.var_slice_ghost = tk.BooleanVar(value=True)
+        self.var_frame_label = tk.StringVar(value="Frame 1 / 1")
+        self.var_frame_pos = tk.DoubleVar(value=1.0)
         self.var_hbond_mode = tk.StringVar(value="hbond")
         self.var_hbond_min = tk.DoubleVar(value=1.55)
         self.var_hbond_max = tk.DoubleVar(value=2.55)
@@ -1402,6 +1415,12 @@ class AtomicBlenderApp(tk.Tk):
         self.entry_view_file.grid(row=2, column=1, sticky=tk.EW, padx=4, pady=2)
         self.btn_view_file = ttk.Button(right_col, text="Open", width=6, command=self._browse_view_file)
         self.btn_view_file.grid(row=2, column=2, pady=2)
+
+        row_rec = ttk.Frame(card)
+        row_rec.grid(row=1, column=0, columnspan=2, sticky=tk.EW, pady=(6, 0))
+        ttk.Label(row_rec, text="Figure Recipe:").pack(side=tk.LEFT, padx=(0, 8))
+        ttk.Button(row_rec, text="Save Recipe...", command=self._on_save_recipe).pack(side=tk.LEFT, padx=(0, 4))
+        ttk.Button(row_rec, text="Load Recipe...", command=self._on_load_recipe).pack(side=tk.LEFT)
         self._sync_view_mode()
 
     def _build_controls(self, parent: ttk.Frame, action_parent: ttk.Frame | None = None) -> None:
@@ -1501,11 +1520,11 @@ class AtomicBlenderApp(tk.Tk):
         row_ori = ttk.Frame(f_cam)
         row_ori.grid(row=0, column=1, columnspan=2, sticky=tk.EW, pady=2)
         for c_i, (o_lbl, o_key) in enumerate(
-            (("Iso", "iso"), ("Slab", "side-oblique"), ("a", "a"), ("b", "b"), ("c", "c"))
+            (("Iso", "iso"), ("Slab", "side-oblique"), ("a", "a"), ("b", "b"), ("c", "c"), ("c*", "c*"))
         ):
             row_ori.columnconfigure(c_i, weight=1, uniform="ori_btn")
             ttk.Button(row_ori, text=o_lbl, command=lambda p=o_key: self._pick_view_preset(p)).grid(
-                row=0, column=c_i, sticky=tk.EW, padx=(0, 3 if c_i < 4 else 0)
+                row=0, column=c_i, sticky=tk.EW, padx=(0, 3 if c_i < 5 else 0)
             )
 
         ttk.Label(f_cam, text="Rotate (°)").grid(row=1, column=0, sticky=tk.W, pady=2)
@@ -1601,6 +1620,62 @@ class AtomicBlenderApp(tk.Tk):
             row=0, column=0, sticky=tk.EW, padx=(0, 4)
         )
         ttk.Button(f_ghost, text="Clear Ghost", command=self._clear_ghost_structure).grid(row=0, column=1)
+
+        f_slice = ttk.LabelFrame(self.tab_tool, text="CROSS-SECTION SLICE", padding=(10, 8))
+        f_slice.pack(fill=tk.X, pady=(0, 8))
+        f_slice.columnconfigure(1, weight=1)
+        ttk.Label(f_slice, text="Plane").grid(row=0, column=0, sticky=tk.W, pady=2)
+        cb_sl = ttk.Combobox(
+            f_slice,
+            textvariable=self.var_slice_mode,
+            values=["none", "camera", "x", "y", "z", "a", "b", "c"],
+            state="readonly",
+            width=9,
+        )
+        cb_sl.grid(row=0, column=1, sticky=tk.W, padx=(6, 6), pady=2)
+        cb_sl.bind("<<ComboboxSelected>>", lambda _e: self._on_slice_changed(trigger_blender=True))
+        DarkCheckbutton(
+            f_slice,
+            text="Ghost Cut",
+            variable=self.var_slice_ghost,
+            command=lambda: self._on_slice_changed(trigger_blender=True),
+        ).grid(row=0, column=2, sticky=tk.E)
+
+        ttk.Label(f_slice, text="Depth").grid(row=1, column=0, sticky=tk.W, pady=2)
+        self.slider_slice = DarkSlider(
+            f_slice,
+            from_=0.10,
+            to=1.00,
+            variable=self.var_slice_depth,
+            command=lambda _v: self._on_slice_changed(trigger_blender=False),
+            release_command=lambda: self._on_slice_changed(trigger_blender=True),
+        )
+        self.slider_slice.grid(row=1, column=1, sticky=tk.EW, padx=(6, 6), pady=2)
+        ttk.Button(f_slice, text="Reset", width=6, command=self._reset_slice).grid(row=1, column=2, pady=2)
+
+        f_traj = ttk.LabelFrame(self.tab_tool, text="TRAJECTORY / NEB FRAMES", padding=(10, 8))
+        f_traj.pack(fill=tk.X, pady=(0, 8))
+        row_tf = ttk.Frame(f_traj)
+        row_tf.pack(fill=tk.X, pady=(0, 4))
+        ttk.Button(row_tf, text="◀", width=3, command=lambda: self._step_trajectory_frame(-1)).pack(side=tk.LEFT)
+        ttk.Label(row_tf, textvariable=self.var_frame_label, width=14, anchor=tk.CENTER).pack(
+            side=tk.LEFT, padx=(6, 6)
+        )
+        ttk.Button(row_tf, text="▶", width=3, command=lambda: self._step_trajectory_frame(1)).pack(
+            side=tk.LEFT, padx=(0, 8)
+        )
+        ttk.Button(row_tf, text="Render Path Strip", command=self._on_render_path_strip).pack(
+            side=tk.RIGHT, fill=tk.X, expand=True
+        )
+        self.slider_frame = DarkSlider(
+            f_traj,
+            from_=1.0,
+            to=2.0,
+            variable=self.var_frame_pos,
+            command=self._on_frame_slider_changed,
+            release_command=self._on_frame_slider_released,
+        )
+        self.slider_frame.pack(fill=tk.X)
 
         # --- Select Tab (tab_selection) ---
         self._build_selection_tab(self.tab_selection)
@@ -1797,6 +1872,8 @@ class AtomicBlenderApp(tk.Tk):
             ("licorice", "Licorice", self.var_disp_licorice, lambda: self._toggle_section(self.f_rep_body)),
             ("vdw", "Van der Waals", self.var_disp_vdw, lambda: self._toggle_section(self.f_rep_body)),
             ("crystal_lattice", "Crystal Lattice", self.var_show_cell, lambda: self._switch_tab("tool")),
+            ("cell_vectors", "Lattice Vectors (a, b, c)", self.var_show_cell_vectors, None),
+            ("polyhedra", "Coordination Polyhedra", self.var_show_polyhedra, None),
             ("reference_axes", "Reference Axes", self.var_show_axes, self._toggle_axes_options),
             ("scale_bar", "Scale Bar (Å)", self.var_show_scale_bar, None),
             ("hbonds", "H-Bonds / Contacts", self.var_show_hbonds, self._toggle_hbond_options),
@@ -2070,6 +2147,18 @@ class AtomicBlenderApp(tk.Tk):
 
         if key == "crystal_lattice":
             self.var_show_cell.set(not bool(self.var_show_cell.get()))
+            self._refresh_display_checks()
+            self._on_repr_changed()
+            return
+
+        if key == "cell_vectors":
+            self.var_show_cell_vectors.set(not bool(self.var_show_cell_vectors.get()))
+            self._refresh_display_checks()
+            self._on_repr_changed()
+            return
+
+        if key == "polyhedra":
+            self.var_show_polyhedra.set(not bool(self.var_show_polyhedra.get()))
             self._refresh_display_checks()
             self._on_repr_changed()
             return
@@ -2879,6 +2968,322 @@ class AtomicBlenderApp(tk.Tk):
 
         threading.Thread(target=worker, daemon=True).start()
 
+    def _apply_slice_mask_to_alphas(self, alphas: list[float]) -> list[float]:
+        """Attenuate cut-away atoms according to Cross-Section Slice plane, depth, and cell vectors."""
+        if self._structure_cache is None or not hasattr(self, "var_slice_mode"):
+            return alphas
+        mode = self.var_slice_mode.get()
+        if mode == "none":
+            return alphas
+        pos = self._structure_cache.get("positions", [])
+        if len(pos) != len(alphas) or len(pos) == 0:
+            return alphas
+        quat = self._vp_scene.quat if self._vp_scene is not None else (1.0, 0.0, 0.0, 0.0)
+        has_cell = bool(self._structure_cache.get("has_cell", False))
+        cell_vecs = self._structure_cache.get("cell") if has_cell else None
+        origin = self._structure_cache.get("origin") if has_cell else None
+        mask = compute_slice_mask(
+            pos,
+            mode=mode,
+            depth_fraction=float(self.var_slice_depth.get()),
+            quat=quat,
+            cell_vecs=cell_vecs,
+            origin=origin,
+        )
+        cut_alpha = 0.06 if bool(self.var_slice_ghost.get()) else 0.02
+        return [a if keep else min(a, cut_alpha) for a, keep in zip(alphas, mask)]
+
+    def _on_slice_changed(self, trigger_blender: bool = False) -> None:
+        if self._structure_cache is None:
+            return
+        self._sync_selection_and_alphas(trigger_blender=trigger_blender)
+        mode = self.var_slice_mode.get()
+        if mode == "none":
+            self.var_status.set("Cross-section slice disabled")
+        else:
+            pct = int(round(float(self.var_slice_depth.get()) * 100.0))
+            self.var_status.set(f"Cross-section slice: {mode} <= {pct}%")
+
+    def _reset_slice(self) -> None:
+        self.var_slice_mode.set("none")
+        self.var_slice_depth.set(0.60)
+        self.var_slice_ghost.set(True)
+        self._on_slice_changed(trigger_blender=True)
+
+    def _update_frame_controls(self) -> None:
+        n_frames = max(1, len(self._trajectory_frames))
+        cur_1 = min(n_frames, max(1, self._trajectory_index + 1))
+        if hasattr(self, "var_frame_label"):
+            self.var_frame_label.set(f"Frame {cur_1} / {n_frames}")
+        if hasattr(self, "slider_frame"):
+            self.slider_frame._from = 1.0
+            self.slider_frame._to = float(max(2, n_frames))
+        if hasattr(self, "var_frame_pos"):
+            self.var_frame_pos.set(float(cur_1))
+
+    def _select_trajectory_frame(self, index: int, trigger_preview: bool = True) -> None:
+        if not self._trajectory_frames:
+            return
+        idx = max(0, min(len(self._trajectory_frames) - 1, int(index)))
+        self._trajectory_index = idx
+        frame = dict(self._trajectory_frames[idx])
+        self._base_structure_cache = dict(frame)
+        self._ghost_structure_cache = None
+        self._structure_cache = frame
+        self._structure_version += 1
+        self._written_struct_version = -1
+        self._update_frame_controls()
+        self._rebuild_viewport(reset_camera=False, trigger_preview=trigger_preview)
+        self.var_status.set(f"Trajectory frame {idx + 1} / {len(self._trajectory_frames)}")
+
+    def _step_trajectory_frame(self, delta: int) -> None:
+        if not self._trajectory_frames:
+            return
+        self._select_trajectory_frame(self._trajectory_index + int(delta), trigger_preview=True)
+
+    def _on_frame_slider_changed(self, _val: str) -> None:
+        if not self._trajectory_frames:
+            return
+        idx = int(round(float(self.var_frame_pos.get()))) - 1
+        idx = max(0, min(len(self._trajectory_frames) - 1, idx))
+        if idx != self._trajectory_index:
+            self._select_trajectory_frame(idx, trigger_preview=False)
+
+    def _on_frame_slider_released(self) -> None:
+        if self._trajectory_frames:
+            self._request_blender_preview()
+
+    def _on_render_path_strip(self) -> None:
+        if self._busy:
+            return
+        if len(self._trajectory_frames) < 2:
+            messagebox.showinfo("Path Strip", "Load a multi-frame trajectory (.xyz / .extxyz / .traj) first.")
+            return
+        if not _HAS_PIL:
+            messagebox.showerror("Pillow Required", "Pillow is required to compose a multi-frame strip.")
+            return
+        try:
+            cfg = self._collect_config()
+            in_path = Path(cfg.input_path).expanduser()
+            eff_style = self._effective_style_path_for_cli(cfg.style)
+            validate_gui_config(cfg)
+        except Exception as exc:
+            messagebox.showerror("Path Strip Failed", str(exc))
+            return
+
+        total = len(self._trajectory_frames)
+        step = max(1, (total + 5) // 6)
+        indices = list(range(0, total, step))
+        if indices[-1] != total - 1:
+            indices.append(total - 1)
+        indices = indices[:6]
+
+        out_base = Path(cfg.output_path).expanduser() if cfg.output_path.strip() else in_path.with_suffix(".png")
+        strip_png = out_base.with_name(f"{out_base.stem}_strip.png")
+        dark_bg = bool(self.var_dark_backdrop.get())
+        show_cvec = bool(self.var_show_cell_vectors.get())
+        show_poly = bool(self.var_show_polyhedra.get())
+        style_dict = self._resolve_style_dict()
+
+        if self._vp_scene is not None:
+            view_dict = self._vp_scene.to_view_dict(cfg.resolution[0], cfg.resolution[1])
+            tmp_vfd, tmp_vname = tempfile.mkstemp(prefix="atomic_strip_vp_", suffix=".json")
+            os.close(tmp_vfd)
+            Path(tmp_vname).write_text(json.dumps(view_dict, indent=2), encoding="utf-8")
+            self._temp_view_files.append(Path(tmp_vname))
+            view_mode_eff, view_file_eff, fit_eff = "file", tmp_vname, False
+        else:
+            view_mode_eff, view_file_eff, fit_eff = cfg.view_mode, cfg.view_file, cfg.fit_view
+
+        frame_jobs: list[tuple[int, str, Path]] = []
+        for fi in indices:
+            fdict = dict(self._trajectory_frames[fi])
+            if show_cvec:
+                fdict["show_cell_vectors"] = True
+            if show_poly and fdict.get("symbols") and fdict.get("positions"):
+                fdict["polyhedra"] = find_coordination_polyhedra(fdict["symbols"], fdict["positions"], style=style_dict)
+            tmp_sfd, tmp_sname = tempfile.mkstemp(prefix=f"atomic_strip_f{fi}_", suffix=".json")
+            os.close(tmp_sfd)
+            Path(tmp_sname).write_text(json.dumps(fdict), encoding="utf-8")
+            self._temp_view_files.append(Path(tmp_sname))
+            f_png = strip_png.parent / f"{out_base.stem}_frame_{fi + 1:02d}.png"
+            frame_jobs.append((fi, tmp_sname, f_png))
+
+        self._task_start = time.monotonic()
+        self._set_busy(True, f"Rendering {len(frame_jobs)}-frame path strip...")
+
+        def worker() -> None:
+            rendered_imgs: list[Any] = []
+            titles: list[str] = []
+            for fi, struct_json, out_p in frame_jobs:
+                c = GuiRenderConfig(
+                    input_path=struct_json,
+                    output_path=str(out_p),
+                    style=eff_style,
+                    view_mode=view_mode_eff,
+                    view_preset=cfg.view_preset,
+                    view_file=view_file_eff,
+                    fit_view=fit_eff,
+                    replicate=(1, 1, 1),
+                    wrap=cfg.wrap,
+                    crop_z_mode=cfg.crop_z_mode,
+                    crop_z_custom=cfg.crop_z_custom,
+                    bonds=cfg.bonds,
+                    bond_color=cfg.bond_color,
+                    radius_scale=cfg.radius_scale,
+                    show_cell=cfg.show_cell,
+                    resolution=cfg.resolution,
+                    samples=cfg.samples,
+                    blender_exe=cfg.blender_exe,
+                )
+                args = build_render_cli_args(c, out_png=out_p)
+                self._queue.put(("log", f"$ atomic-blender {' '.join(args)}"))
+                proc = subprocess.Popen(
+                    [sys.executable, "-m", "atomic_blender.cli", *args],
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.STDOUT,
+                    text=True,
+                    bufsize=1,
+                )
+                assert proc.stdout is not None
+                for raw_line in proc.stdout:
+                    self._queue.put(("log", raw_line))
+                rc = proc.wait()
+                if rc != 0:
+                    self._queue.put(("done_strip", (rc, strip_png, f"Frame {fi + 1} exited with status {rc}")))
+                    return
+                rendered_imgs.append(Image.open(out_p).convert("RGBA"))
+                titles.append(f"Frame {fi + 1}")
+            try:
+                strip_img = compose_multi_panel_strip(rendered_imgs, titles=titles, dark_backdrop=dark_bg)
+                strip_img.save(strip_png)
+                self._queue.put(("done_strip", (0, strip_png, "")))
+            except Exception as exc:
+                self._queue.put(("done_strip", (1, strip_png, str(exc))))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def export_figure_recipe(self) -> dict[str, Any]:
+        """Export current visual styling, representation, slicing, overlays, and camera as a recipe dict."""
+        recipe: dict[str, Any] = {
+            "recipe_version": 1,
+            "style": self.var_style.get(),
+            "material_finish": self.var_material_finish.get(),
+            "color_map": self.var_color_map.get(),
+            "bonds": self.var_bonds.get(),
+            "bond_color": self.var_bond_color.get(),
+            "radius_scale": float(self.var_radius_scale.get()),
+            "show_cell": bool(self.var_show_cell.get()),
+            "show_cell_vectors": bool(self.var_show_cell_vectors.get()),
+            "show_polyhedra": bool(self.var_show_polyhedra.get()),
+            "show_labels": bool(self.var_show_labels.get()),
+            "show_measure_overlay": bool(self.var_show_measure_overlay.get()),
+            "show_axes": bool(self.var_show_axes.get()),
+            "axes_labels": bool(self.var_axes_labels.get()),
+            "show_scale_bar": bool(self.var_show_scale_bar.get()),
+            "show_hbonds": bool(self.var_show_hbonds.get()),
+            "hbond_mode": self.var_hbond_mode.get(),
+            "hbond_min": float(self.var_hbond_min.get()),
+            "hbond_max": float(self.var_hbond_max.get()),
+            "slice_mode": self.var_slice_mode.get(),
+            "slice_depth": float(self.var_slice_depth.get()),
+            "slice_ghost": bool(self.var_slice_ghost.get()),
+            "dark_backdrop": bool(self.var_dark_backdrop.get()),
+            "custom_element_colors": dict(self._custom_element_colors),
+            "resolution": [int(self.var_res_w.get()), int(self.var_res_h.get())],
+            "samples": int(self.var_samples.get()),
+        }
+        if self._vp_scene is not None:
+            recipe["camera"] = {
+                "quat": [float(v) for v in self._vp_scene.quat],
+                "ortho_scale": float(self._vp_scene.ortho_scale),
+                "target": [float(v) for v in self._vp_scene.target],
+            }
+        return recipe
+
+    def apply_figure_recipe(self, recipe: dict[str, Any], trigger_preview: bool = True) -> None:
+        """Apply a saved figure recipe dict to all matching GUI visualization controls."""
+        str_map = (
+            ("style", self.var_style),
+            ("material_finish", self.var_material_finish),
+            ("color_map", self.var_color_map),
+            ("bonds", self.var_bonds),
+            ("bond_color", self.var_bond_color),
+            ("hbond_mode", self.var_hbond_mode),
+            ("slice_mode", self.var_slice_mode),
+        )
+        for key, var in str_map:
+            if key in recipe:
+                var.set(str(recipe[key]))
+        bool_map = (
+            ("show_cell", self.var_show_cell),
+            ("show_cell_vectors", self.var_show_cell_vectors),
+            ("show_polyhedra", self.var_show_polyhedra),
+            ("show_labels", self.var_show_labels),
+            ("show_measure_overlay", self.var_show_measure_overlay),
+            ("show_axes", self.var_show_axes),
+            ("axes_labels", self.var_axes_labels),
+            ("show_scale_bar", self.var_show_scale_bar),
+            ("show_hbonds", self.var_show_hbonds),
+            ("slice_ghost", self.var_slice_ghost),
+            ("dark_backdrop", self.var_dark_backdrop),
+        )
+        for key, var in bool_map:
+            if key in recipe:
+                var.set(bool(recipe[key]))
+        if "radius_scale" in recipe:
+            rs = float(recipe["radius_scale"])
+            self.var_radius_scale.set(rs)
+            self.var_radius_label.set(f"{rs:.2f}×")
+        if "hbond_min" in recipe:
+            self.var_hbond_min.set(float(recipe["hbond_min"]))
+        if "hbond_max" in recipe:
+            self.var_hbond_max.set(float(recipe["hbond_max"]))
+        if "slice_depth" in recipe:
+            self.var_slice_depth.set(float(recipe["slice_depth"]))
+        if isinstance(recipe.get("custom_element_colors"), dict):
+            self._custom_element_colors = {str(k): str(v) for k, v in recipe["custom_element_colors"].items()}
+        if isinstance(recipe.get("resolution"), list) and len(recipe["resolution"]) == 2:
+            self.var_res_w.set(int(recipe["resolution"][0]))
+            self.var_res_h.set(int(recipe["resolution"][1]))
+        if "samples" in recipe:
+            self.var_samples.set(int(recipe["samples"]))
+        cam = recipe.get("camera")
+        if isinstance(cam, dict) and self._vp_scene is not None:
+            if len(cam.get("quat", [])) == 4:
+                self._vp_scene.quat = tuple(float(v) for v in cam["quat"])  # type: ignore[assignment]
+            if "ortho_scale" in cam:
+                self._vp_scene.ortho_scale = float(cam["ortho_scale"])
+            if len(cam.get("target", [])) == 3:
+                self._vp_scene.target = np.asarray(cam["target"], dtype=np.float64)
+            self._use_interactive_cam = True
+        self._refresh_display_checks()
+        self.var_status.set("Applied figure recipe")
+        if self._structure_cache is not None:
+            self._rebuild_viewport(reset_camera=False, trigger_preview=trigger_preview)
+
+    def _on_save_recipe(self) -> None:
+        path = filedialog.asksaveasfilename(
+            title="Save Figure Recipe JSON",
+            defaultextension=".json",
+            initialfile="figure_recipe.json",
+            filetypes=[("JSON files", "*.json")],
+        )
+        if not path:
+            return
+        Path(path).write_text(json.dumps(self.export_figure_recipe(), indent=2), encoding="utf-8")
+        self.var_status.set(f"Saved recipe -> {Path(path).name}")
+
+    def _on_load_recipe(self) -> None:
+        path = filedialog.askopenfilename(
+            title="Load Figure Recipe JSON",
+            filetypes=[("JSON files", "*.json"), ("All files", "*.*")],
+        )
+        if not path:
+            return
+        data = json.loads(Path(path).expanduser().read_text(encoding="utf-8"))
+        self.apply_figure_recipe(data, trigger_preview=True)
+
     def _refresh_turnkey_structure_annotations(self, style: dict[str, Any]) -> tuple[str, float, float] | None:
         """Compute active Z-height colormap and 3D dashed contact pairs on ``_structure_cache``."""
         if self._structure_cache is None:
@@ -2955,6 +3360,29 @@ class AtomicBlenderApp(tk.Tk):
         prev_dashed = self._structure_cache.get("dashed_bonds", [])
         if prev_dashed != dashed:
             self._structure_cache["dashed_bonds"] = dashed
+            self._written_struct_version = -1
+
+        main_n = gs_int if gs_int is not None else n
+        if (
+            hasattr(self, "var_show_polyhedra")
+            and self.var_show_polyhedra.get()
+            and main_n >= 5
+            and len(pos) >= main_n
+        ):
+            polys = find_coordination_polyhedra(syms[:main_n], pos[:main_n], style=style)
+            if self._structure_cache.get("polyhedra") != polys:
+                self._structure_cache["polyhedra"] = polys
+                self._written_struct_version = -1
+        elif "polyhedra" in self._structure_cache:
+            self._structure_cache.pop("polyhedra", None)
+            self._written_struct_version = -1
+
+        show_cvec = bool(getattr(self, "var_show_cell_vectors", None) and self.var_show_cell_vectors.get())
+        if bool(self._structure_cache.get("show_cell_vectors", False)) != show_cvec:
+            if show_cvec:
+                self._structure_cache["show_cell_vectors"] = True
+            else:
+                self._structure_cache.pop("show_cell_vectors", None)
             self._written_struct_version = -1
         return cmap_info
 
@@ -3076,6 +3504,7 @@ class AtomicBlenderApp(tk.Tk):
                 opacity=float(self.var_sel_opacity.get()),
                 invert=bool(self.var_alpha_invert.get()),
             )
+        alphas = self._apply_slice_mask_to_alphas(alphas)
         scale_mode = self.var_unsel_scale_mode.get() if hasattr(self, "var_unsel_scale_mode") else "same"
         if scale_mode == "slim":
             sel_s, unsel_s = 1.12, 0.55
@@ -3224,18 +3653,17 @@ class AtomicBlenderApp(tk.Tk):
                 if not p.is_file():
                     self._queue.put(("inspect", f"File not found: {p.name}"))
                     return
-                if p.suffix.lower() == ".json":
-                    neutral = json.loads(p.read_text(encoding="utf-8"))
-                    eff_rep = rep if neutral.get("has_cell", False) else (1, 1, 1)
-                    if eff_rep != (1, 1, 1):
-                        atoms = read_structure(p, type_map=type_map.strip() or None)
-                        neutral = atoms_to_neutral_dict(atoms, source=str(p), replicate=eff_rep, wrap=wrap)
-                else:
-                    atoms = read_structure(p, type_map=type_map.strip() or None)
-                    eff_rep = rep if atoms.cell.rank == 3 else (1, 1, 1)
-                    neutral = atoms_to_neutral_dict(atoms, source=str(p), replicate=eff_rep, wrap=wrap)
+                frames = read_structure_frames(
+                    p,
+                    type_map=type_map.strip() or None,
+                    replicate=rep,
+                    wrap=wrap,
+                )
+                eff_rep = rep if (frames and frames[0].get("has_cell", False)) else (1, 1, 1)
                 summary = inspect_structure_summary(path, type_map=type_map, replicate=eff_rep)
-                self._queue.put(("structure", (summary, neutral)))
+                if len(frames) > 1:
+                    summary = f"{summary} | {len(frames)} frames"
+                self._queue.put(("structure_frames", (summary, frames)))
             except Exception as exc:
                 self._queue.put(("inspect", f"Inspect error: {exc}"))
 
@@ -3376,7 +3804,9 @@ class AtomicBlenderApp(tk.Tk):
             has_cols = bool(self._structure_cache.get("colors"))
             has_dashed = bool(self._structure_cache.get("dashed_bonds"))
             has_ghost = self._structure_cache.get("ghost_start_index") is not None
-            if has_alpha or has_scale or has_cols or has_dashed or has_ghost:
+            has_poly = bool(self._structure_cache.get("polyhedra"))
+            has_cvec = bool(self._structure_cache.get("show_cell_vectors"))
+            if has_alpha or has_scale or has_cols or has_dashed or has_ghost or has_poly or has_cvec:
                 tmp_sfd, tmp_sname = tempfile.mkstemp(prefix="atomic_sel_", suffix=".json")
                 os.close(tmp_sfd)
                 tmp_spath = Path(tmp_sname)
@@ -3577,6 +4007,18 @@ class AtomicBlenderApp(tk.Tk):
         style = self._resolve_style_dict()
         cmap_info = self._refresh_turnkey_structure_annotations(style)
         self._active_colormap_info = cmap_info
+        if hasattr(self, "var_slice_mode") and self.var_slice_mode.get() != "none":
+            n_cur = len(self._structure_cache.get("symbols", []))
+            raw_a = self._structure_cache.get("alphas")
+            base_a = (
+                [float(x) for x in raw_a]
+                if isinstance(raw_a, list) and len(raw_a) == n_cur
+                else [1.0] * n_cur
+            )
+            sliced_a = self._apply_slice_mask_to_alphas(base_a)
+            if sliced_a != raw_a:
+                self._structure_cache["alphas"] = sliced_a
+                self._written_struct_version = -1
         vp = ViewportScene.from_neutral_dict(
             self._structure_cache,
             style=style,
@@ -3595,6 +4037,7 @@ class AtomicBlenderApp(tk.Tk):
             show_measure_overlay=bool(self.var_show_measure_overlay.get()),
             selection_order=list(self._selection_order),
             colormap_info=cmap_info,
+            show_cell_vectors=bool(getattr(self, "var_show_cell_vectors", None) and self.var_show_cell_vectors.get()),
         )
         self._refresh_display_checks()
         self._rebuild_element_chips()
@@ -3681,6 +4124,8 @@ class AtomicBlenderApp(tk.Tk):
                 list(self._structure_cache.get("colors", [])),
                 list(self._structure_cache.get("dashed_bonds", [])),
                 self._structure_cache.get("ghost_start_index"),
+                len(self._structure_cache.get("polyhedra", [])),
+                bool(self._structure_cache.get("show_cell_vectors", False)),
             ]
         )
 
@@ -4091,12 +4536,14 @@ class AtomicBlenderApp(tk.Tk):
                 )
             if self.var_show_axes.get() and from_tmp_preview:
                 quat = self._vp_scene.quat if self._vp_scene is not None else (1.0, 0.0, 0.0, 0.0)
+                cvecs = self._vp_scene.cell_vecs if (self._vp_scene is not None and self._vp_scene.has_cell) else None
                 render_reference_axes_overlay(
                     resized,
                     quat,
                     axes_pos=self._axes_pos,
                     show_labels=bool(self.var_axes_labels.get()),
                     dark_backdrop=dark_bg,
+                    cell_vecs=cvecs,
                 )
             self._photo_ref = ImageTk.PhotoImage(resized)
         else:
@@ -4147,6 +4594,9 @@ class AtomicBlenderApp(tk.Tk):
                 self.var_inspector.set(str(summary))
                 self._selected_atoms.clear()
                 self._selection_order.clear()
+                self._trajectory_frames = [dict(neutral)]
+                self._trajectory_index = 0
+                self._update_frame_controls()
                 self._base_structure_cache = dict(neutral)
                 self._ghost_structure_cache = None
                 self._structure_cache = neutral
@@ -4156,6 +4606,25 @@ class AtomicBlenderApp(tk.Tk):
                 if in_raw:
                     self._add_recent_file(in_raw)
                 self._rebuild_viewport(reset_camera=True, trigger_preview=True)
+            elif kind == "structure_frames":
+                summary, frames = payload
+                self.var_inspector.set(str(summary))
+                self._selected_atoms.clear()
+                self._selection_order.clear()
+                self._trajectory_frames = [dict(f) for f in frames] if frames else []
+                self._trajectory_index = 0
+                self._update_frame_controls()
+                first = dict(self._trajectory_frames[0]) if self._trajectory_frames else {}
+                self._base_structure_cache = dict(first) if first else None
+                self._ghost_structure_cache = None
+                self._structure_cache = first or None
+                self._structure_version += 1
+                self._use_interactive_cam = False
+                in_raw = self.var_input.get().strip()
+                if in_raw:
+                    self._add_recent_file(in_raw)
+                if self._structure_cache is not None:
+                    self._rebuild_viewport(reset_camera=True, trigger_preview=True)
             elif kind == "preview_done":
                 seq, png_path = payload
                 if seq == self._preview_seq and not self._dragging:
@@ -4205,12 +4674,18 @@ class AtomicBlenderApp(tk.Tk):
                                 )
                             if self.var_show_axes.get():
                                 quat = self._vp_scene.quat if self._vp_scene is not None else (1.0, 0.0, 0.0, 0.0)
+                                cvecs = (
+                                    self._vp_scene.cell_vecs
+                                    if (self._vp_scene is not None and self._vp_scene.has_cell)
+                                    else None
+                                )
                                 render_reference_axes_overlay(
                                     out_img,
                                     quat,
                                     axes_pos=self._axes_pos,
                                     show_labels=bool(self.var_axes_labels.get()),
                                     dark_backdrop=bool(self.var_dark_backdrop.get()),
+                                    cell_vecs=cvecs,
                                 )
                             out_img.save(target_path)
                         except Exception as exc:
@@ -4229,6 +4704,16 @@ class AtomicBlenderApp(tk.Tk):
                     self._preview_seq += 1
                     self._set_busy(False, f"Saved panel {panel_png.name} in {elapsed:.1f}s")
                     self._load_preview(panel_png)
+            elif kind == "done_strip":
+                rc, strip_png, err_msg = payload
+                elapsed = time.monotonic() - self._task_start
+                if rc != 0:
+                    self._set_busy(False, f"Path strip failed after {elapsed:.1f}s")
+                    messagebox.showerror("Path Strip Failed", err_msg or f"Strip exited with status {rc}")
+                else:
+                    self._preview_seq += 1
+                    self._set_busy(False, f"Saved path strip {strip_png.name} in {elapsed:.1f}s")
+                    self._load_preview(strip_png)
             elif kind == "done_batch":
                 rc, done_cnt, total_cnt, last_png = payload
                 elapsed = time.monotonic() - self._task_start
@@ -4243,13 +4728,21 @@ class AtomicBlenderApp(tk.Tk):
             self._poll_after_id = self.after(100, self._poll_queue)
 
     def handle_dropped_files(self, paths: list[str]) -> None:
-        """Apply dropped structure, view.json, or style.json files to the GUI state."""
+        """Apply dropped structure, view.json, style.json, or recipe JSON files to the GUI state."""
         for raw_path in paths:
             p = Path(raw_path).expanduser()
             if not p.is_file():
                 continue
             kind = classify_dropped_file(p)
-            if kind == "view":
+            if kind == "recipe":
+                try:
+                    data = json.loads(p.read_text(encoding="utf-8"))
+                    self.apply_figure_recipe(data, trigger_preview=True)
+                    self.var_status.set(f"Loaded figure recipe via drop: {p.name}")
+                    self._append_log(f"Dropped recipe file: {p}")
+                except Exception as exc:
+                    messagebox.showerror("Invalid Recipe JSON", str(exc))
+            elif kind == "view":
                 self.var_view_mode.set("file")
                 self.var_view_file.set(str(p))
                 self._sync_view_mode()

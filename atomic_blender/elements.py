@@ -10,7 +10,7 @@ import json
 from pathlib import Path
 from typing import Any
 
-VIEW_PRESETS: tuple[str, ...] = ("iso", "side-oblique", "a", "b", "c")
+VIEW_PRESETS: tuple[str, ...] = ("iso", "side-oblique", "a", "b", "c", "a*", "b*", "c*")
 
 # Jmol CPK color palette (Z = 1..109) matching ase.data.colors.jmol_colors
 JMOL_COLORS: dict[str, str] = {
@@ -112,13 +112,15 @@ def resolve_element_radius(symbol: str, style: dict[str, Any]) -> float:
 
 
 def classify_dropped_file(path: Path) -> str:
-    """Classify a dropped file as ``'view'``, ``'style'``, or ``'structure'``."""
+    """Classify a dropped file as ``'view'``, ``'style'``, ``'recipe'``, or ``'structure'``."""
     if path.suffix.lower() == ".json":
         try:
             data = json.loads(path.read_text(encoding="utf-8"))
         except Exception:
             return "structure"
         if isinstance(data, dict):
+            if "recipe_version" in data:
+                return "recipe"
             if "rotation_quaternion" in data or "ortho_scale" in data:
                 return "view"
             if "elements" in data and any(k in data for k in ("material", "lighting", "render")):
