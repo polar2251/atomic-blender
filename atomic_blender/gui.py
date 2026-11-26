@@ -193,10 +193,25 @@ def _open_folder(folder: Path) -> None:
         subprocess.Popen(["xdg-open", str(folder)])
 
 
+def _enable_hidpi() -> None:
+    """Enable native DPI awareness on Windows so fonts and the 3D canvas are crisp."""
+    if sys.platform.startswith("win") or os.name == "nt":
+        try:
+            import ctypes
+
+            try:
+                ctypes.windll.shcore.SetProcessDpiAwareness(1)
+            except Exception:
+                ctypes.windll.user32.SetProcessDPIAware()
+        except Exception:
+            pass
+
+
 class AtomicBlenderApp(tk.Tk):
     """Desktop GUI client for atomic-blender."""
 
     def __init__(self, initial_input: str | None = None) -> None:
+        _enable_hidpi()
         super().__init__()
         self.title("Atomic Blender Studio — Desktop Client")
         self.geometry("1240x820")
@@ -208,9 +223,11 @@ class AtomicBlenderApp(tk.Tk):
         self._busy = False
         self._task_start = 0.0
         self._inspect_after_id: str | None = None
+        self._hq_after_id: str | None = None
         self._preview_path: Path | None = None
         self._pil_image: Any = None
         self._photo_ref: Any = None
+        self._vp_photo_ref: Any = None
         self._structure_cache: dict[str, Any] | None = None
         self._vp_scene: ViewportScene | None = None
         self._use_interactive_cam = False
@@ -968,7 +985,7 @@ class AtomicBlenderApp(tk.Tk):
             self._dragging = False
             self._drag_mode = None
             if self.var_canvas_mode.get() == "3d":
-                self._draw_3d_viewport()
+                self._draw_3d_viewport(interactive=False)
 
     def _on_canvas_wheel(self, event: tk.Event) -> None:
         if self._vp_scene is None:
@@ -976,13 +993,24 @@ class AtomicBlenderApp(tk.Tk):
         factor = 0.9 if event.delta > 0 else 1.111
         self._zoom_3d(factor)
 
+    def _schedule_hq_redraw(self) -> None:
+        if self._hq_after_id is not None:
+            self.after_cancel(self._hq_after_id)
+        self._hq_after_id = self.after(140, self._run_hq_redraw)
+
+    def _run_hq_redraw(self) -> None:
+        self._hq_after_id = None
+        if not self._dragging and self.var_canvas_mode.get() == "3d" and self._vp_scene is not None:
+            self._draw_3d_viewport(interactive=False)
+
     def _zoom_3d(self, factor: float) -> None:
         if self._vp_scene is None:
             return
         self.var_canvas_mode.set("3d")
         self._vp_scene.zoom(factor)
         self._use_interactive_cam = True
-        self._draw_3d_viewport()
+        self._draw_3d_viewport(interactive=True)
+        self._schedule_hq_redraw()
 
     def _viewport_px_per_angstrom(self) -> float:
         cw = max(1, self.canvas.winfo_width())
@@ -995,7 +1023,7 @@ class AtomicBlenderApp(tk.Tk):
         ortho = self._vp_scene.ortho_scale if self._vp_scene is not None else 20.0
         return (fw / max(1e-3, ortho)) if res_w >= res_h else (fh / max(1e-3, ortho))
 
-    def _draw_3d_viewport(self) -> None:
+    def _draw_3d_viewport(self, interactive: bool | None = None) -> None:
         self.canvas.delete("all")
         cw = max(1, self.canvas.winfo_width())
         ch = max(1, self.canvas.winfo_height())
@@ -1013,6 +1041,13 @@ class AtomicBlenderApp(tk.Tk):
         vp = self._vp_scene
         res_w = max(16, int(self.var_res_w.get()))
         res_h = max(16, int(self.var_res_h.get()))
+        is_interactive = self._dragging if interactive is None else interactive
+
+        if _HAS_PIL:
+            img = vp.render_image(cw, ch, res_w, res_h, interactive=is_interactive)
+            self._vp_photo_ref = ImageTk.PhotoImage(img)
+            self.canvas.create_image(0, 0, image=self._vp_photo_ref, anchor=tk.NW)
+            return
         scale = min((cw - 24) / res_w, (ch - 24) / res_h)
         fw = res_w * scale
         fh = res_h * scale

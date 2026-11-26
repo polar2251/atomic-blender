@@ -5,7 +5,7 @@ setup(
     version="0.1.0",
     license="MIT",
     packages=find_packages(include=["atomic_blender*"]),
-    install_requires=["ase>=3.22", "numpy>=1.22"],
+    install_requires=["ase>=3.22", "numpy>=1.22", "pillow>=9.0"],
     package_data={
         "atomic_blender": [
             "styles/*.json",
