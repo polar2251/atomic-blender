@@ -16,21 +16,25 @@ import tempfile
 import threading
 import time
 import tkinter as tk
-from tkinter import filedialog, messagebox, scrolledtext, ttk
+from tkinter import colorchooser, filedialog, messagebox, scrolledtext, ttk
 from typing import Any
 
 import numpy as np
 
 from atomic_blender.cli import _collect_style_files, find_blender_executable, resolve_style_path
 from atomic_blender.convert import atoms_to_neutral_dict, read_structure
-from atomic_blender.elements import VIEW_PRESETS, classify_dropped_file
+from atomic_blender.elements import METAL_ELEMENTS, VIEW_PRESETS, classify_dropped_file
 from atomic_blender.viewport3d import (
     ViewportScene,
     atom_label,
+    choose_scale_bar_angstrom,
+    compose_dual_view_panel,
     preset_to_quat,
     quat_to_axes,
     render_atom_labels_and_selection_overlay,
+    render_measurement_callout_overlay,
     render_reference_axes_overlay,
+    render_scale_bar_overlay,
 )
 
 try:
@@ -504,6 +508,116 @@ def compute_atom_alphas(
     return [op if i in selected else 1.0 for i in range(n_atoms)]
 
 
+def compute_atom_radius_scales(
+    n_atoms: int,
+    selected: set[int],
+    sel_scale: float = 1.0,
+    unsel_scale: float = 1.0,
+) -> list[float]:
+    """Compute per-atom radius multipliers distinguishing focal and background atoms."""
+    if n_atoms <= 0:
+        return []
+    if not selected:
+        return [1.0] * n_atoms
+    return [float(sel_scale) if i in selected else float(unsel_scale) for i in range(n_atoms)]
+
+
+def find_neighbor_atoms(
+    positions: Any,
+    seed_indices: set[int],
+    cutoff_a: float = 3.0,
+) -> set[int]:
+    """Return all atom indices within ``cutoff_a`` Angstroms of any seed atom (inclusive)."""
+    pos = np.asarray(positions, dtype=np.float64).reshape(-1, 3)
+    n = len(pos)
+    valid_seeds = sorted(i for i in seed_indices if 0 <= i < n)
+    if not valid_seeds or n == 0:
+        return set(valid_seeds)
+    cutoff = max(0.1, float(cutoff_a))
+    seed_pts = pos[valid_seeds]
+    diff = pos[:, None, :] - seed_pts[None, :, :]
+    dists = np.linalg.norm(diff, axis=2)
+    within = np.any(dists <= cutoff + 1e-6, axis=1)
+    return set(np.flatnonzero(within).tolist()) | set(valid_seeds)
+
+
+def auto_detect_adsorbate_indices(symbols: list[str], positions: Any) -> set[int]:
+    """Heuristically identify surface/adsorbate atoms (non-metals above metal slab, or top 22% Z)."""
+    pos = np.asarray(positions, dtype=np.float64).reshape(-1, 3)
+    n = min(len(symbols), len(pos))
+    if n == 0:
+        return set()
+    metal_idx = [i for i in range(n) if symbols[i] in METAL_ELEMENTS]
+    nonmetal_idx = [i for i in range(n) if symbols[i] not in METAL_ELEMENTS]
+    if metal_idx and nonmetal_idx:
+        z_med_metal = float(np.median(pos[metal_idx, 2]))
+        above = {i for i in nonmetal_idx if float(pos[i, 2]) >= z_med_metal - 0.5}
+        return above if above else set(nonmetal_idx)
+    zs = pos[:n, 2]
+    z_min, z_max = float(np.min(zs)), float(np.max(zs))
+    if z_max - z_min < 1e-3:
+        return {0}
+    thresh = z_max - 0.22 * (z_max - z_min)
+    top = {i for i in range(n) if float(zs[i]) >= thresh - 1e-6}
+    return top if top else {int(np.argmax(zs))}
+
+
+def compute_adsorbate_spotlight_alphas(
+    symbols: list[str],
+    positions: Any,
+    focal_indices: set[int] | None = None,
+    shell_cutoff_a: float = 3.2,
+) -> tuple[set[int], list[float]]:
+    """Compute focal spotlight + first coordination shell + Z-faded substrate alphas."""
+    pos = np.asarray(positions, dtype=np.float64).reshape(-1, 3)
+    n = min(len(symbols), len(pos))
+    if n == 0:
+        return set(), []
+    focal = (
+        {i for i in focal_indices if 0 <= i < n}
+        if focal_indices
+        else auto_detect_adsorbate_indices(symbols, pos)
+    )
+    if not focal:
+        return set(), [1.0] * n
+    shell = find_neighbor_atoms(pos[:n], focal, shell_cutoff_a) - focal
+    zs = pos[:n, 2]
+    z_min, z_max = float(np.min(zs)), float(np.max(zs))
+    z_span = max(1e-3, z_max - z_min)
+
+    alphas: list[float] = []
+    for i in range(n):
+        if i in focal:
+            alphas.append(1.0)
+        elif i in shell:
+            alphas.append(0.85)
+        else:
+            z_norm = max(0.0, min(1.0, (float(zs[i]) - z_min) / z_span))
+            alphas.append(round(0.15 + 0.28 * z_norm, 3))
+    return focal, alphas
+
+
+def compute_depth_fade_alphas(
+    positions: Any,
+    min_alpha: float = 0.18,
+    max_alpha: float = 1.0,
+) -> list[float]:
+    """Compute smooth bottom-to-top Z-height opacity gradient across all atoms."""
+    pos = np.asarray(positions, dtype=np.float64).reshape(-1, 3)
+    n = len(pos)
+    if n == 0:
+        return []
+    zs = pos[:, 2]
+    z_min, z_max = float(np.min(zs)), float(np.max(zs))
+    span = z_max - z_min
+    if span < 1e-6:
+        return [float(max_alpha)] * n
+    return [
+        round(min_alpha + (max_alpha - min_alpha) * max(0.0, min(1.0, (float(z) - z_min) / span)), 3)
+        for z in zs
+    ]
+
+
 def compute_selection_measurement(
     symbols: list[str],
     positions: Any,
@@ -877,6 +991,7 @@ class AtomicBlenderApp(tk.Tk):
         self._show_atoms = True
         self._selected_atoms: set[int] = set()
         self._selection_order: list[int] = []
+        self._custom_element_colors: dict[str, str] = {}
         self._recent_files: list[str] = self._load_recent_files()
         self._display_checks: dict[str, tuple[tk.Canvas, tk.BooleanVar]] = {}
         self._temp_view_files: list[Path] = []
@@ -1083,9 +1198,11 @@ class AtomicBlenderApp(tk.Tk):
         self.var_disp_licorice = tk.BooleanVar(value=False)
         self.var_disp_vdw = tk.BooleanVar(value=False)
         self.var_show_labels = tk.BooleanVar(value=False)
+        self.var_show_measure_overlay = tk.BooleanVar(value=True)
         self.var_show_axes = tk.BooleanVar(value=True)
         self.var_axes_labels = tk.BooleanVar(value=True)
         self.var_axes_fixed = tk.BooleanVar(value=True)
+        self.var_show_scale_bar = tk.BooleanVar(value=False)
         self.var_dark_backdrop = tk.BooleanVar(value=True)
 
         self.var_res_w = tk.IntVar(value=1400)
@@ -1098,6 +1215,8 @@ class AtomicBlenderApp(tk.Tk):
         self.var_sel_opacity = tk.DoubleVar(value=0.30)
         self.var_sel_opacity_label = tk.StringVar(value="30%")
         self.var_alpha_invert = tk.BooleanVar(value=False)
+        self.var_neighbor_cutoff = tk.DoubleVar(value=3.0)
+        self.var_unsel_scale_mode = tk.StringVar(value="same")
         self.var_measurement = tk.StringVar(value="Double-click 1–4 atoms for coords / distance / angle / dihedral")
         self.var_z_min = tk.StringVar(value="")
         self.var_z_max = tk.StringVar(value="")
@@ -1406,6 +1525,21 @@ class AtomicBlenderApp(tk.Tk):
         self.chk_fit_view.grid(row=3, column=1, columnspan=2, sticky=tk.W, padx=4, pady=2)
         self._sync_view_mode()
 
+        f_pub = ttk.LabelFrame(self.tab_tool, text="Publication Figure Recipes", padding=8)
+        f_pub.pack(fill=tk.X, pady=(0, 6))
+        f_pub.columnconfigure(0, weight=1, uniform="pub_btn")
+        f_pub.columnconfigure(1, weight=1, uniform="pub_btn")
+        ttk.Button(
+            f_pub,
+            text="Smart Slab Spotlight",
+            command=self._apply_smart_slab_spotlight,
+        ).grid(row=0, column=0, sticky=tk.EW, padx=(0, 4))
+        ttk.Button(
+            f_pub,
+            text="Render Top + Side Panel",
+            command=self._on_render_top_side_panel,
+        ).grid(row=0, column=1, sticky=tk.EW)
+
         # --- Selection Tab: Atom Labels, Opacity / Invert, Atom List ---
         self._build_selection_tab(self.tab_selection)
 
@@ -1463,7 +1597,13 @@ class AtomicBlenderApp(tk.Tk):
             variable=self.var_show_labels,
             command=self._on_labels_toggled,
         ).pack(side=tk.LEFT)
-        ttk.Label(row_top, text="Double-click atom in viewport", style="Muted.TLabel").pack(side=tk.RIGHT)
+        DarkCheckbutton(
+            row_top,
+            text="2D Callout",
+            variable=self.var_show_measure_overlay,
+            command=self._on_labels_toggled,
+        ).pack(side=tk.LEFT, padx=(10, 0))
+        ttk.Label(row_top, text="Dbl-click atom", style="Muted.TLabel").pack(side=tk.RIGHT)
 
         row_btns = ttk.Frame(f_lbl)
         row_btns.pack(fill=tk.X)
@@ -1478,6 +1618,20 @@ class AtomicBlenderApp(tk.Tk):
                 row=0, column=c_idx, sticky=tk.EW, padx=(0, 3 if c_idx < 3 else 0)
             )
 
+        row_shell = ttk.Frame(f_lbl)
+        row_shell.pack(fill=tk.X, pady=(6, 0))
+        ttk.Label(row_shell, text="+Å").pack(side=tk.LEFT)
+        ttk.Entry(row_shell, textvariable=self.var_neighbor_cutoff, width=4, justify=tk.CENTER).pack(
+            side=tk.LEFT, padx=(3, 4)
+        )
+        ttk.Button(row_shell, text="Expand Shell", command=self._expand_selection_neighbors).pack(
+            side=tk.LEFT, padx=(0, 4)
+        )
+        ttk.Button(row_shell, text="Adsorbate Spotlight", command=self._apply_adsorbate_spotlight_recipe).pack(
+            side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 4)
+        )
+        ttk.Button(row_shell, text="Z-Fade", command=self._apply_depth_fade_recipe).pack(side=tk.LEFT)
+
         self.f_elem_chips = ttk.Frame(f_lbl)
         self.f_elem_chips.pack(fill=tk.X, pady=(6, 0))
         self._elem_chip_buttons: dict[str, tk.Button] = {}
@@ -1489,6 +1643,7 @@ class AtomicBlenderApp(tk.Tk):
         ttk.Label(row_z, text="~").pack(side=tk.LEFT)
         ttk.Entry(row_z, textvariable=self.var_z_max, width=7).pack(side=tk.LEFT, padx=(2, 6))
         ttk.Button(row_z, text="Select Z", command=self._select_by_z_range).pack(side=tk.LEFT)
+        ttk.Button(row_z, text="Reset Colors", command=self._reset_custom_element_colors).pack(side=tk.RIGHT)
 
         ttk.Label(
             f_lbl,
@@ -1498,7 +1653,7 @@ class AtomicBlenderApp(tk.Tk):
             wraplength=330,
         ).pack(fill=tk.X, pady=(6, 0))
 
-        f_op = ttk.LabelFrame(parent, text="Selection Transparency", padding=8)
+        f_op = ttk.LabelFrame(parent, text="Selection Transparency & Hybrid Size", padding=8)
         f_op.pack(fill=tk.X, pady=(0, 6))
         f_op.columnconfigure(0, minsize=72)
         f_op.columnconfigure(1, weight=1)
@@ -1521,7 +1676,19 @@ class AtomicBlenderApp(tk.Tk):
             text="Fade Unselected (선택 반대 투명화)",
             variable=self.var_alpha_invert,
             command=self._on_opacity_released,
-        ).grid(row=1, column=0, columnspan=4, sticky=tk.W, pady=(4, 0))
+        ).grid(row=1, column=0, columnspan=4, sticky=tk.W, pady=(4, 2))
+
+        row_bg_sz = ttk.Frame(f_op)
+        row_bg_sz.grid(row=2, column=0, columnspan=4, sticky=tk.EW, pady=(2, 0))
+        ttk.Label(row_bg_sz, text="Substrate:").pack(side=tk.LEFT, padx=(0, 6))
+        for txt, val in (("Same", "same"), ("Slim 0.55×", "slim"), ("VdW 1.35×", "vdw")):
+            DarkRadiobutton(
+                row_bg_sz,
+                text=txt,
+                variable=self.var_unsel_scale_mode,
+                value=val,
+                command=lambda: self._sync_selection_and_alphas(trigger_blender=True),
+            ).pack(side=tk.LEFT, padx=(0, 6))
 
         f_list = ttk.LabelFrame(parent, text="Atom List", padding=6)
         f_list.pack(fill=tk.BOTH, expand=True, pady=(0, 6))
@@ -1558,6 +1725,7 @@ class AtomicBlenderApp(tk.Tk):
             ("vdw", "Van der Waals", self.var_disp_vdw, lambda: self._toggle_section(self.f_rep_body)),
             ("crystal_lattice", "Crystal Lattice", self.var_show_cell, lambda: self._switch_tab("tool")),
             ("reference_axes", "Reference Axes", self.var_show_axes, self._toggle_axes_options),
+            ("scale_bar", "Scale Bar (Å)", self.var_show_scale_bar, None),
         )
         for idx, (key, label_txt, var, dots_cb) in enumerate(rows):
             row_bg = "#1E2128" if idx % 2 == 0 else "#232730"
@@ -1785,6 +1953,14 @@ class AtomicBlenderApp(tk.Tk):
             if self._vp_scene is not None:
                 self._vp_scene.show_axes = bool(self.var_show_axes.get())
             self._redraw_canvas()
+            return
+
+        if key == "scale_bar":
+            self.var_show_scale_bar.set(not bool(self.var_show_scale_bar.get()))
+            self._refresh_display_checks()
+            if self._vp_scene is not None:
+                self._vp_scene.show_scale_bar = bool(self.var_show_scale_bar.get())
+            self._redraw_canvas()
 
     def _on_axes_option_changed(self) -> None:
         if self._vp_scene is not None:
@@ -1901,11 +2077,32 @@ class AtomicBlenderApp(tk.Tk):
                     draw_labels=bool(self.var_show_labels.get()),
                     draw_selection=bool(self._selected_atoms),
                 )
+            if (
+                self._vp_scene is not None
+                and self.var_show_measure_overlay.get()
+                and len(self._selection_order) in (2, 3, 4)
+            ):
+                render_measurement_callout_overlay(
+                    out,
+                    self._vp_scene,
+                    self._selection_order,
+                    res_w,
+                    res_h,
+                    dark_backdrop=bool(self.var_dark_backdrop.get()),
+                )
             from_tmp_preview = (
                 self._preview_path is not None
                 and hasattr(self, "_preview_tmp_dir")
                 and str(self._preview_path).startswith(str(self._preview_tmp_dir.name))
             )
+            if self.var_show_scale_bar.get() and self._vp_scene is not None and from_tmp_preview:
+                render_scale_bar_overlay(
+                    out,
+                    self._vp_scene.ortho_scale,
+                    res_w,
+                    res_h,
+                    dark_backdrop=bool(self.var_dark_backdrop.get()),
+                )
             if self.var_show_axes.get() and from_tmp_preview:
                 quat = self._vp_scene.quat if self._vp_scene is not None else (1.0, 0.0, 0.0, 0.0)
                 render_reference_axes_overlay(
@@ -2092,6 +2289,7 @@ class AtomicBlenderApp(tk.Tk):
     def _on_labels_toggled(self) -> None:
         if self._vp_scene is not None:
             self._vp_scene.show_labels = bool(self.var_show_labels.get())
+            self._vp_scene.show_measure_overlay = bool(self.var_show_measure_overlay.get())
         self._redraw_canvas()
 
     def _on_opacity_changed(self, _val: str) -> None:
@@ -2122,6 +2320,8 @@ class AtomicBlenderApp(tk.Tk):
         for idx in sorted(self._selected_atoms):
             if 0 <= idx < n and idx not in self._selection_order:
                 self._selection_order.append(idx)
+        if self._vp_scene is not None:
+            self._vp_scene.selection_order = list(self._selection_order)
         self.var_measurement.set(compute_selection_measurement(syms, pos, self._selection_order))
 
     def _toggle_atom_selection(self, idx: int) -> None:
@@ -2197,8 +2397,164 @@ class AtomicBlenderApp(tk.Tk):
                 font=("Segoe UI", 8, "bold"),
             )
             btn.pack(side=tk.LEFT, padx=(0, 4))
+            btn.bind("<Button-3>", lambda _e, s=sym: self._on_element_chip_right_click(s))
             self._elem_chip_buttons[sym] = btn
         self._refresh_element_chip_styles()
+
+    def _on_element_chip_right_click(self, symbol: str) -> None:
+        style = self._resolve_style_dict()
+        cur_hex = style.get("elements", {}).get("colors", {}).get(symbol, "#CCCCCC")
+        chosen = colorchooser.askcolor(color=cur_hex, title=f"Choose Color for {symbol}")
+        if not chosen or not chosen[1]:
+            return
+        self._custom_element_colors[symbol] = str(chosen[1]).upper()
+        self.var_status.set(f"{symbol} color -> {self._custom_element_colors[symbol]}")
+        self._rebuild_viewport(reset_camera=False, trigger_preview=True)
+
+    def _reset_custom_element_colors(self) -> None:
+        if not self._custom_element_colors:
+            self.var_status.set("Element colors already match base style")
+            return
+        self._custom_element_colors.clear()
+        self.var_status.set("Restored default element colors")
+        self._rebuild_viewport(reset_camera=False, trigger_preview=True)
+
+    def _expand_selection_neighbors(self) -> None:
+        if self._structure_cache is None:
+            return
+        pos = self._structure_cache.get("positions", [])
+        if not pos:
+            return
+        try:
+            cutoff = max(0.5, float(self.var_neighbor_cutoff.get()))
+        except Exception:
+            cutoff = 3.0
+            self.var_neighbor_cutoff.set(cutoff)
+        seeds = set(self._selected_atoms)
+        if not seeds:
+            seeds = auto_detect_adsorbate_indices(self._structure_cache.get("symbols", []), pos)
+        expanded = find_neighbor_atoms(pos, seeds, cutoff_a=cutoff)
+        self._selected_atoms = expanded
+        for idx in sorted(expanded):
+            if idx not in self._selection_order:
+                self._selection_order.append(idx)
+        self.var_status.set(f"Expanded shell (+{cutoff:.1f} Å): {len(expanded)} atoms selected")
+        self._sync_selection_and_alphas(trigger_blender=True)
+
+    def _apply_adsorbate_spotlight_recipe(self) -> None:
+        if self._structure_cache is None:
+            return
+        syms = self._structure_cache.get("symbols", [])
+        pos = self._structure_cache.get("positions", [])
+        if not syms or not pos:
+            return
+        try:
+            cutoff = max(1.0, float(self.var_neighbor_cutoff.get()))
+        except Exception:
+            cutoff = 3.2
+        focal, alphas = compute_adsorbate_spotlight_alphas(
+            syms, pos, focal_indices=self._selected_atoms or None, shell_cutoff_a=cutoff
+        )
+        self._selected_atoms = set(focal)
+        self._selection_order = sorted(focal)
+        if self.var_unsel_scale_mode.get() == "same":
+            self.var_unsel_scale_mode.set("slim")
+        self.var_status.set(f"Adsorbate Spotlight active ({len(focal)} focal atoms)")
+        self._sync_selection_and_alphas(trigger_blender=True, alphas_override=alphas)
+
+    def _apply_depth_fade_recipe(self) -> None:
+        if self._structure_cache is None:
+            return
+        pos = self._structure_cache.get("positions", [])
+        if not pos:
+            return
+        alphas = compute_depth_fade_alphas(pos)
+        self.var_status.set("Applied Z-Depth Fade opacity gradient")
+        self._sync_selection_and_alphas(trigger_blender=True, alphas_override=alphas)
+
+    def _apply_smart_slab_spotlight(self) -> None:
+        self.var_view_mode.set("preset")
+        self._sync_view_mode()
+        self.var_view_preset.set("side-oblique")
+        self.var_crop_z_mode.set("auto")
+        self.var_show_scale_bar.set(True)
+        self._set_resolution(1400, 1200, trigger_preview=False)
+        self._use_interactive_cam = False
+        self._rebuild_viewport(reset_camera=True, trigger_preview=False)
+        self._apply_adsorbate_spotlight_recipe()
+
+    def _on_render_top_side_panel(self) -> None:
+        if self._busy:
+            return
+        try:
+            cfg = self._collect_config()
+            in_path = validate_gui_config(cfg)
+            cli_cfg = self._effective_cfg_for_cli(cfg)
+        except Exception as exc:
+            messagebox.showerror("Invalid Configuration", str(exc))
+            return
+
+        base_out = Path(cfg.output_path).expanduser() if cfg.output_path.strip() else in_path.with_suffix(".png")
+        panel_png = base_out.with_name(f"{base_out.stem}_panel.png")
+        self._task_start = time.monotonic()
+        self._set_busy(True, "Rendering Top + Side panel...")
+        dark_bg = bool(self.var_dark_backdrop.get())
+
+        def worker() -> None:
+            with tempfile.TemporaryDirectory(prefix="atomic_panel_") as tmp_dir:
+                tmp_p = Path(tmp_dir)
+                top_png = tmp_p / "top.png"
+                side_png = tmp_p / "side.png"
+                cmds = []
+                for preset, out_p in (("c", top_png), ("side-oblique", side_png)):
+                    c = GuiRenderConfig(
+                        input_path=cli_cfg.input_path,
+                        output_path=str(out_p),
+                        style=cli_cfg.style,
+                        view_mode="preset",
+                        view_preset=preset,
+                        view_file="",
+                        fit_view=False,
+                        type_map=cli_cfg.type_map,
+                        replicate=cli_cfg.replicate,
+                        wrap=cli_cfg.wrap,
+                        crop_z_mode=cli_cfg.crop_z_mode,
+                        crop_z_custom=cli_cfg.crop_z_custom,
+                        bonds=cli_cfg.bonds,
+                        bond_color=cli_cfg.bond_color,
+                        radius_scale=cli_cfg.radius_scale,
+                        show_cell=cli_cfg.show_cell,
+                        resolution=cli_cfg.resolution,
+                        samples=cli_cfg.samples,
+                        blender_exe=cli_cfg.blender_exe,
+                    )
+                    args = build_render_cli_args(c, out_png=out_p)
+                    self._queue.put(("log", f"$ atomic-blender {' '.join(args)}"))
+                    proc = subprocess.Popen(
+                        [sys.executable, "-m", "atomic_blender.cli", *args],
+                        stdout=subprocess.PIPE,
+                        stderr=subprocess.STDOUT,
+                        text=True,
+                        bufsize=1,
+                    )
+                    assert proc.stdout is not None
+                    for raw_line in proc.stdout:
+                        self._queue.put(("log", raw_line))
+                    rc = proc.wait()
+                    if rc != 0:
+                        self._queue.put(("done_panel", (rc, panel_png, f"Panel render exited with status {rc}")))
+                        return
+                    cmds.append(out_p)
+                try:
+                    t_img = Image.open(top_png).convert("RGBA")
+                    s_img = Image.open(side_png).convert("RGBA")
+                    panel = compose_dual_view_panel(t_img, s_img, dark_backdrop=dark_bg)
+                    panel.save(panel_png)
+                    self._queue.put(("done_panel", (0, panel_png, "")))
+                except Exception as exc:
+                    self._queue.put(("done_panel", (1, panel_png, str(exc))))
+
+        threading.Thread(target=worker, daemon=True).start()
 
     def _refresh_element_chip_styles(self) -> None:
         if not getattr(self, "_elem_chip_buttons", None) or self._structure_cache is None:
@@ -2295,7 +2651,11 @@ class AtomicBlenderApp(tk.Tk):
                 self.atom_listbox.itemconfig(idx, fg="#E5E7EB", bg="#121418")
         self.atom_listbox.yview_moveto(top_frac)
 
-    def _sync_selection_and_alphas(self, trigger_blender: bool = False) -> None:
+    def _sync_selection_and_alphas(
+        self,
+        trigger_blender: bool = False,
+        alphas_override: list[float] | None = None,
+    ) -> None:
         if self._structure_cache is None:
             self._refresh_atom_list()
             self._refresh_element_chip_styles()
@@ -2304,25 +2664,48 @@ class AtomicBlenderApp(tk.Tk):
         syms = self._structure_cache.get("symbols", [])
         n = len(syms)
         prev_alphas = self._structure_cache.get("alphas")
-        alphas = compute_atom_alphas(
-            n_atoms=n,
-            selected=self._selected_atoms,
-            opacity=float(self.var_sel_opacity.get()),
-            invert=bool(self.var_alpha_invert.get()),
-        )
+        prev_r_scales = self._structure_cache.get("radius_scales")
+        if alphas_override is not None and len(alphas_override) == n:
+            alphas = [max(0.02, min(1.0, float(a))) for a in alphas_override]
+        else:
+            alphas = compute_atom_alphas(
+                n_atoms=n,
+                selected=self._selected_atoms,
+                opacity=float(self.var_sel_opacity.get()),
+                invert=bool(self.var_alpha_invert.get()),
+            )
+        scale_mode = self.var_unsel_scale_mode.get() if hasattr(self, "var_unsel_scale_mode") else "same"
+        if scale_mode == "slim":
+            sel_s, unsel_s = 1.12, 0.55
+        elif scale_mode == "vdw":
+            sel_s, unsel_s = 0.88, 1.35
+        else:
+            sel_s, unsel_s = 1.0, 1.0
+        r_scales = compute_atom_radius_scales(n, self._selected_atoms, sel_scale=sel_s, unsel_scale=unsel_s)
         alphas_changed = prev_alphas != alphas
+        scales_changed = prev_r_scales != r_scales
         self._structure_cache["alphas"] = alphas
-        if alphas_changed:
+        self._structure_cache["radius_scales"] = r_scales
+        if alphas_changed or scales_changed:
             self._written_struct_version = -1
 
-        if self._vp_scene is not None:
+        if scales_changed:
+            self._rebuild_viewport(reset_camera=False, trigger_preview=False)
+        elif self._vp_scene is not None:
             self._vp_scene.atom_alphas = np.asarray(alphas, dtype=np.float64)
             self._vp_scene.selected_atoms = set(self._selected_atoms)
+            self._vp_scene.show_measure_overlay = bool(self.var_show_measure_overlay.get())
+            self._vp_scene.show_scale_bar = bool(self.var_show_scale_bar.get())
         self._refresh_atom_list()
         self._refresh_element_chip_styles()
         self._update_measurement_banner()
         self._redraw_canvas()
-        if trigger_blender and (alphas_changed or any(a < 0.995 for a in alphas)):
+        if trigger_blender and (
+            alphas_changed
+            or scales_changed
+            or any(a < 0.995 for a in alphas)
+            or any(abs(s - 1.0) > 1e-3 for s in r_scales)
+        ):
             self._request_blender_preview()
 
     def _on_canvas_double_click(self, event: tk.Event) -> None:
@@ -2565,13 +2948,29 @@ class AtomicBlenderApp(tk.Tk):
 
         threading.Thread(target=worker, daemon=True).start()
 
+    def _effective_style_path_for_cli(self, style_arg: str) -> str:
+        """Return ``style_arg`` or materialize a temporary style JSON with custom element colors."""
+        if not self._custom_element_colors:
+            return style_arg
+        merged = self._resolve_style_dict()
+        tmp_fd, tmp_name = tempfile.mkstemp(prefix="atomic_style_", suffix=".json")
+        os.close(tmp_fd)
+        tmp_path = Path(tmp_name)
+        tmp_path.write_text(json.dumps(merged, indent=2), encoding="utf-8")
+        self._temp_view_files.append(tmp_path)
+        return str(tmp_path)
+
     def _effective_cfg_for_cli(self, cfg: GuiRenderConfig) -> GuiRenderConfig:
-        """Materialize interactive camera view.json and per-atom transparency structure JSON if active."""
+        """Materialize interactive camera view.json, per-atom transparency/scales, and custom element colors."""
         eff_input = cfg.input_path
         eff_rep = cfg.replicate
+        eff_style = self._effective_style_path_for_cli(cfg.style)
         if self._structure_cache is not None:
             alphas = self._structure_cache.get("alphas")
-            if isinstance(alphas, list) and any(a < 0.995 for a in alphas):
+            r_scales = self._structure_cache.get("radius_scales")
+            has_alpha = isinstance(alphas, list) and any(a < 0.995 for a in alphas)
+            has_scale = isinstance(r_scales, list) and any(abs(s - 1.0) > 1e-3 for s in r_scales)
+            if has_alpha or has_scale:
                 tmp_sfd, tmp_sname = tempfile.mkstemp(prefix="atomic_sel_", suffix=".json")
                 os.close(tmp_sfd)
                 tmp_spath = Path(tmp_sname)
@@ -2581,12 +2980,12 @@ class AtomicBlenderApp(tk.Tk):
                 eff_rep = (1, 1, 1)
 
         if self._vp_scene is None or not self._use_interactive_cam:
-            if eff_input == cfg.input_path:
+            if eff_input == cfg.input_path and eff_style == cfg.style:
                 return cfg
             return GuiRenderConfig(
                 input_path=eff_input,
                 output_path=cfg.output_path,
-                style=cfg.style,
+                style=eff_style,
                 view_mode=cfg.view_mode,
                 view_preset=cfg.view_preset,
                 view_file=cfg.view_file,
@@ -2614,7 +3013,7 @@ class AtomicBlenderApp(tk.Tk):
         return GuiRenderConfig(
             input_path=eff_input,
             output_path=cfg.output_path,
-            style=cfg.style,
+            style=eff_style,
             view_mode="file",
             view_preset=cfg.view_preset,
             view_file=str(tmp_path),
@@ -2712,9 +3111,14 @@ class AtomicBlenderApp(tk.Tk):
     def _resolve_style_dict(self) -> dict[str, Any]:
         try:
             sp = resolve_style_path(self.var_style.get().strip() or "default")
-            return json.loads(sp.read_text(encoding="utf-8"))
+            data = json.loads(sp.read_text(encoding="utf-8"))
         except Exception:
-            return {}
+            data = {}
+        if self._custom_element_colors:
+            elems = data.setdefault("elements", {})
+            cols = elems.setdefault("colors", {})
+            cols.update(self._custom_element_colors)
+        return data
 
     def _apply_view_to_viewport(self, vp: ViewportScene) -> None:
         res_w = max(16, int(self.var_res_w.get()))
@@ -2769,6 +3173,9 @@ class AtomicBlenderApp(tk.Tk):
             axes_pos=self._axes_pos,
             dark_backdrop=bool(self.var_dark_backdrop.get()),
             selected_atoms=self._selected_atoms,
+            show_scale_bar=bool(self.var_show_scale_bar.get()),
+            show_measure_overlay=bool(self.var_show_measure_overlay.get()),
+            selection_order=list(self._selection_order),
         )
         self._refresh_display_checks()
         self._rebuild_element_chips()
@@ -2813,6 +3220,11 @@ class AtomicBlenderApp(tk.Tk):
 
         style_path = resolve_style_path(self.var_style.get().strip() or "default")
         style_mtime = style_path.stat().st_mtime if style_path.is_file() else 0.0
+        eff_style_path = style_path
+        if self._custom_element_colors:
+            merged_style = self._resolve_style_dict()
+            eff_style_path = Path(self._preview_tmp_dir.name) / "preview_style.json"
+            eff_style_path.write_text(json.dumps(merged_style, indent=2), encoding="utf-8")
         prev_w, prev_h = compute_preview_resolution(int(self.var_res_w.get()), int(self.var_res_h.get()), max_side=400)
         prev_samples = min(4, max(2, int(self.var_samples.get())))
 
@@ -2836,6 +3248,7 @@ class AtomicBlenderApp(tk.Tk):
                 self._structure_version,
                 str(style_path),
                 style_mtime,
+                sorted(self._custom_element_colors.items()),
                 self.var_bonds.get(),
                 self.var_bond_color.get(),
                 round(float(self.var_radius_scale.get()), 4),
@@ -2843,6 +3256,7 @@ class AtomicBlenderApp(tk.Tk):
                 crop_z,
                 bool(self.var_fit_view.get()),
                 [round(float(a), 3) for a in self._structure_cache.get("alphas", [])],
+                [round(float(s), 3) for s in self._structure_cache.get("radius_scales", [])],
             ]
         )
 
@@ -2858,7 +3272,7 @@ class AtomicBlenderApp(tk.Tk):
                 "blender_exe": str(blender_path),
                 "scene_key": scene_key,
                 "structure": str(struct_json),
-                "style": str(style_path),
+                "style": str(eff_style_path),
                 "crop_z": crop_z,
                 "resolution": [prev_w, prev_h],
                 "samples": prev_samples,
@@ -3206,16 +3620,44 @@ class AtomicBlenderApp(tk.Tk):
             nw = max(1, int(iw * scale))
             nh = max(1, int(ih * scale))
             resized = self._pil_image.resize((nw, nh), Image.Resampling.LANCZOS).copy()
+            res_w = max(16, int(self.var_res_w.get()))
+            res_h = max(16, int(self.var_res_h.get()))
             if self._vp_scene is not None and (self.var_show_labels.get() or self._selected_atoms):
                 render_atom_labels_and_selection_overlay(
                     resized,
                     self._vp_scene,
-                    max(16, int(self.var_res_w.get())),
-                    max(16, int(self.var_res_h.get())),
+                    res_w,
+                    res_h,
                     draw_labels=bool(self.var_show_labels.get()),
                     draw_selection=bool(self._selected_atoms),
                 )
-            if self.var_show_axes.get():
+            if (
+                self._vp_scene is not None
+                and self.var_show_measure_overlay.get()
+                and len(self._selection_order) in (2, 3, 4)
+            ):
+                render_measurement_callout_overlay(
+                    resized,
+                    self._vp_scene,
+                    self._selection_order,
+                    res_w,
+                    res_h,
+                    dark_backdrop=dark_bg,
+                )
+            from_tmp_preview = (
+                self._preview_path is not None
+                and hasattr(self, "_preview_tmp_dir")
+                and str(self._preview_path).startswith(str(self._preview_tmp_dir.name))
+            )
+            if self.var_show_scale_bar.get() and self._vp_scene is not None and from_tmp_preview:
+                render_scale_bar_overlay(
+                    resized,
+                    self._vp_scene.ortho_scale,
+                    res_w,
+                    res_h,
+                    dark_backdrop=dark_bg,
+                )
+            if self.var_show_axes.get() and from_tmp_preview:
                 quat = self._vp_scene.quat if self._vp_scene is not None else (1.0, 0.0, 0.0, 0.0)
                 render_reference_axes_overlay(
                     resized,
@@ -3305,24 +3747,43 @@ class AtomicBlenderApp(tk.Tk):
                 elif mode == "render":
                     self._preview_seq += 1
                     self._set_busy(False, f"Rendered {target_path.name} in {elapsed:.1f}s")
-                    self._load_preview(target_path)
-                    if self.var_show_axes.get() and _HAS_PIL and target_path.is_file():
+                    if (self.var_show_axes.get() or self.var_show_scale_bar.get()) and _HAS_PIL and target_path.is_file():
                         try:
                             out_img = Image.open(target_path).convert("RGBA")
-                            quat = self._vp_scene.quat if self._vp_scene is not None else (1.0, 0.0, 0.0, 0.0)
-                            render_reference_axes_overlay(
-                                out_img,
-                                quat,
-                                axes_pos=self._axes_pos,
-                                show_labels=bool(self.var_axes_labels.get()),
-                                dark_backdrop=bool(self.var_dark_backdrop.get()),
-                            )
+                            if self.var_show_scale_bar.get() and self._vp_scene is not None:
+                                render_scale_bar_overlay(
+                                    out_img,
+                                    self._vp_scene.ortho_scale,
+                                    max(16, int(self.var_res_w.get())),
+                                    max(16, int(self.var_res_h.get())),
+                                    dark_backdrop=bool(self.var_dark_backdrop.get()),
+                                )
+                            if self.var_show_axes.get():
+                                quat = self._vp_scene.quat if self._vp_scene is not None else (1.0, 0.0, 0.0, 0.0)
+                                render_reference_axes_overlay(
+                                    out_img,
+                                    quat,
+                                    axes_pos=self._axes_pos,
+                                    show_labels=bool(self.var_axes_labels.get()),
+                                    dark_backdrop=bool(self.var_dark_backdrop.get()),
+                                )
                             out_img.save(target_path)
                         except Exception as exc:
-                            self._append_log(f"Axes overlay warning: {exc}")
+                            self._append_log(f"Overlay warning: {exc}")
+                    self._load_preview(target_path)
                 elif mode == "open_blender":
                     self._set_busy(False, f"Opening {target_path.name} in Blender...")
                     subprocess.Popen([self._pending_blender_exe, str(target_path)])
+            elif kind == "done_panel":
+                rc, panel_png, err_msg = payload
+                elapsed = time.monotonic() - self._task_start
+                if rc != 0:
+                    self._set_busy(False, f"Panel failed after {elapsed:.1f}s")
+                    messagebox.showerror("Panel Render Failed", err_msg or f"Command exited with status {rc}")
+                else:
+                    self._preview_seq += 1
+                    self._set_busy(False, f"Saved panel {panel_png.name} in {elapsed:.1f}s")
+                    self._load_preview(panel_png)
         if not getattr(self, "_destroyed", False):
             self._poll_after_id = self.after(100, self._poll_queue)
 

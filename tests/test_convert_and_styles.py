@@ -784,6 +784,125 @@ class TestAtomicBlender(unittest.TestCase):
             finally:
                 app.destroy()
 
+    def test_turnkey_recipes_overlays_hybrid_scales_and_dual_panel(self) -> None:
+        from PIL import Image
+        from atomic_blender.gui import (
+            AtomicBlenderApp,
+            auto_detect_adsorbate_indices,
+            compute_adsorbate_spotlight_alphas,
+            compute_atom_radius_scales,
+            compute_depth_fade_alphas,
+            find_neighbor_atoms,
+        )
+        from atomic_blender.viewport3d import (
+            ViewportScene,
+            choose_scale_bar_angstrom,
+            compose_dual_view_panel,
+            render_measurement_callout_overlay,
+            render_scale_bar_overlay,
+        )
+
+        syms = ["Cu", "Cu", "Cu", "C", "O"]
+        pos = [
+            [0.0, 0.0, 0.0],
+            [2.5, 0.0, 0.0],
+            [0.0, 2.5, 2.0],
+            [0.0, 2.5, 4.0],
+            [0.0, 2.5, 5.2],
+        ]
+        focal_auto = auto_detect_adsorbate_indices(syms, pos)
+        self.assertEqual(focal_auto, {3, 4})
+
+        neigh = find_neighbor_atoms(pos, {3}, cutoff_a=2.1)
+        self.assertEqual(neigh, {2, 3, 4})
+
+        focal, spot_alphas = compute_adsorbate_spotlight_alphas(syms, pos, shell_cutoff_a=2.2)
+        self.assertEqual(focal, {3, 4})
+        self.assertEqual(spot_alphas[3], 1.0)
+        self.assertEqual(spot_alphas[4], 1.0)
+        self.assertEqual(spot_alphas[2], 0.85)
+        self.assertLess(spot_alphas[0], 0.5)
+
+        fade_alphas = compute_depth_fade_alphas(pos, min_alpha=0.2, max_alpha=1.0)
+        self.assertAlmostEqual(fade_alphas[0], 0.2, places=2)
+        self.assertAlmostEqual(fade_alphas[-1], 1.0, places=2)
+
+        r_scales = compute_atom_radius_scales(5, {3, 4}, sel_scale=1.12, unsel_scale=0.55)
+        self.assertEqual(r_scales, [0.55, 0.55, 0.55, 1.12, 1.12])
+
+        # Scale bar & measurement callouts & dual-view panel
+        self.assertEqual(choose_scale_bar_angstrom(25.0), 5.0)
+        img = Image.new("RGBA", (600, 600), (21, 23, 28, 255))
+        bar_a = render_scale_bar_overlay(img, 25.0, 600, 600, dark_backdrop=True)
+        self.assertEqual(bar_a, 5.0)
+
+        struct = {
+            "symbols": syms,
+            "positions": pos,
+            "cell": [[10.0, 0.0, 0.0], [0.0, 10.0, 0.0], [0.0, 0.0, 10.0]],
+            "pbc": [False, False, False],
+            "has_cell": False,
+            "origin": [0.0, 0.0, 0.0],
+            "radius_scales": r_scales,
+        }
+        vp = ViewportScene.from_neutral_dict(
+            struct,
+            style={},
+            show_scale_bar=True,
+            show_measure_overlay=True,
+            selection_order=[2, 3, 4],
+        )
+        self.assertAlmostEqual(vp.radii[3] / vp.radii[2], (0.76 * 1.12) / (1.32 * 0.55), places=3)
+        render_measurement_callout_overlay(img, vp, [3, 4], 600, 600)
+        render_measurement_callout_overlay(img, vp, [2, 3, 4], 600, 600)
+        render_measurement_callout_overlay(img, vp, [0, 2, 3, 4], 600, 600)
+        panel = compose_dual_view_panel(img, img, dark_backdrop=True)
+        self.assertGreater(panel.width, 1200)
+        self.assertGreater(panel.height, 600)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            xyz = Path(tmp) / "ads.xyz"
+            xyz.write_text(
+                "5\n\nCu 0 0 0\nCu 2.5 0 0\nCu 0 2.5 2\nC 0 2.5 4\nO 0 2.5 5.2\n",
+                encoding="utf-8",
+            )
+            app = AtomicBlenderApp()
+            app.withdraw()
+            try:
+                app.var_blender.set("")
+                app.var_input.set(str(xyz))
+                app.canvas.configure(width=600, height=600)
+                app.update_idletasks()
+                app._structure_cache = dict(struct)
+                app._structure_version = 1
+                app._rebuild_viewport(reset_camera=True, trigger_preview=False)
+
+                # Scale bar display toggle
+                self.assertIn("scale_bar", app._display_checks)
+                app._on_display_type_clicked("scale_bar")
+                self.assertTrue(app.var_show_scale_bar.get())
+                self.assertTrue(app._vp_scene.show_scale_bar)
+
+                # Adsorbate spotlight + hybrid scaling + custom element color export
+                app._apply_adsorbate_spotlight_recipe()
+                self.assertEqual(app._selected_atoms, {3, 4})
+                self.assertEqual(app.var_unsel_scale_mode.get(), "slim")
+                self.assertEqual(app._structure_cache["radius_scales"], [0.55, 0.55, 0.55, 1.12, 1.12])
+
+                app.var_neighbor_cutoff.set(2.1)
+                app._selected_atoms = {3}
+                app._expand_selection_neighbors()
+                self.assertEqual(app._selected_atoms, {2, 3, 4})
+
+                app._custom_element_colors["Cu"] = "#FF9900"
+                eff = app._effective_cfg_for_cli(app._collect_config())
+                self.assertTrue(eff.input_path.endswith(".json"))
+                self.assertTrue(eff.style.endswith(".json"))
+                style_payload = json.loads(Path(eff.style).read_text(encoding="utf-8"))
+                self.assertEqual(style_payload["elements"]["colors"]["Cu"], "#FF9900")
+            finally:
+                app.destroy()
+
 
 if __name__ == "__main__":
     unittest.main()
