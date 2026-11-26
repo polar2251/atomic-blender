@@ -159,3 +159,13 @@ Regenerate all example inputs and preview PNGs with:
 ```bash
 python examples/generate_examples.py
 ```
+
+---
+
+## License
+
+This project is released under the [MIT License](LICENSE).
+
+- **ASE** (used as an external Python dependency at runtime) is licensed under the GNU LGPL-2.1-or-later.
+- **Blender** (`bpy`, invoked as a separate Blender installation or inside Blender as an addon) is licensed under the GNU GPL-3.0-or-later. The MIT license of `atomic-blender` is GPL-compatible; Blender itself is not bundled in this repository and is installed separately by the user.
+
