@@ -722,8 +722,8 @@ class AtomicBlenderApp(tk.Tk):
         _enable_hidpi()
         super().__init__()
         self.title("Atomic Blender Studio — Desktop Client")
-        self.geometry("1240x820")
-        self.minsize(1000, 680)
+        self.geometry("1280x840")
+        self.minsize(1040, 680)
 
         self._configure_theme()
 
@@ -982,20 +982,34 @@ class AtomicBlenderApp(tk.Tk):
         paned.pack(fill=tk.BOTH, expand=True, padx=8, pady=(2, 4))
 
         left_host = ttk.Frame(paned, padding=0, style="Outer.TFrame")
-        left_canvas = tk.Canvas(left_host, bg="#14161B", highlightthickness=0, width=410)
-        left_scroll = ttk.Scrollbar(left_host, orient=tk.VERTICAL, command=left_canvas.yview)
+        left_body = ttk.Frame(left_host, padding=0, style="Outer.TFrame")
+        left_body.pack(side=tk.TOP, fill=tk.BOTH, expand=True)
+
+        left_canvas = tk.Canvas(left_body, bg="#14161B", highlightthickness=0, width=388)
+        left_scroll = ttk.Scrollbar(left_body, orient=tk.VERTICAL, command=left_canvas.yview)
         left = ttk.Frame(left_canvas, padding=6, style="Outer.TFrame")
         left_win = left_canvas.create_window((0, 0), window=left, anchor=tk.NW)
         left_canvas.configure(yscrollcommand=left_scroll.set)
         left_canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-        left_scroll.pack(side=tk.RIGHT, fill=tk.Y)
 
-        left.bind("<Configure>", lambda _e: left_canvas.configure(scrollregion=left_canvas.bbox("all")))
-        left_canvas.bind("<Configure>", lambda e: left_canvas.itemconfigure(left_win, width=e.width))
+        def _update_left_scroll(_e: Any = None) -> None:
+            bbox = left_canvas.bbox("all")
+            left_canvas.configure(scrollregion=bbox)
+            need_scroll = bool(bbox and (bbox[3] - bbox[1]) > max(1, left_canvas.winfo_height()))
+            if need_scroll and not left_scroll.winfo_manager():
+                left_scroll.pack(side=tk.RIGHT, fill=tk.Y)
+            elif not need_scroll and left_scroll.winfo_manager():
+                left_scroll.pack_forget()
+
+        left.bind("<Configure>", _update_left_scroll)
+        left_canvas.bind(
+            "<Configure>",
+            lambda e: (left_canvas.itemconfigure(left_win, width=e.width), _update_left_scroll()),
+        )
         left_canvas.bind(
             "<MouseWheel>",
             lambda e: left_canvas.yview_scroll(int(-1 * (e.delta / 120)), "units")
-            if e.widget is left_canvas or str(e.widget).startswith(str(left))
+            if left_scroll.winfo_manager() and (e.widget is left_canvas or str(e.widget).startswith(str(left)))
             else None,
         )
 
@@ -1003,7 +1017,7 @@ class AtomicBlenderApp(tk.Tk):
         paned.add(left_host, weight=0)
         paned.add(right, weight=1)
 
-        self._build_controls(left)
+        self._build_controls(left, action_parent=left_host)
         self._build_preview_and_log(right)
 
         status_bar = ttk.Frame(self, padding=(10, 2, 10, 6), style="Outer.TFrame")
@@ -1012,10 +1026,11 @@ class AtomicBlenderApp(tk.Tk):
             side=tk.LEFT
         )
 
-    def _build_controls(self, parent: ttk.Frame) -> None:
+    def _build_controls(self, parent: ttk.Frame, action_parent: ttk.Frame | None = None) -> None:
         # 1. Input & Output (pinned above tabs)
         f_io = ttk.LabelFrame(parent, text="Structure & Output", padding=8)
         f_io.pack(fill=tk.X, pady=(0, 6))
+        f_io.columnconfigure(0, minsize=72)
         f_io.columnconfigure(1, weight=1)
 
         ttk.Label(f_io, text="Input").grid(row=0, column=0, sticky=tk.W, pady=2)
@@ -1040,9 +1055,9 @@ class AtomicBlenderApp(tk.Tk):
         # 2. View / Tool / Selection Tab Switcher
         tab_bar = tk.Frame(parent, bg="#14161B")
         tab_bar.pack(fill=tk.X, pady=(0, 6))
-        tab_bar.columnconfigure(0, weight=1)
-        tab_bar.columnconfigure(1, weight=1)
-        tab_bar.columnconfigure(2, weight=1)
+        tab_bar.columnconfigure(0, weight=1, uniform="main_tabs")
+        tab_bar.columnconfigure(1, weight=1, uniform="main_tabs")
+        tab_bar.columnconfigure(2, weight=1, uniform="main_tabs")
 
         self._tab_buttons: dict[str, tuple[tk.Button, tk.Frame]] = {}
         for col_idx, (tab_key, tab_label) in enumerate(
@@ -1076,70 +1091,82 @@ class AtomicBlenderApp(tk.Tk):
 
         f_cam = ttk.LabelFrame(self.tab_view, text="Camera View", padding=8)
         f_cam.pack(fill=tk.X, pady=(0, 6))
+        f_cam.columnconfigure(0, minsize=72)
         f_cam.columnconfigure(2, weight=1)
 
         ttk.Label(f_cam, text="Rotate (°)").grid(row=0, column=0, sticky=tk.W, pady=2)
         ent_rot = ttk.Entry(f_cam, textvariable=self.var_rot_step, width=6, justify=tk.CENTER)
-        ent_rot.grid(row=0, column=1, sticky=tk.W, padx=(6, 6), pady=2)
+        ent_rot.grid(row=0, column=1, sticky=tk.W, padx=(4, 6), pady=2)
         row_rot = ttk.Frame(f_cam)
         row_rot.grid(row=0, column=2, sticky=tk.EW, pady=2)
-        for lbl, y_s, p_s, r_s in (
+        for c_idx in range(6):
+            row_rot.columnconfigure(c_idx, weight=1, uniform="cam_btn")
+        for c_idx, (lbl, y_s, p_s, r_s) in enumerate((
             ("◀", -1.0, 0.0, 0.0),
             ("▶", 1.0, 0.0, 0.0),
             ("▲", 0.0, -1.0, 0.0),
             ("▼", 0.0, 1.0, 0.0),
             ("↺", 0.0, 0.0, -1.0),
             ("↻", 0.0, 0.0, 1.0),
-        ):
+        )):
             ttk.Button(
                 row_rot,
                 text=lbl,
                 width=3,
                 command=lambda ys=y_s, ps=p_s, rs=r_s: self._on_step_rotate(ys, ps, rs),
-            ).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 2))
+            ).grid(row=0, column=c_idx, sticky=tk.EW, padx=(0, 2 if c_idx < 5 else 0))
 
         ttk.Label(f_cam, text="Move (Å)").grid(row=1, column=0, sticky=tk.W, pady=2)
         ent_pan = ttk.Entry(f_cam, textvariable=self.var_pan_step, width=6, justify=tk.CENTER)
-        ent_pan.grid(row=1, column=1, sticky=tk.W, padx=(6, 6), pady=2)
+        ent_pan.grid(row=1, column=1, sticky=tk.W, padx=(4, 6), pady=2)
         row_pan = ttk.Frame(f_cam)
         row_pan.grid(row=1, column=2, sticky=tk.EW, pady=2)
-        for lbl, dx_s, dy_s in (
+        for c_idx in range(6):
+            row_pan.columnconfigure(c_idx, weight=1, uniform="cam_btn")
+        for c_idx, (lbl, dx_s, dy_s) in enumerate((
             ("◀", -1.0, 0.0),
             ("▶", 1.0, 0.0),
             ("▲", 0.0, 1.0),
             ("▼", 0.0, -1.0),
-        ):
+        )):
             ttk.Button(
                 row_pan,
                 text=lbl,
                 width=3,
                 command=lambda xs=dx_s, ys=dy_s: self._on_step_move(xs, ys),
-            ).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 2))
-        ttk.Button(row_pan, text="Reset", width=5, command=self._on_reset_view).pack(side=tk.LEFT, padx=(2, 0))
+            ).grid(row=0, column=c_idx, sticky=tk.EW, padx=(0, 2))
+        ttk.Button(row_pan, text="Reset", command=self._on_reset_view).grid(
+            row=0, column=4, columnspan=2, sticky=tk.EW
+        )
 
         f_ren = ttk.LabelFrame(self.tab_view, text="Cycles Render", padding=8)
         f_ren.pack(fill=tk.X, pady=(0, 6))
+        f_ren.columnconfigure(0, minsize=72)
         f_ren.columnconfigure(1, weight=1)
 
         ttk.Label(f_ren, text="Resolution").grid(row=0, column=0, sticky=tk.W, pady=2)
         row_res = ttk.Frame(f_ren)
         row_res.grid(row=0, column=1, columnspan=2, sticky=tk.W, padx=4, pady=2)
         DarkSpinbox(row_res, from_=64, to=8192, increment=100, variable=self.var_res_w, width=5).pack(side=tk.LEFT)
-        ttk.Label(row_res, text="×").pack(side=tk.LEFT, padx=4)
+        ttk.Label(row_res, text="×").pack(side=tk.LEFT, padx=5)
         DarkSpinbox(row_res, from_=64, to=8192, increment=100, variable=self.var_res_h, width=5).pack(side=tk.LEFT)
-        for label, w, h in (("700²", 700, 700), ("1400²", 1400, 1400), ("Slab", 1400, 1200)):
-            ttk.Button(
-                row_res, text=label, width=5, command=lambda ww=w, hh=h: self._set_resolution(ww, hh)
-            ).pack(side=tk.LEFT, padx=(4, 0))
 
-        ttk.Label(f_ren, text="Samples").grid(row=1, column=0, sticky=tk.W, pady=2)
+        row_res_presets = ttk.Frame(f_ren)
+        row_res_presets.grid(row=1, column=1, columnspan=2, sticky=tk.EW, padx=4, pady=(0, 3))
+        for c_idx, (label, w, h) in enumerate((("700 × 700", 700, 700), ("1400 × 1400", 1400, 1400), ("Slab 4:3", 1400, 1200))):
+            row_res_presets.columnconfigure(c_idx, weight=1, uniform="res_btn")
+            ttk.Button(
+                row_res_presets, text=label, command=lambda ww=w, hh=h: self._set_resolution(ww, hh)
+            ).grid(row=0, column=c_idx, sticky=tk.EW, padx=(0, 3 if c_idx < 2 else 0))
+
+        ttk.Label(f_ren, text="Samples").grid(row=2, column=0, sticky=tk.W, pady=2)
         DarkSpinbox(f_ren, from_=1, to=2048, increment=8, variable=self.var_samples, width=6).grid(
-            row=1, column=1, sticky=tk.W, padx=4, pady=2
+            row=2, column=1, sticky=tk.W, padx=4, pady=2
         )
 
-        ttk.Label(f_ren, text="Blender").grid(row=2, column=0, sticky=tk.W, pady=2)
-        ttk.Entry(f_ren, textvariable=self.var_blender).grid(row=2, column=1, sticky=tk.EW, padx=4, pady=2)
-        ttk.Button(f_ren, text="Browse...", command=self._browse_blender).grid(row=2, column=2, pady=2)
+        ttk.Label(f_ren, text="Blender").grid(row=3, column=0, sticky=tk.W, pady=2)
+        ttk.Entry(f_ren, textvariable=self.var_blender).grid(row=3, column=1, sticky=tk.EW, padx=4, pady=2)
+        ttk.Button(f_ren, text="Browse...", command=self._browse_blender).grid(row=3, column=2, pady=2)
 
         # --- Tool Tab: Supercell & Framing + View File ---
         self.f_geom = ttk.LabelFrame(self.tab_tool, text="Supercell & Framing", padding=8)
@@ -1147,6 +1174,7 @@ class AtomicBlenderApp(tk.Tk):
         self.f_geom_body = ttk.Frame(self.f_geom)
         self.f_geom_body.pack(fill=tk.X)
         f_geom = self.f_geom_body
+        f_geom.columnconfigure(0, minsize=72)
         f_geom.columnconfigure(1, weight=1)
 
         ttk.Label(f_geom, text="Replicate").grid(row=0, column=0, sticky=tk.W, pady=2)
@@ -1171,15 +1199,18 @@ class AtomicBlenderApp(tk.Tk):
 
         row_smart = ttk.Frame(f_geom)
         row_smart.grid(row=2, column=0, columnspan=2, sticky=tk.EW, pady=(6, 0))
-        ttk.Button(row_smart, text="Smart Slab Preset", command=self._apply_slab_preset).pack(
-            side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 4)
+        row_smart.columnconfigure(0, weight=1, uniform="preset_btn")
+        row_smart.columnconfigure(1, weight=1, uniform="preset_btn")
+        ttk.Button(row_smart, text="Smart Slab Preset", command=self._apply_slab_preset).grid(
+            row=0, column=0, sticky=tk.EW, padx=(0, 4)
         )
-        ttk.Button(row_smart, text="Cube / Bulk Preset", command=self._apply_bulk_preset).pack(
-            side=tk.LEFT, fill=tk.X, expand=True
+        ttk.Button(row_smart, text="Cube / Bulk Preset", command=self._apply_bulk_preset).grid(
+            row=0, column=1, sticky=tk.EW
         )
 
         f_sv = ttk.LabelFrame(self.tab_tool, text="View File (view.json)", padding=8)
         f_sv.pack(fill=tk.X, pady=(0, 6))
+        f_sv.columnconfigure(0, minsize=72)
         f_sv.columnconfigure(1, weight=1)
 
         row_vm = ttk.Frame(f_sv)
@@ -1215,9 +1246,13 @@ class AtomicBlenderApp(tk.Tk):
 
         self._switch_tab("view")
 
-        # 3. Pinned Actions (always visible at bottom)
-        f_act = ttk.Frame(parent, style="Outer.TFrame")
-        f_act.pack(fill=tk.X, pady=(4, 4))
+        # 3. Pinned Actions (always anchored at bottom of sidebar)
+        act_host = action_parent if action_parent is not None else parent
+        f_act = ttk.Frame(act_host, style="Outer.TFrame")
+        if action_parent is not None:
+            f_act.pack(side=tk.BOTTOM, fill=tk.X, padx=6, pady=(4, 6))
+        else:
+            f_act.pack(fill=tk.X, pady=(4, 4))
         self.btn_render = ttk.Button(
             f_act, text="Render High-Res Output", style="Accent.TButton", command=self._on_render
         )
@@ -1225,10 +1260,12 @@ class AtomicBlenderApp(tk.Tk):
 
         row_sub = ttk.Frame(f_act, style="Outer.TFrame")
         row_sub.pack(fill=tk.X)
+        row_sub.columnconfigure(0, weight=1, uniform="sub_act")
+        row_sub.columnconfigure(1, weight=1, uniform="sub_act")
         self.btn_blender = ttk.Button(row_sub, text="Open in Blender", command=self._on_open_in_blender)
-        self.btn_blender.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 4))
+        self.btn_blender.grid(row=0, column=0, sticky=tk.EW, padx=(0, 4))
         self.btn_folder = ttk.Button(row_sub, text="Open Output Folder", command=self._on_open_folder)
-        self.btn_folder.pack(side=tk.LEFT, fill=tk.X, expand=True)
+        self.btn_folder.grid(row=0, column=1, sticky=tk.EW)
 
     def _switch_tab(self, tab_name: str) -> None:
         self._active_tab = tab_name if tab_name in ("view", "tool", "selection") else "view"
@@ -1265,16 +1302,20 @@ class AtomicBlenderApp(tk.Tk):
 
         row_btns = ttk.Frame(f_lbl)
         row_btns.pack(fill=tk.X)
-        for text, cb in (
+        for c_idx, (text, cb) in enumerate((
             ("Select All", self._select_all_atoms),
             ("Clear", self._clear_selection),
             ("Invert", self._invert_selection),
             ("Same Elem", self._select_same_element),
-        ):
-            ttk.Button(row_btns, text=text, command=cb).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 3))
+        )):
+            row_btns.columnconfigure(c_idx, weight=1, uniform="sel_btn")
+            ttk.Button(row_btns, text=text, command=cb).grid(
+                row=0, column=c_idx, sticky=tk.EW, padx=(0, 3 if c_idx < 3 else 0)
+            )
 
         f_op = ttk.LabelFrame(parent, text="Selection Transparency", padding=8)
         f_op.pack(fill=tk.X, pady=(0, 6))
+        f_op.columnconfigure(0, minsize=72)
         f_op.columnconfigure(1, weight=1)
 
         ttk.Label(f_op, text="Opacity").grid(row=0, column=0, sticky=tk.W, pady=2)
@@ -1303,7 +1344,7 @@ class AtomicBlenderApp(tk.Tk):
         list_wrap.pack(fill=tk.BOTH, expand=True)
         self.atom_listbox = tk.Listbox(
             list_wrap,
-            height=12,
+            height=14,
             bg="#121418",
             fg="#E5E7EB",
             selectbackground="#1E293B",
@@ -1365,6 +1406,7 @@ class AtomicBlenderApp(tk.Tk):
         # Unified Style & Scale options (inline inside Display Types, toggled via •••)
         self.f_rep_body = ttk.Frame(f_disp, padding=(2, 6, 2, 2))
         self.f_rep_body.pack(fill=tk.X)
+        self.f_rep_body.columnconfigure(0, minsize=72)
         self.f_rep_body.columnconfigure(1, weight=1)
 
         ttk.Label(self.f_rep_body, text="Material").grid(row=0, column=0, sticky=tk.W, pady=2)
@@ -1618,7 +1660,7 @@ class AtomicBlenderApp(tk.Tk):
         f_log = ttk.LabelFrame(v_pane, text="Console Log", padding=4)
         self.log_text = scrolledtext.ScrolledText(
             f_log,
-            height=8,
+            height=5,
             state=tk.DISABLED,
             wrap=tk.WORD,
             bg="#121418",
@@ -1629,7 +1671,7 @@ class AtomicBlenderApp(tk.Tk):
         )
         self.log_text.pack(fill=tk.BOTH, expand=True)
 
-        v_pane.add(f_prev, weight=4)
+        v_pane.add(f_prev, weight=6)
         v_pane.add(f_log, weight=1)
 
     def _on_scale_changed(self, _val: str) -> None:
@@ -2322,7 +2364,7 @@ class AtomicBlenderApp(tk.Tk):
         ch = max(1, self.canvas.winfo_height())
         if self.var_canvas_mode.get() == "png" and self._pil_image is not None and _HAS_PIL:
             iw, ih = self._pil_image.size
-            scale = min((cw - 16) / max(1, iw), (ch - 16) / max(1, ih))
+            scale = min((cw - 14) / max(1, iw), (ch - 14) / max(1, ih))
             fw = max(1.0, iw * scale)
             fh = max(1.0, ih * scale)
             return ((cw - fw) * 0.5, (ch - fh) * 0.5, fw, fh)
@@ -2330,7 +2372,7 @@ class AtomicBlenderApp(tk.Tk):
             return None
         res_w = max(16, int(self.var_res_w.get()))
         res_h = max(16, int(self.var_res_h.get()))
-        pad = min(24.0, min(cw, ch) * 0.2)
+        pad = min(14.0, min(cw, ch) * 0.12)
         scale = max(1e-4, min((cw - pad) / res_w, (ch - pad) / res_h))
         fw = res_w * scale
         fh = res_h * scale
@@ -2451,7 +2493,8 @@ class AtomicBlenderApp(tk.Tk):
         ch = max(1, self.canvas.winfo_height())
         res_w = max(16, int(self.var_res_w.get()))
         res_h = max(16, int(self.var_res_h.get()))
-        scale = min((cw - 24) / res_w, (ch - 24) / res_h)
+        pad = min(14.0, min(cw, ch) * 0.12)
+        scale = min((cw - pad) / res_w, (ch - pad) / res_h)
         fw = res_w * scale
         fh = res_h * scale
         ortho = self._vp_scene.ortho_scale if self._vp_scene is not None else 20.0
@@ -2482,7 +2525,8 @@ class AtomicBlenderApp(tk.Tk):
             self._vp_photo_ref = ImageTk.PhotoImage(img)
             self.canvas.create_image(0, 0, image=self._vp_photo_ref, anchor=tk.NW)
             return
-        scale = min((cw - 24) / res_w, (ch - 24) / res_h)
+        pad = min(14.0, min(cw, ch) * 0.12)
+        scale = min((cw - pad) / res_w, (ch - pad) / res_h)
         fw = res_w * scale
         fh = res_h * scale
         cx0 = cw * 0.5
@@ -2615,7 +2659,7 @@ class AtomicBlenderApp(tk.Tk):
 
         if _HAS_PIL:
             iw, ih = self._pil_image.size
-            scale = min((cw - 16) / max(1, iw), (ch - 16) / max(1, ih))
+            scale = min((cw - 14) / max(1, iw), (ch - 14) / max(1, ih))
             nw = max(1, int(iw * scale))
             nh = max(1, int(ih * scale))
             resized = self._pil_image.resize((nw, nh), Image.Resampling.LANCZOS).copy()
