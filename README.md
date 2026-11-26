@@ -75,9 +75,10 @@ atomic-blender-gui [optional_structure_file]
 
 Inside the desktop client you can:
 - **Drag & drop** structure files (`POSCAR`, `.cif`, `.xyz`, `.data`, `.json`), `view.json`, or custom `style.json` files directly onto the window (or click **Browse...**), with an instant live structure inspector banner (formula, atom count, lattice parameters, PBC) and one-click **Smart Slab Preset** / **Cube / Bulk Preset**.
+- **Interactive 3D Viewport**: Rotate (`left-drag`), pan (`right-drag` or `Shift + left-drag`), and zoom (`scroll`) the loaded structure in real time with 3D-shaded spheres, bicolor/single bonds, and cell wireframe; click **Save view.json...** to export the exact camera state or **Reset / Fit View** to re-frame.
 - Choose a style (`studio`, `matte`, `ball_and_stick`, `default`, or a custom `.json`), tune **Atom Scale** (`0.4`–`1.6`), toggle **Show Cell**, set **Bond Color** (`bicolor` or `single`), switch view presets (`Iso`, `Side`, `a`, `b`, `c`) or a saved `view.json` (`--fit-view`), and configure supercell replication, `wrap`, `--crop-z`, resolution, and Cycles samples.
-- Click **Render & Preview** to run Cycles asynchronously with live log streaming and inspect the rendered RGBA PNG directly on a transparent checkerboard canvas.
-- Click **Open in Blender** to generate a `.blend` scene with the active settings and launch the Blender GUI so you can orbit interactively and save `view.json` via the **Atomic Studio** sidebar.
+- Click **Render & Preview** to raytrace the exact current 3D viewport angle/zoom (or selected preset) in Cycles with live log streaming and inspect the rendered RGBA PNG directly on a transparent checkerboard canvas.
+- Click **Open in Blender** to generate a `.blend` scene with the active settings and launch the Blender GUI.
 
 ---
 
