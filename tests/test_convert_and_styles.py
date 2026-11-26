@@ -257,6 +257,48 @@ class TestAtomicBlender(unittest.TestCase):
                     pass
                 raise
 
+    def test_viewport3d_and_interactive_camera_export(self) -> None:
+        from atomic_blender.cli import resolve_style_path
+        from atomic_blender.gui import AtomicBlenderApp
+        from atomic_blender.viewport3d import ViewportScene, orbit_quat, preset_to_quat
+
+        style = json.loads(resolve_style_path("studio").read_text(encoding="utf-8"))
+        structure = {
+            "symbols": ["O", "H", "H"],
+            "positions": [[0.0, 0.0, 0.0], [0.96, 0.0, 0.0], [-0.24, 0.93, 0.0]],
+            "cell": [[10.0, 0.0, 0.0], [0.0, 10.0, 0.0], [0.0, 0.0, 10.0]],
+            "pbc": [True, True, True],
+            "has_cell": True,
+            "origin": [0.0, 0.0, 0.0],
+        }
+        vp = ViewportScene.from_neutral_dict(structure, style)
+        self.assertEqual(len(vp.bond_i), 2)
+        q_iso = preset_to_quat("iso", vp.cell_vecs)
+        vp.fit_camera(q_iso, aspect=1.0)
+        q_orb = orbit_quat(vp.quat, 0.25, -0.15)
+        vp.quat = q_orb
+        vp.zoom(0.8)
+        view_dict = vp.to_view_dict(800, 600)
+        self.assertEqual(view_dict["camera_type"], "ORTHO")
+        self.assertEqual(view_dict["resolution"], [800, 600])
+        self.assertFalse(view_dict["fit_to_scene"])
+        self.assertAlmostEqual(view_dict["ortho_scale"], vp.ortho_scale)
+
+        app = AtomicBlenderApp()
+        app.withdraw()
+        try:
+            app._structure_cache = structure
+            app._rebuild_viewport(reset_camera=True)
+            self.assertIsNotNone(app._vp_scene)
+            app._vp_scene.orbit(0.3, 0.2)
+            app._use_interactive_cam = True
+            app._draw_3d_viewport()
+            eff = app._effective_cfg_for_cli(app._collect_config())
+            self.assertEqual(eff.view_mode, "file")
+            self.assertTrue(Path(eff.view_file).is_file())
+        finally:
+            app.destroy()
+
 
 if __name__ == "__main__":
     unittest.main()

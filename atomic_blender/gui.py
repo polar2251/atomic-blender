@@ -4,20 +4,25 @@ from __future__ import annotations
 
 import argparse
 from dataclasses import dataclass
+import json
 import os
 from pathlib import Path
 import queue
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 import tkinter as tk
 from tkinter import filedialog, messagebox, scrolledtext, ttk
 from typing import Any
 
-from atomic_blender.cli import _collect_style_files, find_blender_executable
-from atomic_blender.convert import read_structure
+import numpy as np
+
+from atomic_blender.cli import _collect_style_files, find_blender_executable, resolve_style_path
+from atomic_blender.convert import atoms_to_neutral_dict, read_structure
 from atomic_blender.elements import VIEW_PRESETS, classify_dropped_file
+from atomic_blender.viewport3d import ViewportScene, preset_to_quat, quat_to_axes
 
 try:
     from PIL import Image, ImageTk  # type: ignore
@@ -206,6 +211,13 @@ class AtomicBlenderApp(tk.Tk):
         self._preview_path: Path | None = None
         self._pil_image: Any = None
         self._photo_ref: Any = None
+        self._structure_cache: dict[str, Any] | None = None
+        self._vp_scene: ViewportScene | None = None
+        self._use_interactive_cam = False
+        self._dragging = False
+        self._drag_mode: str | None = None
+        self._drag_last: tuple[int, int] = (0, 0)
+        self._temp_view_files: list[Path] = []
 
         self._init_variables(initial_input)
         self._build_layout()
@@ -263,6 +275,7 @@ class AtomicBlenderApp(tk.Tk):
         self.var_res_h = tk.IntVar(value=1400)
         self.var_samples = tk.IntVar(value=64)
         self.var_blender = tk.StringVar(value=detected_blender)
+        self.var_canvas_mode = tk.StringVar(value="3d")
         self.var_status = tk.StringVar(value="Ready")
 
     def _build_layout(self) -> None:
@@ -325,14 +338,17 @@ class AtomicBlenderApp(tk.Tk):
         ttk.Label(f_rep, text="Style").grid(row=0, column=0, sticky=tk.W, pady=2)
         self.combo_style = ttk.Combobox(f_rep, textvariable=self.var_style, values=self._available_styles, width=24)
         self.combo_style.grid(row=0, column=1, sticky=tk.EW, padx=4, pady=2)
+        self.combo_style.bind("<<ComboboxSelected>>", lambda _e: self._on_repr_changed())
         ttk.Button(f_rep, text="JSON...", command=self._browse_style).grid(row=0, column=2, pady=2)
 
         ttk.Label(f_rep, text="Atom Scale").grid(row=1, column=0, sticky=tk.W, pady=2)
         row_sc = ttk.Frame(f_rep)
         row_sc.grid(row=1, column=1, columnspan=2, sticky=tk.EW, padx=4, pady=2)
-        ttk.Scale(
+        scale_w = ttk.Scale(
             row_sc, from_=0.4, to=1.6, variable=self.var_radius_scale, command=self._on_scale_changed
-        ).pack(side=tk.LEFT, fill=tk.X, expand=True)
+        )
+        scale_w.pack(side=tk.LEFT, fill=tk.X, expand=True)
+        scale_w.bind("<ButtonRelease-1>", lambda _e: self._on_repr_changed())
         ttk.Label(row_sc, textvariable=self.var_radius_label, width=6).pack(side=tk.LEFT, padx=(6, 0))
 
         row_repr_btns = ttk.Frame(f_rep)
@@ -351,14 +367,20 @@ class AtomicBlenderApp(tk.Tk):
         ttk.Label(f_rep, text="Bonds").grid(row=3, column=0, sticky=tk.W, pady=2)
         row_b = ttk.Frame(f_rep)
         row_b.grid(row=3, column=1, columnspan=2, sticky=tk.EW, padx=4, pady=2)
-        ttk.Combobox(
+        cb_bonds = ttk.Combobox(
             row_b, textvariable=self.var_bonds, values=["style", "table", "auto", "none"], state="readonly", width=8
-        ).pack(side=tk.LEFT)
+        )
+        cb_bonds.pack(side=tk.LEFT)
+        cb_bonds.bind("<<ComboboxSelected>>", lambda _e: self._on_repr_changed())
         ttk.Label(row_b, text="Color").pack(side=tk.LEFT, padx=(8, 4))
-        ttk.Combobox(
+        cb_bcol = ttk.Combobox(
             row_b, textvariable=self.var_bond_color, values=["style", "bicolor", "single"], state="readonly", width=9
-        ).pack(side=tk.LEFT)
-        ttk.Checkbutton(row_b, text="Show Cell", variable=self.var_show_cell).pack(side=tk.LEFT, padx=(8, 0))
+        )
+        cb_bcol.pack(side=tk.LEFT)
+        cb_bcol.bind("<<ComboboxSelected>>", lambda _e: self._on_repr_changed())
+        ttk.Checkbutton(
+            row_b, text="Show Cell", variable=self.var_show_cell, command=self._on_repr_changed
+        ).pack(side=tk.LEFT, padx=(8, 0))
 
         # 3. Camera View
         f_sv = ttk.LabelFrame(parent, text="Camera View", padding=8)
@@ -386,6 +408,7 @@ class AtomicBlenderApp(tk.Tk):
             f_sv, textvariable=self.var_view_preset, values=list(VIEW_PRESETS), state="readonly"
         )
         self.combo_preset.grid(row=2, column=1, columnspan=2, sticky=tk.EW, padx=(4, 0), pady=2)
+        self.combo_preset.bind("<<ComboboxSelected>>", lambda _e: self._pick_view_preset(self.var_view_preset.get()))
 
         ttk.Label(f_sv, text="View JSON").grid(row=3, column=0, sticky=tk.W, pady=2)
         self.entry_view_file = ttk.Entry(f_sv, textvariable=self.var_view_file)
@@ -466,13 +489,39 @@ class AtomicBlenderApp(tk.Tk):
         v_pane = ttk.PanedWindow(parent, orient=tk.VERTICAL)
         v_pane.pack(fill=tk.BOTH, expand=True)
 
-        f_prev = ttk.LabelFrame(v_pane, text="Render Preview", padding=4)
+        f_prev = ttk.LabelFrame(v_pane, text="Viewport & Render Preview", padding=4)
+        tb = ttk.Frame(f_prev)
+        tb.pack(fill=tk.X, pady=(0, 4))
+        ttk.Radiobutton(
+            tb, text="3D Interactive", variable=self.var_canvas_mode, value="3d", command=self._redraw_canvas
+        ).pack(side=tk.LEFT)
+        ttk.Radiobutton(
+            tb, text="Rendered PNG", variable=self.var_canvas_mode, value="png", command=self._redraw_canvas
+        ).pack(side=tk.LEFT, padx=(8, 12))
+        ttk.Button(tb, text="Reset / Fit View", command=self._on_reset_view).pack(side=tk.LEFT, padx=(0, 4))
+        ttk.Button(tb, text="Save view.json...", command=self._on_save_view_json).pack(side=tk.LEFT)
+        ttk.Label(
+            tb, text="Left-drag: Rotate  |  Right/Shift-drag: Pan  |  Scroll: Zoom", foreground="#555555"
+        ).pack(side=tk.RIGHT)
+
         self.canvas = tk.Canvas(f_prev, bg="#E8E8E8", highlightthickness=0)
         self.canvas.pack(fill=tk.BOTH, expand=True)
-        self.canvas.bind("<Configure>", lambda _e: self._redraw_preview())
+        self.canvas.bind("<Configure>", lambda _e: self._redraw_canvas())
+        self.canvas.bind("<ButtonPress-1>", self._on_canvas_lbutton_down)
+        self.canvas.bind("<B1-Motion>", self._on_canvas_motion)
+        self.canvas.bind("<ButtonRelease-1>", self._on_canvas_mouse_up)
+        self.canvas.bind("<ButtonPress-2>", lambda e: self._on_canvas_pan_down(e))
+        self.canvas.bind("<B2-Motion>", self._on_canvas_motion)
+        self.canvas.bind("<ButtonRelease-2>", self._on_canvas_mouse_up)
+        self.canvas.bind("<ButtonPress-3>", lambda e: self._on_canvas_pan_down(e))
+        self.canvas.bind("<B3-Motion>", self._on_canvas_motion)
+        self.canvas.bind("<ButtonRelease-3>", self._on_canvas_mouse_up)
+        self.canvas.bind("<MouseWheel>", self._on_canvas_wheel)
+        self.canvas.bind("<Button-4>", lambda _e: self._zoom_3d(0.9))
+        self.canvas.bind("<Button-5>", lambda _e: self._zoom_3d(1.111))
 
         f_log = ttk.LabelFrame(v_pane, text="Log", padding=4)
-        self.log_text = scrolledtext.ScrolledText(f_log, height=9, state=tk.DISABLED, wrap=tk.WORD)
+        self.log_text = scrolledtext.ScrolledText(f_log, height=8, state=tk.DISABLED, wrap=tk.WORD)
         self.log_text.pack(fill=tk.BOTH, expand=True)
 
         v_pane.add(f_prev, weight=4)
@@ -481,11 +530,15 @@ class AtomicBlenderApp(tk.Tk):
     def _on_scale_changed(self, _val: str) -> None:
         self.var_radius_label.set(f"{self.var_radius_scale.get():.2f}×")
 
+    def _on_repr_changed(self) -> None:
+        self._rebuild_viewport(reset_camera=False)
+
     def _set_representation(self, radius_scale: float, bonds: str, bond_color: str) -> None:
         self.var_radius_scale.set(radius_scale)
         self.var_radius_label.set(f"{radius_scale:.2f}×")
         self.var_bonds.set(bonds)
         self.var_bond_color.set(bond_color)
+        self._rebuild_viewport(reset_camera=False)
 
     def _apply_slab_preset(self) -> None:
         self.var_view_mode.set("preset")
@@ -494,6 +547,8 @@ class AtomicBlenderApp(tk.Tk):
         self.var_crop_z_mode.set("auto")
         self._sync_crop_z()
         self._set_resolution(1400, 1200)
+        self._use_interactive_cam = False
+        self._rebuild_viewport(reset_camera=True)
 
     def _apply_bulk_preset(self) -> None:
         self.var_view_mode.set("preset")
@@ -502,11 +557,18 @@ class AtomicBlenderApp(tk.Tk):
         self.var_crop_z_mode.set("none")
         self._sync_crop_z()
         self._set_resolution(1400, 1400)
+        self._use_interactive_cam = False
+        self._rebuild_viewport(reset_camera=True)
 
     def _pick_view_preset(self, preset: str) -> None:
         self.var_view_mode.set("preset")
         self._sync_view_mode()
         self.var_view_preset.set(preset)
+        self._use_interactive_cam = False
+        if self._vp_scene is not None:
+            self._apply_view_to_viewport(self._vp_scene)
+            self.var_canvas_mode.set("3d")
+            self._redraw_canvas()
 
     def _sync_view_mode(self) -> None:
         is_file = self.var_view_mode.get() == "file"
@@ -519,10 +581,14 @@ class AtomicBlenderApp(tk.Tk):
     def _sync_crop_z(self) -> None:
         is_custom = self.var_crop_z_mode.get() == "custom"
         self.entry_crop_z.configure(state="normal" if is_custom else "disabled")
+        self._rebuild_viewport(reset_camera=not self._use_interactive_cam)
 
     def _set_resolution(self, w: int, h: int) -> None:
         self.var_res_w.set(w)
         self.var_res_h.set(h)
+        if self._vp_scene is not None and not self._use_interactive_cam:
+            self._apply_view_to_viewport(self._vp_scene)
+        self._redraw_canvas()
 
     def _schedule_inspect(self) -> None:
         if self._inspect_after_id is not None:
@@ -537,13 +603,26 @@ class AtomicBlenderApp(tk.Tk):
             return
         type_map = self.var_type_map.get()
         rep = (int(self.var_rep_x.get()), int(self.var_rep_y.get()), int(self.var_rep_z.get()))
+        wrap = bool(self.var_wrap.get())
 
         def worker() -> None:
             try:
+                p = Path(path).expanduser()
+                if not p.is_file():
+                    self._queue.put(("inspect", f"File not found: {p.name}"))
+                    return
+                if p.suffix.lower() == ".json":
+                    neutral = json.loads(p.read_text(encoding="utf-8"))
+                    if rep != (1, 1, 1) and neutral.get("has_cell", False):
+                        atoms = read_structure(p, type_map=type_map.strip() or None)
+                        neutral = atoms_to_neutral_dict(atoms, source=str(p), replicate=rep, wrap=wrap)
+                else:
+                    atoms = read_structure(p, type_map=type_map.strip() or None)
+                    neutral = atoms_to_neutral_dict(atoms, source=str(p), replicate=rep, wrap=wrap)
                 summary = inspect_structure_summary(path, type_map=type_map, replicate=rep)
+                self._queue.put(("structure", (summary, neutral)))
             except Exception as exc:
-                summary = f"Inspect error: {exc}"
-            self._queue.put(("inspect", summary))
+                self._queue.put(("inspect", f"Inspect error: {exc}"))
 
         threading.Thread(target=worker, daemon=True).start()
 
@@ -577,11 +656,17 @@ class AtomicBlenderApp(tk.Tk):
         path = filedialog.askopenfilename(title="Select Style JSON", filetypes=[("JSON files", "*.json")])
         if path:
             self.var_style.set(path)
+            self._rebuild_viewport(reset_camera=False)
 
     def _browse_view_file(self) -> None:
         path = filedialog.askopenfilename(title="Select view.json", filetypes=[("JSON files", "*.json")])
         if path:
             self.var_view_file.set(path)
+            self._use_interactive_cam = False
+            if self._vp_scene is not None:
+                self._apply_view_to_viewport(self._vp_scene)
+                self.var_canvas_mode.set("3d")
+                self._redraw_canvas()
 
     def _browse_blender(self) -> None:
         path = filedialog.askopenfilename(title="Select Blender Executable")
@@ -646,19 +731,53 @@ class AtomicBlenderApp(tk.Tk):
 
         threading.Thread(target=worker, daemon=True).start()
 
+    def _effective_cfg_for_cli(self, cfg: GuiRenderConfig) -> GuiRenderConfig:
+        """If the user orbited/zoomed the 3D viewport, materialize its camera as a temp ``view.json``."""
+        if self._vp_scene is None or not self._use_interactive_cam:
+            return cfg
+        view_dict = self._vp_scene.to_view_dict(cfg.resolution[0], cfg.resolution[1])
+        tmp_fd, tmp_name = tempfile.mkstemp(prefix="atomic_vp_", suffix=".json")
+        os.close(tmp_fd)
+        tmp_path = Path(tmp_name)
+        tmp_path.write_text(json.dumps(view_dict, indent=2), encoding="utf-8")
+        self._temp_view_files.append(tmp_path)
+        return GuiRenderConfig(
+            input_path=cfg.input_path,
+            output_path=cfg.output_path,
+            style=cfg.style,
+            view_mode="file",
+            view_preset=cfg.view_preset,
+            view_file=str(tmp_path),
+            fit_view=False,
+            type_map=cfg.type_map,
+            replicate=cfg.replicate,
+            wrap=cfg.wrap,
+            crop_z_mode=cfg.crop_z_mode,
+            crop_z_custom=cfg.crop_z_custom,
+            bonds=cfg.bonds,
+            bond_color=cfg.bond_color,
+            radius_scale=cfg.radius_scale,
+            show_cell=cfg.show_cell,
+            resolution=cfg.resolution,
+            samples=cfg.samples,
+            blender_exe=cfg.blender_exe,
+            save_blend=cfg.save_blend,
+        )
+
     def _on_render(self) -> None:
         if self._busy:
             return
         try:
             cfg = self._collect_config()
             in_path = validate_gui_config(cfg)
+            cli_cfg = self._effective_cfg_for_cli(cfg)
         except Exception as exc:
             messagebox.showerror("Invalid Configuration", str(exc))
             return
 
         out_png = Path(cfg.output_path).expanduser() if cfg.output_path.strip() else in_path.with_suffix(".png")
         self.var_output.set(str(out_png))
-        cli_args = build_render_cli_args(cfg, out_png=out_png)
+        cli_args = build_render_cli_args(cli_cfg, out_png=out_png)
         self._run_cli_async(cli_args, mode="render", target_path=out_png)
 
     def _on_open_in_blender(self) -> None:
@@ -668,13 +787,14 @@ class AtomicBlenderApp(tk.Tk):
             cfg = self._collect_config()
             in_path = validate_gui_config(cfg)
             blender_exe = find_blender_executable(cfg.blender_exe.strip() or None)
+            cli_cfg = self._effective_cfg_for_cli(cfg)
         except Exception as exc:
             messagebox.showerror("Cannot Open in Blender", str(exc))
             return
 
         base = Path(cfg.output_path).expanduser() if cfg.output_path.strip() else in_path
         blend_path = base.with_suffix(".blend")
-        cli_args = build_render_cli_args(cfg, out_png=None, save_blend=blend_path)
+        cli_args = build_render_cli_args(cli_cfg, out_png=None, save_blend=blend_path)
         self._pending_blender_exe = str(blender_exe)
         self._run_cli_async(cli_args, mode="open_blender", target_path=blend_path)
 
@@ -697,9 +817,306 @@ class AtomicBlenderApp(tk.Tk):
             self._pil_image = Image.open(png_path).convert("RGBA")
         else:
             self._pil_image = tk.PhotoImage(file=str(png_path))
-        self._redraw_preview()
+        self.var_canvas_mode.set("png")
+        self._redraw_canvas()
 
-    def _redraw_preview(self) -> None:
+    def _redraw_canvas(self) -> None:
+        if self.var_canvas_mode.get() == "3d":
+            self._draw_3d_viewport()
+        else:
+            self._redraw_preview()
+
+    def _parse_crop_z_tuple(self) -> tuple[float, float] | None:
+        mode = self.var_crop_z_mode.get()
+        if mode == "none":
+            return None
+        if mode == "auto":
+            return (2.0, 4.0)
+        parts = [float(x.strip()) for x in self.var_crop_z_custom.get().split(",") if x.strip()]
+        if len(parts) == 1:
+            return (parts[0], parts[0])
+        if len(parts) == 2:
+            return (parts[0], parts[1])
+        return None
+
+    def _resolve_style_dict(self) -> dict[str, Any]:
+        try:
+            sp = resolve_style_path(self.var_style.get().strip() or "default")
+            return json.loads(sp.read_text(encoding="utf-8"))
+        except Exception:
+            return {}
+
+    def _apply_view_to_viewport(self, vp: ViewportScene) -> None:
+        res_w = max(16, int(self.var_res_w.get()))
+        res_h = max(16, int(self.var_res_h.get()))
+        aspect = res_w / res_h
+        crop_z = self._parse_crop_z_tuple()
+
+        if self.var_view_mode.get() == "file" and self.var_view_file.get().strip():
+            vf = Path(self.var_view_file.get().strip()).expanduser()
+            if vf.is_file():
+                try:
+                    vd = json.loads(vf.read_text(encoding="utf-8"))
+                    q = tuple(float(x) for x in vd["rotation_quaternion"])
+                    if bool(self.var_fit_view.get()) or bool(vd.get("fit_to_scene", False)):
+                        vp.fit_camera(quat=q, aspect=aspect, crop_z=crop_z)
+                    else:
+                        vp.quat = q  # type: ignore[assignment]
+                        vp.ortho_scale = float(vd.get("ortho_scale", vp.ortho_scale))
+                        loc = np.asarray(vd["location"], dtype=np.float64)
+                        _, _, back = quat_to_axes(vp.quat)
+                        # Project structure center onto camera ray for consistent Z/pan origin
+                        center = np.mean(vp.positions, axis=0) if len(vp.positions) else np.zeros(3)
+                        dist = max(1.0, float(np.dot(loc - center, back)))
+                        vp.target = loc - back * dist
+                    return
+                except Exception:
+                    pass
+
+        cell = vp.cell_vecs if vp.has_cell else None
+        q = preset_to_quat(self.var_view_preset.get(), cell)
+        vp.fit_camera(quat=q, aspect=aspect, crop_z=crop_z)
+
+    def _rebuild_viewport(self, reset_camera: bool) -> None:
+        if self._structure_cache is None:
+            return
+        prev_cam = None
+        if not reset_camera and self._vp_scene is not None and self._use_interactive_cam:
+            prev_cam = (self._vp_scene.quat, self._vp_scene.target.copy(), self._vp_scene.ortho_scale)
+
+        style = self._resolve_style_dict()
+        vp = ViewportScene.from_neutral_dict(
+            self._structure_cache,
+            style=style,
+            radius_scale=float(self.var_radius_scale.get()),
+            bonds_mode=self.var_bonds.get(),
+            bond_color=self.var_bond_color.get(),
+            show_cell=bool(self.var_show_cell.get()),
+        )
+        if prev_cam is not None:
+            vp.quat, vp.target, vp.ortho_scale = prev_cam
+        else:
+            self._apply_view_to_viewport(vp)
+        self._vp_scene = vp
+        if reset_camera:
+            self.var_canvas_mode.set("3d")
+        self._redraw_canvas()
+
+    def _on_reset_view(self) -> None:
+        self._use_interactive_cam = False
+        if self._vp_scene is not None:
+            self._apply_view_to_viewport(self._vp_scene)
+            self.var_canvas_mode.set("3d")
+            self._redraw_canvas()
+
+    def _on_save_view_json(self) -> None:
+        if self._vp_scene is None:
+            messagebox.showinfo("Save view.json", "Load or drop a structure first.")
+            return
+        path = filedialog.asksaveasfilename(
+            title="Save view.json",
+            defaultextension=".json",
+            initialfile="view.json",
+            filetypes=[("JSON files", "*.json")],
+        )
+        if not path:
+            return
+        res_w = max(16, int(self.var_res_w.get()))
+        res_h = max(16, int(self.var_res_h.get()))
+        payload = self._vp_scene.to_view_dict(res_w, res_h)
+        Path(path).write_text(json.dumps(payload, indent=2), encoding="utf-8")
+        self.var_view_mode.set("file")
+        self.var_view_file.set(path)
+        self._sync_view_mode()
+        self.var_status.set(f"Saved view -> {Path(path).name}")
+
+    def _on_canvas_lbutton_down(self, event: tk.Event) -> None:
+        if self.var_canvas_mode.get() != "3d" or self._vp_scene is None:
+            return
+        self._dragging = True
+        self._drag_mode = "pan" if (event.state & 0x0001) else "orbit"
+        self._drag_last = (event.x, event.y)
+
+    def _on_canvas_pan_down(self, event: tk.Event) -> None:
+        if self.var_canvas_mode.get() != "3d" or self._vp_scene is None:
+            return
+        self._dragging = True
+        self._drag_mode = "pan"
+        self._drag_last = (event.x, event.y)
+
+    def _on_canvas_motion(self, event: tk.Event) -> None:
+        if not self._dragging or self._vp_scene is None or self.var_canvas_mode.get() != "3d":
+            return
+        dx = event.x - self._drag_last[0]
+        dy = event.y - self._drag_last[1]
+        self._drag_last = (event.x, event.y)
+        if dx == 0 and dy == 0:
+            return
+
+        if self._drag_mode == "orbit":
+            self._vp_scene.orbit(dx * 0.0085, dy * 0.0085)
+        elif self._drag_mode == "pan":
+            px_per_a = self._viewport_px_per_angstrom()
+            self._vp_scene.pan(dx / max(1e-3, px_per_a), dy / max(1e-3, px_per_a))
+
+        self._use_interactive_cam = True
+        self._draw_3d_viewport()
+
+    def _on_canvas_mouse_up(self, _event: tk.Event) -> None:
+        if self._dragging:
+            self._dragging = False
+            self._drag_mode = None
+            if self.var_canvas_mode.get() == "3d":
+                self._draw_3d_viewport()
+
+    def _on_canvas_wheel(self, event: tk.Event) -> None:
+        if self.var_canvas_mode.get() != "3d" or self._vp_scene is None:
+            return
+        factor = 0.9 if event.delta > 0 else 1.111
+        self._zoom_3d(factor)
+
+    def _zoom_3d(self, factor: float) -> None:
+        if self._vp_scene is None or self.var_canvas_mode.get() != "3d":
+            return
+        self._vp_scene.zoom(factor)
+        self._use_interactive_cam = True
+        self._draw_3d_viewport()
+
+    def _viewport_px_per_angstrom(self) -> float:
+        cw = max(1, self.canvas.winfo_width())
+        ch = max(1, self.canvas.winfo_height())
+        res_w = max(16, int(self.var_res_w.get()))
+        res_h = max(16, int(self.var_res_h.get()))
+        scale = min((cw - 24) / res_w, (ch - 24) / res_h)
+        fw = res_w * scale
+        fh = res_h * scale
+        ortho = self._vp_scene.ortho_scale if self._vp_scene is not None else 20.0
+        return (fw / max(1e-3, ortho)) if res_w >= res_h else (fh / max(1e-3, ortho))
+
+    def _draw_3d_viewport(self) -> None:
+        self.canvas.delete("all")
+        cw = max(1, self.canvas.winfo_width())
+        ch = max(1, self.canvas.winfo_height())
+
+        if self._vp_scene is None:
+            self.canvas.create_text(
+                cw // 2,
+                ch // 2,
+                text="Drag & drop a structure file (or view.json / style.json) anywhere on this window\nor click 'Browse...' to preview in interactive 3D",
+                justify=tk.CENTER,
+                fill="#555555",
+            )
+            return
+
+        vp = self._vp_scene
+        res_w = max(16, int(self.var_res_w.get()))
+        res_h = max(16, int(self.var_res_h.get()))
+        scale = min((cw - 24) / res_w, (ch - 24) / res_h)
+        fw = res_w * scale
+        fh = res_h * scale
+        cx0 = cw * 0.5
+        cy0 = ch * 0.5
+        x0, y0, x1, y1 = cx0 - fw * 0.5, cy0 - fh * 0.5, cx0 + fw * 0.5, cy0 + fh * 0.5
+
+        # Camera output frame boundary
+        self.canvas.create_rectangle(x0, y0, x1, y1, fill="#F9FAFB", outline="#CBD5E1", width=1)
+
+        px_per_a = (fw / max(1e-3, vp.ortho_scale)) if res_w >= res_h else (fh / max(1e-3, vp.ortho_scale))
+        right, up, back = quat_to_axes(vp.quat)
+
+        draw_items: list[tuple[float, int, Any]] = []
+
+        # 1. Cell wireframe edges
+        if len(vp.cell_edges) > 0:
+            ce_rel = vp.cell_edges - vp.target
+            ce_x = cx0 + (ce_rel @ right) * px_per_a
+            ce_y = cy0 - (ce_rel @ up) * px_per_a
+            ce_z = ce_rel @ back
+            cell_w = max(1, min(3, int(round(0.10 * px_per_a))))
+            for idx in range(len(vp.cell_edges)):
+                z_mid = float(0.5 * (ce_z[idx, 0] + ce_z[idx, 1]))
+                draw_items.append((
+                    z_mid,
+                    0,
+                    ("cell", float(ce_x[idx, 0]), float(ce_y[idx, 0]), float(ce_x[idx, 1]), float(ce_y[idx, 1]), cell_w),
+                ))
+
+        # 2. Atoms projection
+        if len(vp.positions) > 0:
+            rel = vp.positions - vp.target
+            ax = cx0 + (rel @ right) * px_per_a
+            ay = cy0 - (rel @ up) * px_per_a
+            az = rel @ back
+
+            # 3. Bonds
+            if len(vp.bond_i) > 0:
+                bond_w = max(1, min(14, int(round(2.0 * vp.bond_radius * px_per_a))))
+                bi, bj = vp.bond_i, vp.bond_j
+                if vp.bond_color_mode == "bicolor":
+                    mx = 0.5 * (ax[bi] + ax[bj])
+                    my = 0.5 * (ay[bi] + ay[bj])
+                    mz = 0.5 * (az[bi] + az[bj])
+                    for k in range(len(bi)):
+                        i_idx, j_idx = int(bi[k]), int(bj[k])
+                        draw_items.append((
+                            float(0.5 * (az[i_idx] + mz[k])),
+                            1,
+                            ("bond", float(ax[i_idx]), float(ay[i_idx]), float(mx[k]), float(my[k]), bond_w, vp.colors[i_idx]),
+                        ))
+                        draw_items.append((
+                            float(0.5 * (mz[k] + az[j_idx])),
+                            1,
+                            ("bond", float(mx[k]), float(my[k]), float(ax[j_idx]), float(ay[j_idx]), bond_w, vp.colors[j_idx]),
+                        ))
+                else:
+                    for k in range(len(bi)):
+                        i_idx, j_idx = int(bi[k]), int(bj[k])
+                        draw_items.append((
+                            float(0.5 * (az[i_idx] + az[j_idx])),
+                            1,
+                            ("bond", float(ax[i_idx]), float(ay[i_idx]), float(ax[j_idx]), float(ay[j_idx]), bond_w, vp.single_bond_color),
+                        ))
+
+            for idx in range(len(vp.positions)):
+                r_px = float(vp.radii[idx] * px_per_a)
+                draw_items.append((float(az[idx]), 2, ("atom", float(ax[idx]), float(ay[idx]), r_px, idx)))
+
+        # Painter's sort far -> near
+        draw_items.sort(key=lambda item: (item[0], item[1]))
+        fast_drag = self._dragging and len(vp.positions) > 1500
+        c_create_line = self.canvas.create_line
+        c_create_oval = self.canvas.create_oval
+        c_col = vp.cell_color
+
+        for _z, _kind_ord, payload in draw_items:
+            tag = payload[0]
+            if tag == "cell":
+                _, px0, py0, px1, py1, w = payload
+                c_create_line(px0, py0, px1, py1, fill=c_col, width=w)
+            elif tag == "bond":
+                _, px0, py0, px1, py1, w, col = payload
+                c_create_line(px0, py0, px1, py1, fill=col, width=w, capstyle=tk.ROUND)
+            else:
+                _, sx, sy, r_px, idx = payload
+                if r_px < 0.8:
+                    continue
+                c_create_oval(
+                    sx - r_px,
+                    sy - r_px,
+                    sx + r_px,
+                    sy + r_px,
+                    fill=vp.colors[idx],
+                    outline=vp.outline_colors[idx],
+                    width=1,
+                )
+                if not fast_drag and r_px >= 6.0:
+                    hr = r_px * 0.34
+                    hx = sx - r_px * 0.32
+                    hy = sy - r_px * 0.32
+                    c_create_oval(hx - hr, hy - hr, hx + hr, hy + hr, fill=vp.highlight_colors[idx], outline="")
+
+        # Re-stroke frame border cleanly on top
+        self.canvas.create_rectangle(x0, y0, x1, y1, outline="#94A3B8", width=1)
         self.canvas.delete("all")
         cw = max(1, self.canvas.winfo_width())
         ch = max(1, self.canvas.winfo_height())
@@ -735,6 +1152,14 @@ class AtomicBlenderApp(tk.Tk):
 
         self.canvas.create_image(cw // 2, ch // 2, image=self._photo_ref, anchor=tk.CENTER)
 
+    def destroy(self) -> None:
+        for tmp_p in getattr(self, "_temp_view_files", []):
+            try:
+                tmp_p.unlink(missing_ok=True)
+            except Exception:
+                pass
+        super().destroy()
+
     def _poll_queue(self) -> None:
         while True:
             try:
@@ -743,6 +1168,12 @@ class AtomicBlenderApp(tk.Tk):
                 break
             if kind == "inspect":
                 self.var_inspector.set(str(payload))
+            elif kind == "structure":
+                summary, neutral = payload
+                self.var_inspector.set(str(summary))
+                self._structure_cache = neutral
+                self._use_interactive_cam = False
+                self._rebuild_viewport(reset_camera=True)
             elif kind == "drop":
                 self.handle_dropped_files(list(payload))
             elif kind == "log":
@@ -772,12 +1203,18 @@ class AtomicBlenderApp(tk.Tk):
                 self.var_view_mode.set("file")
                 self.var_view_file.set(str(p))
                 self._sync_view_mode()
+                self._use_interactive_cam = False
+                if self._vp_scene is not None:
+                    self._apply_view_to_viewport(self._vp_scene)
+                    self.var_canvas_mode.set("3d")
+                    self._redraw_canvas()
                 self.var_status.set(f"Loaded view.json via drop: {p.name}")
                 self._append_log(f"Dropped view file: {p}")
             elif kind == "style":
                 self.var_style.set(str(p))
                 self.var_status.set(f"Loaded style JSON via drop: {p.name}")
                 self._append_log(f"Dropped style file: {p}")
+                self._rebuild_viewport(reset_camera=False)
             else:
                 self.var_input.set(str(p))
                 self.var_output.set(str(p.with_suffix(".png")))
