@@ -24,15 +24,22 @@ Reusable publication-quality atomic structure renderer combining **ASE** (univer
 
 ## Installation
 
-Clone and install in editable mode:
+Install directly from GitHub (for private access, ensure your Git credentials or SSH key are configured):
+
+```bash
+pip install git+https://github.com/polar2251/atomic-blender.git
+```
+
+Or clone and install locally (standard or editable mode):
 
 ```bash
 git clone https://github.com/polar2251/atomic-blender.git
 cd atomic-blender
-pip install -e .
+pip install .          # standard self-contained install
+# or: pip install -e . # editable development install
 ```
 
-If Blender is not on `PATH` (or not in the standard Windows install path), either pass `--blender <path-to-blender>` or set the `BLENDER_EXE` environment variable:
+Blender is auto-detected across **Windows** (`Program Files\Blender Foundation\Blender*` and `%LOCALAPPDATA%`), **macOS** (`/Applications/Blender.app`), **Linux** (`/usr/bin/blender`, `/usr/local/bin/blender`, `/snap/bin/blender`, `/opt/blender*`), and `PATH`. If Blender is installed in a custom location, pass `--blender <path-to-blender>` or set `BLENDER_EXE`:
 
 ```powershell
 $env:BLENDER_EXE = "C:\Program Files\Blender Foundation\Blender 5.2\blender.exe"
@@ -44,6 +51,12 @@ Install and enable the N-panel addon directly into Blender's user addons directo
 
 ```bash
 atomic-blender install-addon
+```
+
+To export a standalone `.zip` archive for manual installation via Blender's **Edit > Preferences > Add-ons > Install from Disk**:
+
+```bash
+atomic-blender install-addon --zip atomic_blender_studio.zip
 ```
 
 > **Note on Blender built-in addon naming**: Blender ships with a built-in `"Atomic Blender (PDB/XYZ)"` addon (`io_mesh_atomic`). To avoid any module, UI, or operator collision, this project registers under the distinct module name **`atomic_blender_studio`**, display name **`Atomic Blender Studio (Publication Renderer)`**, N-panel tab **`Atomic Studio`**, and operator namespace **`atomic_studio.*`**. Both addons can coexist safely.

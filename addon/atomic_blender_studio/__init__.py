@@ -65,9 +65,12 @@ def _default_style_path() -> str:
     cfg = _load_addon_config()
     repo_root = cfg.get("repo_root")
     if repo_root:
-        p = Path(repo_root) / "styles" / "default.json"
-        if p.is_file():
-            return str(p)
+        for p in (
+            Path(repo_root) / "styles" / "default.json",
+            Path(repo_root) / "atomic_blender" / "styles" / "default.json",
+        ):
+            if p.is_file():
+                return str(p)
     repo_style = _ADDON_DIR.parent.parent / "styles" / "default.json"
     if repo_style.is_file():
         return str(repo_style)
@@ -342,7 +345,6 @@ class ATOMIC_STUDIO_OT_camera_to_view(Operator):
         if cam.data.type == "ORTHO":
             sensor_fit = cam.data.sensor_fit
             sensor_size = cam.data.sensor_height if sensor_fit == "VERTICAL" else cam.data.sensor_width
-            # In Blender's VIEW_3D, ortho half-extent scales with view_distance * 36 / (2 * lens)
             cam.data.ortho_scale = float(rv3d.view_distance * sensor_size / max(1e-3, space.lens))
 
         self.report({"INFO"}, f"Aligned camera '{cam.name}' to current viewport (ortho_scale={cam.data.ortho_scale:.2f})")

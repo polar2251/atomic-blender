@@ -12,7 +12,13 @@ from ase.build import bulk
 import ase.io
 import numpy as np
 
-from atomic_blender.cli import build_parser, resolve_style_path
+from atomic_blender.cli import (
+    build_parser,
+    cmd_install_addon,
+    package_dir,
+    package_root,
+    resolve_style_path,
+)
 from atomic_blender.convert import atoms_to_neutral_dict, convert_file, parse_type_map
 from atomic_blender.elements import resolve_element_color, resolve_element_radius
 
@@ -92,6 +98,49 @@ class TestAtomicBlender(unittest.TestCase):
         self.assertEqual(args.replicate, [2, 2, 1])
         self.assertEqual(args.crop_z, "auto")
         self.assertEqual(args.view, "iso")
+
+    def test_packaged_styles_and_addon_match_root(self) -> None:
+        pkg_style = package_dir() / "styles" / "default.json"
+        root_style = package_root() / "styles" / "default.json"
+        self.assertTrue(pkg_style.is_file())
+        self.assertTrue(root_style.is_file())
+        self.assertEqual(pkg_style.read_text(encoding="utf-8"), root_style.read_text(encoding="utf-8"))
+
+        pkg_addon = package_dir() / "addon" / "atomic_blender_studio" / "__init__.py"
+        root_addon = package_root() / "addon" / "atomic_blender_studio" / "__init__.py"
+        self.assertTrue(pkg_addon.is_file())
+        self.assertTrue(root_addon.is_file())
+        self.assertEqual(pkg_addon.read_text(encoding="utf-8"), root_addon.read_text(encoding="utf-8"))
+
+    def test_install_addon_zip_and_dir(self) -> None:
+        import zipfile
+
+        parser = build_parser()
+        with tempfile.TemporaryDirectory() as tmp:
+            zip_path = Path(tmp) / "atomic_blender_studio.zip"
+            args_zip = parser.parse_args(["install-addon", "--zip", str(zip_path)])
+            self.assertEqual(cmd_install_addon(args_zip), 0)
+            self.assertTrue(zip_path.is_file())
+            with zipfile.ZipFile(zip_path, "r") as zf:
+                names = set(zf.namelist())
+            self.assertIn("atomic_blender_studio/__init__.py", names)
+            self.assertIn("atomic_blender_studio/scene_builder.py", names)
+            self.assertIn("atomic_blender_studio/elements.py", names)
+            self.assertIn("atomic_blender_studio/styles/default.json", names)
+            self.assertIn("atomic_blender_studio/config.json", names)
+
+            addons_dir = Path(tmp) / "addons"
+            args_dir = parser.parse_args([
+                "install-addon",
+                "--addons-dir",
+                str(addons_dir),
+                "--no-enable",
+                "--blender",
+                __file__,
+            ])
+            self.assertEqual(cmd_install_addon(args_dir), 0)
+            self.assertTrue((addons_dir / "atomic_blender_studio" / "__init__.py").is_file())
+            self.assertTrue((addons_dir / "atomic_blender_studio" / "styles" / "default.json").is_file())
 
 
 if __name__ == "__main__":
