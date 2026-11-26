@@ -879,6 +879,88 @@ def _parse_crop_z(val: str | None) -> tuple[float, float] | None:
     raise ValueError(f"Invalid --crop-z value: {val!r}")
 
 
+def _resolve_view_arg(view_val: str | dict[str, Any]) -> str | dict[str, Any]:
+    if isinstance(view_val, dict):
+        return view_val
+    view_str = str(view_val)
+    if view_str.lower() in VIEW_PRESETS:
+        return view_str.lower()
+    view_path = Path(view_str)
+    if view_path.is_file():
+        return json.loads(view_path.read_text(encoding="utf-8"))
+    raise FileNotFoundError(f"Unknown preset or missing view file: {view_str}")
+
+
+def run_preview_server() -> None:
+    """Keep Blender warm and render preview PNGs on demand from JSON-line commands on stdin."""
+    current_scene_key: str | None = None
+    cached_framing: dict[str, Any] | None = None
+    cached_style: dict[str, Any] | None = None
+    print("PREVIEW_READY", flush=True)
+
+    for raw_line in sys.stdin:
+        line = raw_line.strip()
+        if not line:
+            continue
+        seq: Any = "?"
+        try:
+            cmd = json.loads(line)
+            action = cmd.get("action")
+            if action == "quit":
+                break
+            if action != "render":
+                continue
+
+            seq = cmd["seq"]
+            scene_key = str(cmd["scene_key"])
+            style = json.loads(Path(cmd["style"]).read_text(encoding="utf-8"))
+            if cmd.get("samples") is not None:
+                style.setdefault("render", {})["samples"] = int(cmd["samples"])
+            res = tuple(int(x) for x in cmd["resolution"])
+            view_arg = _resolve_view_arg(cmd["view"])
+
+            if scene_key != current_scene_key:
+                structure = json.loads(Path(cmd["structure"]).read_text(encoding="utf-8"))
+                cached_framing = build_scene(
+                    structure=structure,
+                    style=style,
+                    view=view_arg,
+                    crop_z=_parse_crop_z(cmd.get("crop_z")),
+                    resolution=res,
+                    bonds_mode_override=cmd.get("bonds"),
+                    reset_factory=True,
+                    fit_override=bool(cmd.get("fit_view", False)),
+                    radius_scale=float(cmd.get("radius_scale", 1.0)),
+                    bond_color_override=cmd.get("bond_color"),
+                    show_cell_override=False if cmd.get("no_cell", False) else None,
+                )
+                current_scene_key = scene_key
+                cached_style = style
+            else:
+                scene = bpy.context.scene
+                scene.render.resolution_x = res[0]
+                scene.render.resolution_y = res[1]
+                scene.render.resolution_percentage = 100
+                if cmd.get("samples") is not None and scene.render.engine == "CYCLES":
+                    scene.cycles.samples = int(cmd["samples"])
+                apply_camera_view(
+                    scene=scene,
+                    cam_obj=scene.camera,
+                    view=view_arg,
+                    framing_data=cached_framing,
+                    style=cached_style or style,
+                    fit_override=bool(cmd.get("fit_view", False)),
+                )
+
+            out_path = Path(cmd["out"])
+            out_path.parent.mkdir(parents=True, exist_ok=True)
+            bpy.context.scene.render.filepath = str(out_path.resolve())
+            bpy.ops.render.render(write_still=True)
+            print(f"PREVIEW_DONE {seq} {out_path}", flush=True)
+        except Exception as exc:
+            print(f"PREVIEW_ERR {seq} {exc}", flush=True)
+
+
 def main() -> None:
     argv = sys.argv
     if "--" not in argv:
@@ -886,8 +968,9 @@ def main() -> None:
     args_list = argv[argv.index("--") + 1 :]
 
     parser = argparse.ArgumentParser(description="Render neutral structure JSON inside Blender.")
-    parser.add_argument("--structure", type=Path, required=True)
-    parser.add_argument("--style", type=Path, required=True)
+    parser.add_argument("--structure", type=Path, default=None)
+    parser.add_argument("--style", type=Path, default=None)
+    parser.add_argument("--preview-server", action="store_true", help="Read JSON preview render commands on stdin")
     parser.add_argument("--view", default="iso", help="Preset name or path to view.json")
     parser.add_argument("--out", type=Path, default=None, help="Output PNG path")
     parser.add_argument("--save-blend", type=Path, default=None, help="Optional output .blend path")
@@ -901,19 +984,19 @@ def main() -> None:
     parser.add_argument("--fit-view", action="store_true", help="Re-fit view.json orientation to structure")
     args = parser.parse_args(args_list)
 
+    if args.preview_server:
+        run_preview_server()
+        return
+
+    if args.structure is None or args.style is None:
+        parser.error("--structure and --style are required unless --preview-server is set.")
+
     structure = json.loads(args.structure.read_text(encoding="utf-8"))
     style = json.loads(args.style.read_text(encoding="utf-8"))
     if args.samples is not None:
         style.setdefault("render", {})["samples"] = int(args.samples)
 
-    view_arg: str | dict[str, Any]
-    view_path = Path(args.view)
-    if args.view.lower() in VIEW_PRESETS:
-        view_arg = args.view.lower()
-    elif view_path.is_file():
-        view_arg = json.loads(view_path.read_text(encoding="utf-8"))
-    else:
-        raise FileNotFoundError(f"Unknown preset or missing view file: {args.view}")
+    view_arg = _resolve_view_arg(args.view)
 
     build_scene(
         structure=structure,
