@@ -63,7 +63,8 @@ def make_material(
 ) -> bpy.types.Material:
     """Create a Principled BSDF material compatible with Blender 3.x–5.x."""
     mat = bpy.data.materials.new(name)
-    mat.use_nodes = True
+    if mat.node_tree is None and hasattr(mat, "use_nodes"):
+        mat.use_nodes = True
     bsdf = mat.node_tree.nodes.get("Principled BSDF")
     bsdf.inputs["Base Color"].default_value = srgb_hex_to_linear_rgba(hex_color)
     bsdf.inputs["Roughness"].default_value = float(roughness)
@@ -516,7 +517,8 @@ def configure_render_and_world(scene: bpy.types.Scene, style: dict[str, Any]) ->
     world_cfg = style.get("world", {})
     world = scene.world or bpy.data.worlds.new("AtomicWorld")
     scene.world = world
-    world.use_nodes = True
+    if world.node_tree is None and hasattr(world, "use_nodes"):
+        world.use_nodes = True
     bg = world.node_tree.nodes.get("Background")
     if bg is not None:
         wcol = world_cfg.get("color", [0.85, 0.85, 0.85, 1.0])

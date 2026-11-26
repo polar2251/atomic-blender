@@ -3,27 +3,52 @@
 from __future__ import annotations
 
 import argparse
+import glob
+import json
 import os
 import shutil
 import subprocess
 import sys
 import tempfile
+import zipfile
 from pathlib import Path
 
 from atomic_blender.convert import convert_file
 
-DEFAULT_BLENDER_PATHS = [
-    os.environ.get("BLENDER_EXE", ""),
-    r"C:\Program Files\Blender Foundation\Blender 5.2\blender.exe",
-    r"C:\Program Files\Blender Foundation\Blender 5.1\blender.exe",
-    r"C:\Program Files\Blender Foundation\Blender 5.0\blender.exe",
-    r"C:\Program Files\Blender Foundation\Blender 4.2\blender.exe",
-]
+
+def package_dir() -> Path:
+    """Return the installed ``atomic_blender`` package directory."""
+    return Path(__file__).resolve().parent
 
 
 def package_root() -> Path:
-    """Return repository/package root directory containing ``styles/`` and ``addon/``."""
-    return Path(__file__).resolve().parent.parent
+    """Return parent directory of the ``atomic_blender`` package (repo root or site-packages)."""
+    return package_dir().parent
+
+
+def _style_search_dirs() -> list[Path]:
+    """Return candidate directories containing style JSON files (packaged first, then repo)."""
+    candidates = [
+        package_dir() / "styles",
+        package_root() / "styles",
+    ]
+    seen: set[Path] = set()
+    dirs: list[Path] = []
+    for d in candidates:
+        resolved = d.resolve()
+        if resolved not in seen and d.is_dir():
+            seen.add(resolved)
+            dirs.append(d)
+    return dirs
+
+
+def _collect_style_files() -> dict[str, Path]:
+    """Map style stem name -> path across packaged and repo style directories."""
+    styles: dict[str, Path] = {}
+    for d in _style_search_dirs():
+        for p in sorted(d.glob("*.json")):
+            styles.setdefault(p.stem, p.resolve())
+    return styles
 
 
 def resolve_style_path(style_arg: str) -> Path:
@@ -31,18 +56,44 @@ def resolve_style_path(style_arg: str) -> Path:
     candidate = Path(style_arg)
     if candidate.is_file():
         return candidate.resolve()
-    root = package_root()
-    for path in (
-        root / "styles" / f"{style_arg}.json",
-        root / "styles" / style_arg,
-    ):
-        if path.is_file():
-            return path.resolve()
+    for d in _style_search_dirs():
+        for path in (d / f"{style_arg}.json", d / style_arg):
+            if path.is_file():
+                return path.resolve()
     raise FileNotFoundError(f"Style not found: {style_arg!r}")
 
 
+def _candidate_blender_paths() -> list[Path]:
+    """Return OS-specific standard Blender installation paths (newest version first)."""
+    candidates: list[Path] = []
+    if sys.platform.startswith("win") or os.name == "nt":
+        patterns = [
+            r"C:\Program Files\Blender Foundation\Blender*\blender.exe",
+        ]
+        local_app = os.environ.get("LOCALAPPDATA", "")
+        if local_app:
+            patterns.append(os.path.join(local_app, "Programs", "Blender Foundation", "Blender*", "blender.exe"))
+        for pat in patterns:
+            for match in sorted(glob.glob(pat), reverse=True):
+                candidates.append(Path(match))
+    elif sys.platform == "darwin":
+        candidates.extend([
+            Path("/Applications/Blender.app/Contents/MacOS/Blender"),
+            Path.home() / "Applications/Blender.app/Contents/MacOS/Blender",
+        ])
+    else:
+        candidates.extend([
+            Path("/usr/bin/blender"),
+            Path("/usr/local/bin/blender"),
+            Path("/snap/bin/blender"),
+        ])
+        for match in sorted(glob.glob("/opt/blender*/blender"), reverse=True):
+            candidates.append(Path(match))
+    return candidates
+
+
 def find_blender_executable(explicit: str | None = None) -> Path:
-    """Locate the Blender executable from CLI flag, env var, PATH, or default install paths."""
+    """Locate the Blender executable from CLI flag, env var, PATH, or OS install paths."""
     if explicit:
         p = Path(explicit)
         if p.is_file():
@@ -52,22 +103,44 @@ def find_blender_executable(explicit: str | None = None) -> Path:
             return Path(found)
         raise FileNotFoundError(f"Blender executable not found: {explicit}")
 
-    for item in DEFAULT_BLENDER_PATHS:
-        if item and Path(item).is_file():
-            return Path(item)
+    env_exe = os.environ.get("BLENDER_EXE", "").strip()
+    if env_exe:
+        p = Path(env_exe)
+        if p.is_file():
+            return p
+        found = shutil.which(env_exe)
+        if found:
+            return Path(found)
 
     found = shutil.which("blender")
     if found:
         return Path(found)
+
+    for candidate in _candidate_blender_paths():
+        if candidate.is_file():
+            return candidate
+
     raise FileNotFoundError(
-        "Could not locate Blender executable. Pass --blender <path> or set BLENDER_EXE."
+        "Could not locate Blender executable. Pass --blender <path>, add blender to PATH, or set BLENDER_EXE."
     )
+
+
+def _find_addon_init() -> Path:
+    """Locate the ``atomic_blender_studio/__init__.py`` template from package or repo."""
+    candidates = [
+        package_dir() / "addon" / "atomic_blender_studio" / "__init__.py",
+        package_root() / "addon" / "atomic_blender_studio" / "__init__.py",
+    ]
+    for path in candidates:
+        if path.is_file():
+            return path
+    raise FileNotFoundError("Could not locate bundled atomic_blender_studio/__init__.py.")
 
 
 def cmd_render(args: argparse.Namespace) -> int:
     style_path = resolve_style_path(args.style)
     blender_exe = find_blender_executable(args.blender)
-    scene_script = Path(__file__).resolve().parent / "scene_builder.py"
+    scene_script = package_dir() / "scene_builder.py"
 
     with tempfile.TemporaryDirectory(prefix="atomic_blender_") as tmpdir:
         tmp_path = Path(tmpdir)
@@ -141,17 +214,51 @@ def cmd_convert(args: argparse.Namespace) -> int:
 
 
 def cmd_styles(_args: argparse.Namespace) -> int:
-    styles_dir = package_root() / "styles"
-    if not styles_dir.is_dir():
-        print("No styles directory found.")
+    styles = _collect_style_files()
+    if not styles:
+        print("No style JSON files found.")
         return 1
-    for p in sorted(styles_dir.glob("*.json")):
-        print(f"{p.stem}: {p}")
+    for stem, path in sorted(styles.items()):
+        print(f"{stem}: {path}")
     return 0
 
 
+def _stage_addon_bundle(target_dir: Path) -> None:
+    """Populate ``target_dir`` with a self-contained ``atomic_blender_studio`` addon."""
+    pkg = package_dir()
+    target_dir.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(_find_addon_init(), target_dir / "__init__.py")
+    shutil.copy2(pkg / "elements.py", target_dir / "elements.py")
+    shutil.copy2(pkg / "scene_builder.py", target_dir / "scene_builder.py")
+
+    styles_target = target_dir / "styles"
+    styles_target.mkdir(exist_ok=True)
+    for stem, sp in _collect_style_files().items():
+        shutil.copy2(sp, styles_target / f"{stem}.json")
+
+    config_payload = {
+        "python_exe": sys.executable,
+        "repo_root": str(package_root()),
+    }
+    (target_dir / "config.json").write_text(json.dumps(config_payload, indent=2), encoding="utf-8")
+
+
 def cmd_install_addon(args: argparse.Namespace) -> int:
-    """Install self-contained ``atomic_blender_studio`` addon into Blender's user addons dir."""
+    """Install self-contained ``atomic_blender_studio`` addon into Blender or export a zip."""
+    if args.zip is not None:
+        zip_path = args.zip.resolve()
+        zip_path.parent.mkdir(parents=True, exist_ok=True)
+        with tempfile.TemporaryDirectory(prefix="atomic_addon_zip_") as tmpdir:
+            bundle_dir = Path(tmpdir) / "atomic_blender_studio"
+            _stage_addon_bundle(bundle_dir)
+            with zipfile.ZipFile(zip_path, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+                for file_path in sorted(bundle_dir.rglob("*")):
+                    if file_path.is_file():
+                        arcname = Path("atomic_blender_studio") / file_path.relative_to(bundle_dir)
+                        zf.write(file_path, arcname.as_posix())
+        print(f"Created addon zip -> {zip_path}")
+        return 0
+
     blender_exe = find_blender_executable(args.blender)
     if args.addons_dir is not None:
         addons_dir = args.addons_dir
@@ -177,31 +284,7 @@ def cmd_install_addon(args: argparse.Namespace) -> int:
             raise RuntimeError("Could not detect Blender user addons directory.")
 
     target_dir = addons_dir / "atomic_blender_studio"
-    target_dir.mkdir(parents=True, exist_ok=True)
-
-    root = package_root()
-    shutil.copy2(root / "addon" / "atomic_blender_studio" / "__init__.py", target_dir / "__init__.py")
-    shutil.copy2(root / "atomic_blender" / "elements.py", target_dir / "elements.py")
-    shutil.copy2(root / "atomic_blender" / "scene_builder.py", target_dir / "scene_builder.py")
-    styles_target = target_dir / "styles"
-    styles_target.mkdir(exist_ok=True)
-    for sp in (root / "styles").glob("*.json"):
-        shutil.copy2(sp, styles_target / sp.name)
-
-    # Record current system Python & repo path so GUI addon can convert non-JSON files seamlessly
-    config_file = target_dir / "config.json"
-    import json
-
-    config_file.write_text(
-        json.dumps(
-            {
-                "python_exe": sys.executable,
-                "repo_root": str(root),
-            },
-            indent=2,
-        ),
-        encoding="utf-8",
-    )
+    _stage_addon_bundle(target_dir)
 
     if not args.no_enable:
         subprocess.run(
@@ -258,6 +341,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_inst = sub.add_parser("install-addon", help="Install the GUI N-panel addon into Blender")
     p_inst.add_argument("--blender", default=None, help="Path to blender executable")
     p_inst.add_argument("--addons-dir", type=Path, default=None, help="Override target addons directory")
+    p_inst.add_argument("--zip", type=Path, default=None, help="Export a standalone addon .zip instead of installing")
     p_inst.add_argument("--no-enable", action="store_true", help="Copy files without enabling in Blender preferences")
     p_inst.set_defaults(func=cmd_install_addon)
 

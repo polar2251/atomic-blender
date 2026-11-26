@@ -1,0 +1,2 @@
+recursive-include atomic_blender/styles *.json
+recursive-include atomic_blender/addon *.py
