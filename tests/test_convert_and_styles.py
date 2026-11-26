@@ -888,6 +888,18 @@ class TestAtomicBlender(unittest.TestCase):
                 struct_out = json.loads(Path(eff.input_path).read_text(encoding="utf-8"))
                 self.assertEqual(struct_out["dashed_bonds"], [[1, 2]])
                 self.assertEqual(len(struct_out["colors"]), 4)
+
+                # Top Settings drawer toggle & Reset Focus recipe
+                self.assertFalse(bool(app.f_settings.winfo_manager()))
+                app._toggle_settings_panel()
+                self.assertTrue(bool(app.f_settings.winfo_manager()))
+                app._toggle_settings_panel()
+                self.assertFalse(bool(app.f_settings.winfo_manager()))
+
+                app._reset_focus_recipes()
+                self.assertEqual(app.var_color_map.get(), "none")
+                self.assertEqual(app.var_unsel_scale_mode.get(), "same")
+                self.assertEqual(app._selected_atoms, set())
             finally:
                 app.destroy()
 
