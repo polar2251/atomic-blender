@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from pathlib import Path
 import numpy as np
 
@@ -134,7 +135,7 @@ def generate_feature_test_structures(examples_dir: Path) -> list[Path]:
     ase.io.write(str(p3_f), pt_final, format="vasp", direct=False, sort=False)
     created.append(p3_f)
 
-    # 4. Tetragonal BaTiO3 2x2x2 perovskite supercell for Element Chips / Expand Shell / Z Range
+    # 4. Tetragonal BaTiO3 2x2x2 perovskite supercell for Element Chips / Expand Shell / Z Range / Polyhedra
     bto = crystal(
         ["Ba", "Ti", "O", "O"],
         basis=[(0.0, 0.0, 0.0), (0.5, 0.5, 0.514), (0.5, 0.5, 0.025), (0.5, 0.0, 0.486)],
@@ -144,6 +145,42 @@ def generate_feature_test_structures(examples_dir: Path) -> list[Path]:
     p4 = examples_dir / "04_perovskite_BaTiO3_2x2x2.cif"
     ase.io.write(str(p4), bto)
     created.append(p4)
+
+    # 5. 5-frame NEB O-adatom surface diffusion on a tilted hexagonal Cu(111) slab (gamma=120 deg)
+    neb_base = fcc111("Cu", size=(3, 3, 3), vacuum=6.0)
+    top_z = float(np.max(neb_base.positions[:, 2]))
+    a1 = neb_base.cell[0]
+    a2 = neb_base.cell[1]
+    p_start = 0.28 * a1 + 0.28 * a2 + np.array([0.0, 0.0, top_z + 1.45])
+    p_end = 0.62 * a1 + 0.28 * a2 + np.array([0.0, 0.0, top_z + 1.45])
+    neb_frames: list[Atoms] = []
+    for k in range(5):
+        t = k / 4.0
+        # Slight transition-state barrier arc (+0.55 A at midpoint t=0.5)
+        pos_o = (1.0 - t) * p_start + t * p_end + np.array([0.0, 0.0, 0.55 * math.sin(math.pi * t)])
+        frame = neb_base.copy()
+        frame += Atoms("O", positions=[pos_o])
+        neb_frames.append(frame)
+    p5 = examples_dir / "05_neb_diffusion_5frames.xyz"
+    ase.io.write(str(p5), neb_frames, format="extxyz")
+    created.append(p5)
+
+    # 6. Tilted hexagonal 2H-MoS2 3x3 monolayer (gamma=120 deg) for Tilted Cell + Trigonal Prism Polyhedra
+    a_mos2 = 3.16
+    mos2_cell = [
+        [a_mos2, 0.0, 0.0],
+        [-0.5 * a_mos2, 0.5 * math.sqrt(3.0) * a_mos2, 0.0],
+        [0.0, 0.0, 14.0],
+    ]
+    mos2 = Atoms(
+        "MoS2",
+        scaled_positions=[(1.0 / 3.0, 2.0 / 3.0, 0.50), (2.0 / 3.0, 1.0 / 3.0, 0.39), (2.0 / 3.0, 1.0 / 3.0, 0.61)],
+        cell=mos2_cell,
+        pbc=[True, True, True],
+    ).repeat((3, 3, 1))
+    p6 = examples_dir / "06_tilted_hexagonal_MoS2_3x3.cif"
+    ase.io.write(str(p6), mos2)
+    created.append(p6)
     return created
 
 

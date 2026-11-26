@@ -1022,6 +1022,163 @@ class TestAtomicBlender(unittest.TestCase):
             finally:
                 app.destroy()
 
+    def test_stage3_and_tilted_cells(self) -> None:
+        import math
+        import numpy as np
+        from PIL import Image
+        from atomic_blender.convert import read_structure_frames
+        from atomic_blender.elements import VIEW_PRESETS, classify_dropped_file
+        from atomic_blender.gui import AtomicBlenderApp
+        from atomic_blender.viewport3d import (
+            ViewportScene,
+            compose_multi_panel_strip,
+            compute_cell_parameters,
+            compute_slice_mask,
+            find_coordination_polyhedra,
+            is_tilted_cell,
+            preset_to_quat,
+            quat_to_axes,
+            render_reference_axes_overlay,
+        )
+
+        # 1. Coordination polyhedra (TiO6 octahedron -> 8 triangular faces, 12 edges)
+        oct_syms = ["Ti", "O", "O", "O", "O", "O", "O"]
+        oct_pos = [
+            [0.0, 0.0, 0.0],
+            [2.0, 0.0, 0.0],
+            [-2.0, 0.0, 0.0],
+            [0.0, 2.0, 0.0],
+            [0.0, -2.0, 0.0],
+            [0.0, 0.0, 2.0],
+            [0.0, 0.0, -2.0],
+        ]
+        polys = find_coordination_polyhedra(oct_syms, oct_pos, cutoff_a=2.3, alpha=0.40)
+        self.assertEqual(len(polys), 1)
+        self.assertEqual(len(polys[0]["faces"]), 8)
+        self.assertEqual(len(polys[0]["edges"]), 12)
+
+        # 2. Tilted hexagonal cell parameters, camera presets ('c' & 'c*'), and axes gizmo
+        a_hex = 3.2
+        hex_cell = np.array([
+            [a_hex, 0.0, 0.0],
+            [-0.5 * a_hex, 0.5 * math.sqrt(3.0) * a_hex, 0.0],
+            [0.0, 0.0, 10.0],
+        ])
+        la, lb, lc, alpha, beta, gamma = compute_cell_parameters(hex_cell)
+        self.assertAlmostEqual(la, a_hex, places=4)
+        self.assertAlmostEqual(lb, a_hex, places=4)
+        self.assertAlmostEqual(gamma, 120.0, places=3)
+        self.assertTrue(is_tilted_cell(hex_cell))
+        self.assertFalse(is_tilted_cell(np.diag([10.0, 10.0, 10.0])))
+        self.assertIn("c*", VIEW_PRESETS)
+
+        q_c = preset_to_quat("c", hex_cell)
+        right_c, up_c, back_c = quat_to_axes(q_c)
+        self.assertAlmostEqual(float(np.dot(right_c, hex_cell[0] / a_hex)), 1.0, places=4)
+
+        mono_cell = np.array([
+            [4.0, 0.0, 0.0],
+            [0.0, 4.0, 0.0],
+            [1.5, 0.0, 8.0],
+        ])
+        q_cstar = preset_to_quat("c*", mono_cell)
+        _, _, back_cs = quat_to_axes(q_cstar)
+        self.assertAlmostEqual(float(np.dot(back_cs, np.array([0.0, 0.0, 1.0]))), 1.0, places=4)
+
+        # Fractional cross-section slice along 'a' on a slanted monoclinic cell
+        skew_pts = [[0.4, 0.0, 0.0], [1.6, 0.0, 7.8], [3.5, 0.0, 0.0]]
+        mask_a = compute_slice_mask(skew_pts, mode="a", depth_fraction=0.5, cell_vecs=mono_cell)
+        # Cartesian x of point 1 is 1.6 (<2), yet fractional u = (1.6 - 1.5*7.8/8)/4 = 0.034 -> kept
+        self.assertEqual(mask_a, [True, True, False])
+        mask_cam = compute_slice_mask(oct_pos, mode="camera", depth_fraction=0.5, quat=(1.0, 0.0, 0.0, 0.0))
+        self.assertEqual(len(mask_cam), 7)
+        self.assertTrue(any(not m for m in mask_cam))
+
+        img_cart = Image.new("RGBA", (300, 300), (24, 26, 32, 255))
+        img_hex = Image.new("RGBA", (300, 300), (24, 26, 32, 255))
+        render_reference_axes_overlay(img_cart, (1.0, 0.0, 0.0, 0.0))
+        render_reference_axes_overlay(img_hex, (1.0, 0.0, 0.0, 0.0), cell_vecs=hex_cell)
+        self.assertNotEqual(img_cart.tobytes(), img_hex.tobytes())
+
+        # 3. Multi-panel path strip stitching
+        strip = compose_multi_panel_strip(
+            [img_cart, img_hex, img_cart],
+            titles=["Frame 1", "Frame 2", "Frame 3"],
+            dark_backdrop=True,
+        )
+        self.assertGreater(strip.width, 900)
+        self.assertGreater(strip.height, 300)
+
+        # 4. Trajectory reading + GUI Stage 3 integration (polyhedra, vectors, slice, frames, recipe)
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            traj_xyz = tmp_path / "neb_3frames.xyz"
+            lines = []
+            for k in range(3):
+                lines.append("7")
+                lines.append('Lattice="8.0 0.0 0.0 0.0 8.0 0.0 0.0 0.0 8.0" Properties=species:S:1:pos:R:3')
+                lines.append(f"Ti {4.0 + k * 0.2:.2f} 4.0 4.0")
+                for dx, dy, dz in oct_pos[1:]:
+                    lines.append(f"O {4.0 + dx + k * 0.2:.2f} {4.0 + dy:.2f} {4.0 + dz:.2f}")
+            traj_xyz.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+            frames = read_structure_frames(traj_xyz)
+            self.assertEqual(len(frames), 3)
+            self.assertEqual(len(frames[0]["symbols"]), 7)
+
+            recipe_path = tmp_path / "fig.recipe.json"
+            app = AtomicBlenderApp()
+            app.withdraw()
+            try:
+                app.var_blender.set("")
+                app.var_input.set(str(traj_xyz))
+                app.canvas.configure(width=600, height=600)
+                app.update_idletasks()
+                app._queue.put(("structure_frames", ("3 frames", frames)))
+                app._poll_queue()
+
+                self.assertEqual(len(app._trajectory_frames), 3)
+                self.assertEqual(app.var_frame_label.get(), "Frame 1 / 3")
+                app._step_trajectory_frame(1)
+                self.assertEqual(app._trajectory_index, 1)
+                self.assertEqual(app.var_frame_label.get(), "Frame 2 / 3")
+
+                # Polyhedra + Lattice Vectors (a, b, c)
+                app._on_display_type_clicked("polyhedra")
+                app._on_display_type_clicked("cell_vectors")
+                self.assertTrue(app.var_show_polyhedra.get())
+                self.assertTrue(app.var_show_cell_vectors.get())
+                self.assertEqual(len(app._structure_cache["polyhedra"]), 1)
+                self.assertTrue(app._structure_cache["show_cell_vectors"])
+                self.assertTrue(app._vp_scene.show_cell_vectors)
+
+                # Cross-section slice
+                app.var_slice_mode.set("z")
+                app.var_slice_depth.set(0.5)
+                app._on_slice_changed(trigger_blender=False)
+                self.assertTrue(any(a <= 0.07 for a in app._structure_cache["alphas"]))
+                app._reset_slice()
+                self.assertEqual(app.var_slice_mode.get(), "none")
+
+                # Recipe export / classify / drop / apply + CLI JSON payload
+                recipe = app.export_figure_recipe()
+                recipe_path.write_text(json.dumps(recipe, indent=2), encoding="utf-8")
+                self.assertEqual(classify_dropped_file(recipe_path), "recipe")
+
+                app.var_show_polyhedra.set(False)
+                app.var_show_cell_vectors.set(False)
+                app.handle_dropped_files([str(recipe_path)])
+                self.assertTrue(app.var_show_polyhedra.get())
+                self.assertTrue(app.var_show_cell_vectors.get())
+
+                eff = app._effective_cfg_for_cli(app._collect_config())
+                self.assertTrue(eff.input_path.endswith(".json"))
+                payload = json.loads(Path(eff.input_path).read_text(encoding="utf-8"))
+                self.assertEqual(len(payload["polyhedra"]), 1)
+                self.assertTrue(payload["show_cell_vectors"])
+            finally:
+                app.destroy()
+
 
 if __name__ == "__main__":
     unittest.main()

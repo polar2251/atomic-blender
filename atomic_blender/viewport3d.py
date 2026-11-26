@@ -117,8 +117,39 @@ def direction_to_quat(view_dir: np.ndarray, up_hint: np.ndarray | None = None) -
     return axes_to_quat(right, cam_up, -forward)
 
 
+def compute_cell_parameters(cell_vecs: Any) -> tuple[float, float, float, float, float, float]:
+    """Return ``(a, b, c, alpha, beta, gamma)`` lengths (Å) and angles (deg) for a 3x3 cell."""
+    cv = np.asarray(cell_vecs, dtype=np.float64).reshape(3, 3)
+    a, b, c = cv[0], cv[1], cv[2]
+    la = float(np.linalg.norm(a))
+    lb = float(np.linalg.norm(b))
+    lc = float(np.linalg.norm(c))
+
+    def _ang(u: np.ndarray, lu: float, v: np.ndarray, lv: float) -> float:
+        if lu < 1e-8 or lv < 1e-8:
+            return 90.0
+        cos_v = max(-1.0, min(1.0, float(np.dot(u, v) / (lu * lv))))
+        return math.degrees(math.acos(cos_v))
+
+    return la, lb, lc, _ang(b, lb, c, lc), _ang(a, la, c, lc), _ang(a, la, b, lb)
+
+
+def is_tilted_cell(cell_vecs: Any, tol_deg: float = 0.5) -> bool:
+    """Return True when a 3D periodic cell is non-orthogonal (any angle differs from 90°)."""
+    if cell_vecs is None:
+        return False
+    la, lb, lc, alpha, beta, gamma = compute_cell_parameters(cell_vecs)
+    if la <= 1e-4 or lb <= 1e-4 or lc <= 1e-4:
+        return False
+    return (
+        abs(alpha - 90.0) > tol_deg
+        or abs(beta - 90.0) > tol_deg
+        or abs(gamma - 90.0) > tol_deg
+    )
+
+
 def preset_to_quat(preset: str, cell_vecs: np.ndarray | None = None) -> Quat:
-    """Match ``scene_builder.resolve_preset_orientation`` for ``iso``, ``side-oblique``, ``a``, ``b``, ``c``."""
+    """Match ``scene_builder.resolve_preset_orientation`` for ``iso``, ``side-oblique``, ``a/b/c``, and ``a*/b*/c*``."""
     name = preset.lower().strip()
     if name == "iso":
         az, el = math.radians(35.0), math.radians(20.0)
@@ -144,7 +175,19 @@ def preset_to_quat(preset: str, cell_vecs: np.ndarray | None = None) -> Quat:
     if name == "b":
         return direction_to_quat(b, c)
     if name == "c":
-        return direction_to_quat(c, b)
+        up_c = np.cross(c, a)
+        return direction_to_quat(c, up_c if float(np.linalg.norm(up_c)) > 1e-6 else b)
+    if name == "a*":
+        na = np.cross(b, c)
+        return direction_to_quat(na if float(np.linalg.norm(na)) > 1e-6 else a, c)
+    if name == "b*":
+        nb = np.cross(c, a)
+        return direction_to_quat(nb if float(np.linalg.norm(nb)) > 1e-6 else b, c)
+    if name == "c*":
+        nc = np.cross(a, b)
+        nc_v = nc if float(np.linalg.norm(nc)) > 1e-6 else c
+        up_nc = np.cross(nc_v, a)
+        return direction_to_quat(nc_v, up_nc if float(np.linalg.norm(up_nc)) > 1e-6 else b)
     raise ValueError(f"Unknown preset: {preset!r}")
 
 
@@ -285,8 +328,9 @@ def render_reference_axes_overlay(
     show_labels: bool = True,
     dark_backdrop: bool = True,
     arm_px: float | None = None,
+    cell_vecs: Any = None,
 ) -> tuple[float, float, float]:
-    """Draw a 3D depth-sorted Reference Axes (x, y, z) gizmo onto ``target_img``."""
+    """Draw a 3D depth-sorted Reference Axes (x,y,z or tilted a,b,c) gizmo onto ``target_img``."""
     tw, th = target_img.size
     u = max(0.05, min(0.95, float(axes_pos[0])))
     v = max(0.05, min(0.95, float(axes_pos[1])))
@@ -319,11 +363,19 @@ def render_reference_axes_overlay(
     draw.ellipse((oc - disc_r, oc - disc_r, oc + disc_r, oc + disc_r), fill=disc_fill, outline=disc_edge, width=1)
 
     right, up, back = quat_to_axes(quat)
-    basis_defs = (
-        ("x", np.array([1.0, 0.0, 0.0]), (239, 68, 68), (252, 165, 165)),
-        ("y", np.array([0.0, 1.0, 0.0]), (34, 197, 94), (134, 239, 172)),
-        ("z", np.array([0.0, 0.0, 1.0]), (59, 130, 246), (147, 197, 253)),
-    )
+    if cell_vecs is not None and is_tilted_cell(cell_vecs):
+        cv = np.asarray(cell_vecs, dtype=np.float64).reshape(3, 3)
+        basis_defs = (
+            ("a", cv[0] / max(1e-8, float(np.linalg.norm(cv[0]))), (239, 68, 68), (252, 165, 165)),
+            ("b", cv[1] / max(1e-8, float(np.linalg.norm(cv[1]))), (34, 197, 94), (134, 239, 172)),
+            ("c", cv[2] / max(1e-8, float(np.linalg.norm(cv[2]))), (59, 130, 246), (147, 197, 253)),
+        )
+    else:
+        basis_defs = (
+            ("x", np.array([1.0, 0.0, 0.0]), (239, 68, 68), (252, 165, 165)),
+            ("y", np.array([0.0, 1.0, 0.0]), (34, 197, 94), (134, 239, 172)),
+            ("z", np.array([0.0, 0.0, 1.0]), (59, 130, 246), (147, 197, 253)),
+        )
     projected = []
     for lbl, vec, rgb, text_rgb in basis_defs:
         dx = float(np.dot(vec, right))
@@ -569,6 +621,8 @@ class ViewportScene:
     dashed_pairs: list[tuple[int, int]] = field(default_factory=list)
     dashed_color: str = "#38BDF8"
     colormap_info: tuple[str, float, float] | None = None
+    polyhedra: list[dict[str, Any]] = field(default_factory=list)
+    show_cell_vectors: bool = False
     _sprite_keys: list[str] = field(default_factory=list)
 
     def __post_init__(self) -> None:
@@ -599,6 +653,7 @@ class ViewportScene:
         show_measure_overlay: bool = True,
         selection_order: list[int] | None = None,
         colormap_info: tuple[str, float, float] | None = None,
+        show_cell_vectors: bool = False,
     ) -> ViewportScene:
         symbols = list(structure["symbols"])
         positions = np.asarray(structure["positions"], dtype=np.float64).reshape(-1, 3)
@@ -758,6 +813,8 @@ class ViewportScene:
             dashed_pairs=dashed_pairs,
             dashed_color=str(structure.get("dashed_color", "#38BDF8")),
             colormap_info=colormap_info,
+            polyhedra=list(structure.get("polyhedra", [])),
+            show_cell_vectors=show_cell_vectors,
             _sprite_keys=sprite_keys,
         )
 
@@ -797,13 +854,16 @@ class ViewportScene:
                 zmin = float(np.min(zs) - pad_bot)
                 zmax = float(np.max(zs) + pad_top)
                 base = [self.origin, self.origin + a, self.origin + a + b, self.origin + b]
-                pts = np.array(
-                    [[p[0], p[1], zmin] for p in base] + [[p[0], p[1], zmax] for p in base],
-                    dtype=np.float64,
-                )
-                cx = sum(float(p[0]) for p in base) * 0.25
-                cy = sum(float(p[1]) for p in base) * 0.25
-                return np.array([cx, cy, 0.5 * (zmin + zmax)], dtype=np.float64), pts
+                if abs(float(c[2])) > 1e-6:
+                    t_min = (zmin - float(self.origin[2])) / float(c[2])
+                    t_max = (zmax - float(self.origin[2])) / float(c[2])
+                    pts = np.array([p + c * t_min for p in base] + [p + c * t_max for p in base], dtype=np.float64)
+                else:
+                    pts = np.array(
+                        [[p[0], p[1], zmin] for p in base] + [[p[0], p[1], zmax] for p in base],
+                        dtype=np.float64,
+                    )
+                return np.mean(pts, axis=0), pts
 
             corners = np.array([
                 self.origin,
@@ -963,6 +1023,75 @@ class ViewportScene:
                     ("cell", float(ce_x[idx, 0]), float(ce_y[idx, 0]), float(ce_x[idx, 1]), float(ce_y[idx, 1]), cell_w, c_rgba),
                 ))
 
+        # 1b. Unit-cell origin a, b, c lattice vector arrows
+        if self.has_cell and self.show_cell_vectors and len(self.cell_edges) > 0:
+            vec_defs = (
+                ("a", self.cell_vecs[0], (239, 68, 68, 245)),
+                ("b", self.cell_vecs[1], (34, 197, 94, 245)),
+                ("c", self.cell_vecs[2], (59, 130, 246, 245)),
+            )
+            o_rel = self.origin - self.target
+            ox = float(cx0 + np.dot(o_rel, right) * px_per_a)
+            oy = float(cy0 - np.dot(o_rel, up) * px_per_a)
+            oz = float(np.dot(o_rel, back))
+            arr_w = max(2, min(6, int(round(0.16 * px_per_a))))
+            for v_lbl, vec, v_col in vec_defs:
+                v_len = float(np.linalg.norm(vec))
+                if v_len < 1e-6:
+                    continue
+                tip3 = self.origin + vec * min(0.45, 2.8 / max(1e-3, v_len))
+                t_rel = tip3 - self.target
+                tx = float(cx0 + np.dot(t_rel, right) * px_per_a)
+                ty = float(cy0 - np.dot(t_rel, up) * px_per_a)
+                tz = float(np.dot(t_rel, back))
+                draw_items.append((0.5 * (oz + tz), 3, ("cell_vec", ox, oy, tx, ty, arr_w, v_col, v_lbl)))
+
+        # 1c. Translucent coordination polyhedra faces & edges
+        if self.polyhedra:
+            for poly in self.polyhedra:
+                verts = np.asarray(poly.get("vertices", []), dtype=np.float64)
+                faces = poly.get("faces", [])
+                edges = poly.get("edges", [])
+                if len(verts) < 3 or not faces:
+                    continue
+                v_rel = verts - self.target
+                vx = cx0 + (v_rel @ right) * px_per_a
+                vy = cy0 - (v_rel @ up) * px_per_a
+                vz = v_rel @ back
+                p_hex = str(poly.get("color", "#38BDF8"))
+                p_alpha = float(poly.get("alpha", 0.36))
+                pr, pg, pb = _hex_to_rgb(p_hex)
+                for face in faces:
+                    if len(face) != 3:
+                        continue
+                    i0, i1, i2 = int(face[0]), int(face[1]), int(face[2])
+                    p0, p1, p2 = verts[i0], verts[i1], verts[i2]
+                    fn = np.cross(p1 - p0, p2 - p0)
+                    fn_len = float(np.linalg.norm(fn))
+                    if fn_len < 1e-6:
+                        continue
+                    fu = fn / fn_len
+                    # Lambertian illumination factor from camera direction (+back) & key offset
+                    lambert = 0.48 + 0.52 * abs(float(np.dot(fu, back)))
+                    fr = min(255, int(round(pr * lambert)))
+                    fg = min(255, int(round(pg * lambert)))
+                    fb = min(255, int(round(pb * lambert)))
+                    fa = max(20, min(220, int(round(255.0 * p_alpha))))
+                    zf = float((vz[i0] + vz[i1] + vz[i2]) / 3.0)
+                    poly2d = [
+                        (float(vx[i0]), float(vy[i0])),
+                        (float(vx[i1]), float(vy[i1])),
+                        (float(vx[i2]), float(vy[i2])),
+                    ]
+                    draw_items.append((zf, 1, ("poly_face", poly2d, (fr, fg, fb, fa))))
+                edge_col = (min(255, pr + 45), min(255, pg + 45), min(255, pb + 45), 185)
+                for edge in edges:
+                    if len(edge) != 2:
+                        continue
+                    ea, eb = int(edge[0]), int(edge[1])
+                    ze = 0.5 * float(vz[ea] + vz[eb])
+                    draw_items.append((ze, 1, ("poly_edge", float(vx[ea]), float(vy[ea]), float(vx[eb]), float(vy[eb]), edge_col)))
+
         # 2. Atoms & surface-trimmed, depth-subdivided shaded bonds
         if self.show_atoms and len(self.positions) > 0:
             rel = self.positions - self.target
@@ -1092,6 +1221,32 @@ class ViewportScene:
             elif tag == "dashed_bond":
                 _, px0, py0, px1, py1, bw, d_rgba = payload
                 _draw_dashed_segment(draw, (px0, py0), (px1, py1), fill=d_rgba, width=bw, dash_px=7.0, gap_px=5.0)
+            elif tag == "poly_face":
+                _, poly2d, f_rgba = payload
+                draw.polygon(poly2d, fill=f_rgba)
+            elif tag == "poly_edge":
+                _, px0, py0, px1, py1, e_rgba = payload
+                draw.line((px0, py0, px1, py1), fill=e_rgba, width=1)
+            elif tag == "cell_vec":
+                _, px0, py0, px1, py1, aw, v_rgba, v_lbl = payload
+                draw.line((px0, py0, px1, py1), fill=v_rgba, width=aw)
+                dv2 = math.hypot(px1 - px0, py1 - py0)
+                if dv2 >= 8.0:
+                    ux, uy = (px1 - px0) / dv2, (py1 - py0) / dv2
+                    perp_x, perp_y = -uy, ux
+                    hl = max(6.0, aw * 2.6)
+                    hw = max(3.5, aw * 1.4)
+                    draw.polygon(
+                        [
+                            (px1 + ux * 2.0, py1 + uy * 2.0),
+                            (px1 - ux * hl + perp_x * hw, py1 - uy * hl + perp_y * hw),
+                            (px1 - ux * hl - perp_x * hw, py1 - uy * hl - perp_y * hw),
+                        ],
+                        fill=v_rgba,
+                    )
+                vfont = _load_overlay_font(max(11, aw * 4))
+                if vfont is not None:
+                    draw.text((px1 + 5.0, py1 - 8.0), v_lbl, font=vfont, fill=v_rgba)
             else:
                 _, sx, sy, diam_px, idx, bucket = payload
                 s_key = self._sprite_keys[idx] if idx < len(self._sprite_keys) else self.symbols[idx]
@@ -1169,6 +1324,7 @@ class ViewportScene:
                 axes_pos=self.axes_pos,
                 show_labels=self.axes_labels,
                 dark_backdrop=self.dark_backdrop,
+                cell_vecs=self.cell_vecs if self.has_cell else None,
             )
 
         # Composite clipped camera frame onto canvas and draw crisp border
@@ -1448,6 +1604,56 @@ def render_measurement_callout_overlay(
     draw.text((bx0 + pad_x - tb[0], by0 + pad_y - tb[1]), badge, font=font, fill=(248, 250, 252, 255))
 
 
+def compose_multi_panel_strip(
+    images: list[Any],
+    titles: list[str] | None = None,
+    dark_backdrop: bool = True,
+) -> Any:
+    """Stitch 1 or more rendered images horizontally into one labeled figure strip."""
+    if not _HAS_PIL:
+        raise RuntimeError("Pillow is required to compose multi-panel figures.")
+    if not images:
+        raise ValueError("At least one image is required.")
+    imgs = [im.convert("RGBA") for im in images]
+    h = max(im.height for im in imgs)
+    normed = []
+    for im in imgs:
+        if im.height != h:
+            im = im.resize((max(1, int(round(im.width * (h / im.height)))), h), Image.Resampling.LANCZOS)
+        normed.append(im)
+
+    gap = max(12, int(round(h * 0.015)))
+    header_h = max(36, int(round(h * 0.06)))
+    margin = max(12, int(round(h * 0.015)))
+    total_w = margin * 2 + sum(im.width for im in normed) + gap * max(0, len(normed) - 1)
+    total_h = margin * 2 + header_h + h
+
+    bg = (21, 23, 28, 255) if dark_backdrop else (248, 250, 252, 255)
+    fg = (248, 250, 252, 255) if dark_backdrop else (15, 23, 42, 255)
+    div_col = (51, 65, 85, 255) if dark_backdrop else (203, 213, 225, 255)
+
+    canvas = Image.new("RGBA", (total_w, total_h), bg)
+    draw = ImageDraw.Draw(canvas, "RGBA")
+    font_px = max(14, min(32, int(round(header_h * 0.56))))
+    font = _load_overlay_font(font_px)
+
+    x_cur = margin
+    y_img = margin + header_h
+    for idx, im in enumerate(normed):
+        canvas.paste(im, (x_cur, y_img), im)
+        if idx > 0:
+            div_x = x_cur - gap * 0.5
+            draw.line((div_x, margin, div_x, total_h - margin), fill=div_col, width=max(1, gap // 8))
+        title = titles[idx] if (titles and idx < len(titles)) else f"({chr(97 + idx)})"
+        if font is not None:
+            tb = draw.textbbox((0, 0), title, font=font)
+            tx = x_cur + im.width * 0.5 - (tb[2] - tb[0]) * 0.5 - tb[0]
+            ty = margin + (header_h - (tb[3] - tb[1])) * 0.5 - tb[1]
+            draw.text((tx, ty), title, font=font, fill=fg)
+        x_cur += im.width + gap
+    return canvas
+
+
 def compose_dual_view_panel(
     top_img: Any,
     side_img: Any,
@@ -1456,45 +1662,7 @@ def compose_dual_view_panel(
     side_title: str = "(b) Side View",
 ) -> Any:
     """Stitch Top and Side rendered images horizontally into one labeled publication panel."""
-    if not _HAS_PIL:
-        raise RuntimeError("Pillow is required to compose dual-view panels.")
-    t_img = top_img.convert("RGBA")
-    s_img = side_img.convert("RGBA")
-    h = max(t_img.height, s_img.height)
-    if t_img.height != h:
-        t_img = t_img.resize((max(1, int(round(t_img.width * (h / t_img.height)))), h), Image.Resampling.LANCZOS)
-    if s_img.height != h:
-        s_img = s_img.resize((max(1, int(round(s_img.width * (h / s_img.height)))), h), Image.Resampling.LANCZOS)
-
-    gap = max(12, int(round(h * 0.015)))
-    header_h = max(36, int(round(h * 0.06)))
-    margin = max(12, int(round(h * 0.015)))
-    total_w = margin * 2 + t_img.width + gap + s_img.width
-    total_h = margin * 2 + header_h + h
-
-    bg = (21, 23, 28, 255) if dark_backdrop else (248, 250, 252, 255)
-    fg = (248, 250, 252, 255) if dark_backdrop else (15, 23, 42, 255)
-    div_col = (51, 65, 85, 255) if dark_backdrop else (203, 213, 225, 255)
-
-    canvas = Image.new("RGBA", (total_w, total_h), bg)
-    y_img = margin + header_h
-    x_top = margin
-    x_side = margin + t_img.width + gap
-    canvas.paste(t_img, (x_top, y_img), t_img)
-    canvas.paste(s_img, (x_side, y_img), s_img)
-
-    draw = ImageDraw.Draw(canvas, "RGBA")
-    font_px = max(14, min(32, int(round(header_h * 0.56))))
-    font = _load_overlay_font(font_px)
-    div_x = margin + t_img.width + gap * 0.5
-    draw.line((div_x, margin, div_x, total_h - margin), fill=div_col, width=max(1, gap // 8))
-    if font is not None:
-        for title, px0, pw in ((top_title, x_top, t_img.width), (side_title, x_side, s_img.width)):
-            tb = draw.textbbox((0, 0), title, font=font)
-            tx = px0 + pw * 0.5 - (tb[2] - tb[0]) * 0.5 - tb[0]
-            ty = margin + (header_h - (tb[3] - tb[1])) * 0.5 - tb[1]
-            draw.text((tx, ty), title, font=font, fill=fg)
-    return canvas
+    return compose_multi_panel_strip([top_img, side_img], [top_title, side_title], dark_backdrop=dark_backdrop)
 
 
 _COLORMAP_STOPS: dict[str, list[tuple[int, int, int]]] = {
@@ -1711,3 +1879,136 @@ def merge_ghost_structure(
                 disp_pairs.append([i, n_main + i])
     merged["dashed_bonds"] = disp_pairs
     return merged
+
+
+def _convex_hull_3d_triangles(pts: np.ndarray) -> tuple[list[list[int]], list[list[int]]]:
+    """Compute outward-oriented triangles and perimeter edges of a 3D convex ligand shell."""
+    k = len(pts)
+    if k < 4:
+        return [], []
+    center = np.mean(pts, axis=0)
+    coplanar_groups: dict[frozenset[int], tuple[np.ndarray, list[int]]] = {}
+
+    for a in range(k):
+        for b in range(a + 1, k):
+            for c in range(b + 1, k):
+                n = np.cross(pts[b] - pts[a], pts[c] - pts[a])
+                nn = float(np.linalg.norm(n))
+                if nn < 1e-6:
+                    continue
+                u = n / nn
+                if float(np.dot(u, pts[a] - center)) < 0.0:
+                    u = -u
+                dots = (pts - pts[a]) @ u
+                if not bool(np.all(dots <= 1e-3)):
+                    continue
+                on_plane = sorted(i for i in range(k) if abs(float(dots[i])) <= 2e-3)
+                if len(on_plane) >= 3:
+                    coplanar_groups.setdefault(frozenset(on_plane), (u, on_plane))
+
+    faces: list[list[int]] = []
+    edges_set: set[tuple[int, int]] = set()
+    for u, verts_idx in coplanar_groups.values():
+        p_c = np.mean(pts[verts_idx], axis=0)
+        ref = pts[verts_idx[0]] - p_c
+        ref_n = float(np.linalg.norm(ref))
+        if ref_n < 1e-6:
+            continue
+        e1 = ref / ref_n
+        e2 = np.cross(u, e1)
+        ordered = sorted(
+            verts_idx,
+            key=lambda vi: math.atan2(float(np.dot(pts[vi] - p_c, e2)), float(np.dot(pts[vi] - p_c, e1))),
+        )
+        for m in range(1, len(ordered) - 1):
+            faces.append([int(ordered[0]), int(ordered[m]), int(ordered[m + 1])])
+        for m in range(len(ordered)):
+            u_e, v_e = int(ordered[m]), int(ordered[(m + 1) % len(ordered)])
+            edges_set.add((min(u_e, v_e), max(u_e, v_e)))
+    return faces, [[a, b] for a, b in sorted(edges_set)]
+
+
+def find_coordination_polyhedra(
+    symbols: list[str],
+    positions: Any,
+    style: dict[str, Any] | None = None,
+    cutoff_a: float = 2.55,
+    alpha: float = 0.36,
+) -> list[dict[str, Any]]:
+    """Build translucent coordination polyhedra for cation centers coordinated by 4-12 ligands."""
+    pos = np.asarray(positions, dtype=np.float64).reshape(-1, 3)
+    n = min(len(symbols), len(pos))
+    if n < 5:
+        return []
+    poly_centers = METAL_ELEMENTS | {"Si", "B", "P", "Ge", "As", "Sb"}
+    anions = {"O", "F", "N", "Cl", "S", "Br", "I"}
+    lig_idx = [i for i in range(n) if symbols[i] in anions]
+    if len(lig_idx) < 4:
+        return []
+
+    lig_pos = pos[lig_idx]
+    style_dict = style or {}
+    out: list[dict[str, Any]] = []
+    for i in range(n):
+        sym = symbols[i]
+        if sym not in poly_centers:
+            continue
+        dists = np.linalg.norm(lig_pos - pos[i], axis=1)
+        nbrs = [lig_idx[j] for j in range(len(lig_idx)) if 0.4 <= float(dists[j]) <= float(cutoff_a)]
+        if not (4 <= len(nbrs) <= 12):
+            continue
+        v_pts = pos[nbrs]
+        faces, edges = _convex_hull_3d_triangles(v_pts)
+        if not faces:
+            continue
+        out.append({
+            "center": i,
+            "symbol": sym,
+            "color": resolve_element_color(sym, style_dict),
+            "alpha": float(alpha),
+            "vertices": [[float(x), float(y), float(z)] for x, y, z in v_pts],
+            "faces": faces,
+            "edges": edges,
+        })
+    return out
+
+
+def compute_slice_mask(
+    positions: Any,
+    mode: str = "none",
+    depth_fraction: float = 0.5,
+    quat: Quat = (1.0, 0.0, 0.0, 0.0),
+    cell_vecs: Any = None,
+    origin: Any = None,
+) -> list[bool]:
+    """Compute per-atom visibility mask for cross-section / cutaway planes (fractional on tilted cells)."""
+    pos = np.asarray(positions, dtype=np.float64).reshape(-1, 3)
+    n = len(pos)
+    if n == 0 or mode == "none":
+        return [True] * n
+    frac = max(0.05, min(1.0, float(depth_fraction)))
+    if frac >= 0.999:
+        return [True] * n
+    axis_map = {"x": 0, "a": 0, "y": 1, "b": 1, "z": 2, "c": 2}
+    if mode in axis_map:
+        axis_idx = axis_map[mode]
+        used_frac = False
+        if cell_vecs is not None:
+            cv = np.asarray(cell_vecs, dtype=np.float64).reshape(3, 3)
+            if abs(float(np.linalg.det(cv))) > 1e-6:
+                orig = np.zeros(3, dtype=np.float64) if origin is None else np.asarray(origin, dtype=np.float64)
+                vals = ((pos - orig) @ np.linalg.inv(cv))[:, axis_idx]
+                used_frac = True
+        if not used_frac:
+            vals = pos[:, axis_idx]
+    elif mode == "camera":
+        _, _, back = quat_to_axes(quat)
+        vals = (pos - np.mean(pos, axis=0)) @ back
+    else:
+        return [True] * n
+
+    s_min, s_max = float(np.min(vals)), float(np.max(vals))
+    if s_max - s_min < 1e-6:
+        return [True] * n
+    thr = s_min + frac * (s_max - s_min)
+    return [bool(v <= thr + 1e-6) for v in vals]
