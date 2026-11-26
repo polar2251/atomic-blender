@@ -734,34 +734,40 @@ def build_scene(
         alphas = [max(0.02, min(1.0, float(a))) for a in raw_alphas]
     else:
         alphas = [1.0] * len(symbols)
+    raw_r_scales = structure.get("radius_scales")
+    if isinstance(raw_r_scales, list) and len(raw_r_scales) == len(symbols):
+        r_scales = [max(0.15, min(3.0, float(s))) for s in raw_r_scales]
+    else:
+        r_scales = [1.0] * len(symbols)
     has_cell = bool(structure.get("has_cell", True))
     origin = Vector(structure.get("origin", [0.0, 0.0, 0.0]))
     cell_vecs = [Vector(v) for v in structure.get("cell", [[0, 0, 0], [0, 0, 0], [0, 0, 0]])]
 
-    # Atom meshes instanced per (element, alpha) pair for per-atom transparency
+    # Atom meshes instanced per (element, alpha, radius_scale) for per-atom transparency & hybrid sizing
     eff_radius_scale = float(style.get("elements", {}).get("radius_scale", 1.0)) * float(radius_scale)
     mesh_cfg = style.get("atom_mesh", {})
     segments = int(mesh_cfg.get("segments", 24))
     ring_count = int(mesh_cfg.get("ring_count", 12))
     smooth = bool(mesh_cfg.get("smooth", True))
 
-    proto_meshes: dict[tuple[str, float], bpy.types.Mesh] = {}
+    proto_meshes: dict[tuple[str, float, float], bpy.types.Mesh] = {}
     elem_radii_cache: dict[str, float] = {}
     elem_materials: dict[tuple[str, float], bpy.types.Material] = {}
     for elem, a_val in sorted({(sym, round(a, 3)) for sym, a in zip(symbols, alphas)}):
-        if elem not in elem_radii_cache:
-            elem_radii_cache[elem] = resolve_element_radius(elem, style) * eff_radius_scale
-        rad = elem_radii_cache[elem]
         mat_kwargs = _element_material_kwargs(elem, style)
-        mat = make_material(
+        elem_materials[(elem, a_val)] = make_material(
             f"mat_{elem}_{int(round(a_val * 1000))}",
             resolve_element_color(elem, style),
             alpha=a_val,
             **mat_kwargs,
         )
-        elem_materials[(elem, a_val)] = mat
-        proto_meshes[(elem, a_val)] = _create_uv_sphere_mesh(
-            name=f"proto_{elem}_{int(round(a_val * 1000))}",
+    for elem, a_val, r_val in sorted({(sym, round(a, 3), round(rs, 3)) for sym, a, rs in zip(symbols, alphas, r_scales)}):
+        if elem not in elem_radii_cache:
+            elem_radii_cache[elem] = resolve_element_radius(elem, style) * eff_radius_scale
+        rad = elem_radii_cache[elem] * r_val
+        mat = elem_materials[(elem, a_val)]
+        proto_meshes[(elem, a_val, r_val)] = _create_uv_sphere_mesh(
+            name=f"proto_{elem}_{int(round(a_val * 1000))}_{int(round(r_val * 1000))}",
             radius=rad,
             segments=segments,
             ring_count=ring_count,
@@ -769,8 +775,10 @@ def build_scene(
             mat=mat,
         )
 
-    for idx, (elem, pos, a_val) in enumerate(zip(symbols, positions, alphas)):
-        obj = bpy.data.objects.new(f"atom_{idx}_{elem}", proto_meshes[(elem, round(a_val, 3))])
+    for idx, (elem, pos, a_val, r_val) in enumerate(zip(symbols, positions, alphas, r_scales)):
+        obj = bpy.data.objects.new(
+            f"atom_{idx}_{elem}", proto_meshes[(elem, round(a_val, 3), round(r_val, 3))]
+        )
         obj.location = pos
         col.objects.link(obj)
 

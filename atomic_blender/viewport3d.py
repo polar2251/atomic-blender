@@ -556,6 +556,9 @@ class ViewportScene:
     atom_alphas: np.ndarray = None  # type: ignore[assignment]
     selected_atoms: set[int] = field(default_factory=set)
     show_selection_highlight: bool = True
+    show_scale_bar: bool = False
+    show_measure_overlay: bool = True
+    selection_order: list[int] = field(default_factory=list)
 
     def __post_init__(self) -> None:
         if self.target is None:
@@ -581,6 +584,9 @@ class ViewportScene:
         atom_alphas: Any = None,
         selected_atoms: set[int] | None = None,
         show_selection_highlight: bool = True,
+        show_scale_bar: bool = False,
+        show_measure_overlay: bool = True,
+        selection_order: list[int] | None = None,
     ) -> ViewportScene:
         symbols = list(structure["symbols"])
         positions = np.asarray(structure["positions"], dtype=np.float64).reshape(-1, 3)
@@ -640,6 +646,10 @@ class ViewportScene:
                 )
 
         radii = np.array([elem_r[s] for s in symbols], dtype=np.float64)
+        raw_r_scales = structure.get("radius_scales")
+        if isinstance(raw_r_scales, list) and len(raw_r_scales) == len(symbols):
+            r_mult = np.clip(np.asarray(raw_r_scales, dtype=np.float64), 0.15, 3.0)
+            radii = radii * r_mult
         colors = [elem_c[s] for s in symbols]
         outline_colors = [elem_out[s] for s in symbols]
         highlight_colors = [elem_hi[s] for s in symbols]
@@ -706,6 +716,9 @@ class ViewportScene:
             atom_alphas=alphas_arr,
             selected_atoms=set(selected_atoms or ()),
             show_selection_highlight=show_selection_highlight,
+            show_scale_bar=show_scale_bar,
+            show_measure_overlay=show_measure_overlay,
+            selection_order=list(selection_order or ()),
         )
 
     def _get_sprite(
@@ -1041,6 +1054,25 @@ class ViewportScene:
                                 stroke_fill=tstroke,
                             )
 
+        if self.show_measure_overlay and len(self.selection_order) in (2, 3, 4):
+            render_measurement_callout_overlay(
+                frame,
+                self,
+                self.selection_order,
+                res_w,
+                res_h,
+                dark_backdrop=self.dark_backdrop,
+            )
+
+        if self.show_scale_bar:
+            render_scale_bar_overlay(
+                frame,
+                self.ortho_scale,
+                res_w,
+                res_h,
+                dark_backdrop=self.dark_backdrop,
+            )
+
         if self.show_axes:
             render_reference_axes_overlay(
                 frame,
@@ -1145,3 +1177,232 @@ def render_atom_labels_and_selection_overlay(
                     stroke_width=1,
                     stroke_fill=tstroke,
                 )
+
+
+def choose_scale_bar_angstrom(ortho_scale: float, target_fraction: float = 0.20) -> float:
+    """Choose a clean physical length in Angstroms spanning roughly ``target_fraction`` of frame."""
+    candidates = (0.5, 1.0, 2.0, 5.0, 10.0, 20.0, 50.0, 100.0)
+    desired = max(0.5, float(ortho_scale) * float(target_fraction))
+    return min(candidates, key=lambda c: abs(c - desired))
+
+
+def render_scale_bar_overlay(
+    target_img: Any,
+    ortho_scale: float,
+    res_w: int,
+    res_h: int,
+    dark_backdrop: bool = True,
+) -> float:
+    """Composite an orthographic physical scale bar onto ``target_img`` in-place and return bar length (Å)."""
+    bar_a = choose_scale_bar_angstrom(ortho_scale)
+    if not _HAS_PIL or target_img is None:
+        return bar_a
+    fw, fh = target_img.size
+    px_per_a = (fw / max(1e-3, ortho_scale)) if res_w >= res_h else (fh / max(1e-3, ortho_scale))
+    bar_px = max(24.0, min(fw * 0.45, bar_a * px_per_a))
+
+    draw = ImageDraw.Draw(target_img, "RGBA")
+    pad_x = max(14, int(round(min(fw, fh) * 0.03)))
+    pad_y = max(14, int(round(min(fw, fh) * 0.03)))
+    font_px = max(11, min(18, int(round(min(fw, fh) * 0.026))))
+    font = _load_overlay_font(font_px)
+    label = f"{bar_a:g} Å"
+    tw, th = (len(label) * font_px * 0.6, font_px)
+    if font is not None:
+        tb = draw.textbbox((0, 0), label, font=font)
+        tw = tb[2] - tb[0]
+        th = tb[3] - tb[1]
+
+    box_w = max(bar_px + 20.0, tw + 22.0)
+    box_h = th + 18.0
+    bx1 = fw - pad_x
+    by1 = fh - pad_y
+    bx0 = bx1 - box_w
+    by0 = by1 - box_h
+
+    bg_col = (15, 23, 42, 190) if dark_backdrop else (248, 250, 252, 210)
+    fg_col = (248, 250, 252, 245) if dark_backdrop else (15, 23, 42, 245)
+    border_col = (51, 65, 85, 210) if dark_backdrop else (148, 163, 184, 210)
+    draw.rounded_rectangle((bx0, by0, bx1, by1), radius=6, fill=bg_col, outline=border_col, width=1)
+
+    lx0 = 0.5 * (bx0 + bx1) - bar_px * 0.5
+    lx1 = 0.5 * (bx0 + bx1) + bar_px * 0.5
+    ly = by1 - 7.0
+    lw = max(2, min(4, int(round(min(fw, fh) * 0.004))))
+    draw.line((lx0, ly, lx1, ly), fill=fg_col, width=lw)
+    draw.line((lx0, ly - 4.0, lx0, ly + 2.5), fill=fg_col, width=lw)
+    draw.line((lx1, ly - 4.0, lx1, ly + 2.5), fill=fg_col, width=lw)
+
+    if font is not None:
+        tb = draw.textbbox((0, 0), label, font=font)
+        tx = 0.5 * (bx0 + bx1) - (tb[2] - tb[0]) * 0.5 - tb[0]
+        ty = by0 + 4.0 - tb[1]
+        draw.text((tx, ty), label, font=font, fill=fg_col)
+    return bar_a
+
+
+def _draw_dashed_segment(
+    draw: Any,
+    p0: tuple[float, float],
+    p1: tuple[float, float],
+    fill: tuple[int, int, int, int],
+    width: int = 2,
+    dash_px: float = 7.0,
+    gap_px: float = 5.0,
+) -> None:
+    x0, y0 = p0
+    x1, y1 = p1
+    dx = x1 - x0
+    dy = y1 - y0
+    dist = math.hypot(dx, dy)
+    if dist < 2.0:
+        return
+    ux, uy = dx / dist, dy / dist
+    cur = 0.0
+    step = dash_px + gap_px
+    while cur < dist:
+        end = min(dist, cur + dash_px)
+        draw.line(
+            (x0 + ux * cur, y0 + uy * cur, x0 + ux * end, y0 + uy * end),
+            fill=fill,
+            width=width,
+        )
+        cur += step
+
+
+def render_measurement_callout_overlay(
+    target_img: Any,
+    vp: ViewportScene,
+    selected_order: list[int],
+    res_w: int,
+    res_h: int,
+    dark_backdrop: bool = True,
+) -> None:
+    """Draw 2D dashed callout lines and a compact measurement badge for 2-4 ordered atoms."""
+    if not _HAS_PIL or target_img is None or len(vp.positions) == 0:
+        return
+    n = len(vp.positions)
+    order: list[int] = []
+    seen: set[int] = set()
+    for idx in selected_order:
+        if 0 <= idx < n and idx not in seen:
+            seen.add(idx)
+            order.append(idx)
+    if len(order) not in (2, 3, 4):
+        return
+
+    fw, fh = target_img.size
+    cx0 = fw * 0.5
+    cy0 = fh * 0.5
+    px_per_a = (fw / max(1e-3, vp.ortho_scale)) if res_w >= res_h else (fh / max(1e-3, vp.ortho_scale))
+    right, up, _ = quat_to_axes(vp.quat)
+
+    pts2d: list[tuple[float, float]] = []
+    for idx in order:
+        rel = vp.positions[idx] - vp.target
+        pts2d.append((float(cx0 + np.dot(rel, right) * px_per_a), float(cy0 - np.dot(rel, up) * px_per_a)))
+
+    pos = vp.positions
+    if len(order) == 2:
+        dist = float(np.linalg.norm(pos[order[1]] - pos[order[0]]))
+        badge = f"{dist:.2f} Å"
+        anchor = ((pts2d[0][0] + pts2d[1][0]) * 0.5, (pts2d[0][1] + pts2d[1][1]) * 0.5)
+    elif len(order) == 3:
+        v1 = pos[order[0]] - pos[order[1]]
+        v2 = pos[order[2]] - pos[order[1]]
+        d1, d2 = float(np.linalg.norm(v1)), float(np.linalg.norm(v2))
+        if d1 < 1e-9 or d2 < 1e-9:
+            return
+        cos_a = max(-1.0, min(1.0, float(np.dot(v1, v2) / (d1 * d2))))
+        badge = f"{math.degrees(math.acos(cos_a)):.1f}°"
+        mid_arms = ((pts2d[0][0] + pts2d[2][0]) * 0.5, (pts2d[0][1] + pts2d[2][1]) * 0.5)
+        anchor = (pts2d[1][0] + (mid_arms[0] - pts2d[1][0]) * 0.35, pts2d[1][1] + (mid_arms[1] - pts2d[1][1]) * 0.35)
+    else:
+        p0, p1, p2, p3 = pos[order[0]], pos[order[1]], pos[order[2]], pos[order[3]]
+        b0 = -(p1 - p0)
+        b1 = p2 - p1
+        b2 = p3 - p2
+        b1_n = float(np.linalg.norm(b1))
+        if b1_n < 1e-9:
+            return
+        b1_u = b1 / b1_n
+        v = b0 - np.dot(b0, b1_u) * b1_u
+        w = b2 - np.dot(b2, b1_u) * b1_u
+        if float(np.linalg.norm(v)) < 1e-9 or float(np.linalg.norm(w)) < 1e-9:
+            return
+        dih = math.degrees(math.atan2(float(np.dot(np.cross(b1_u, v), w)), float(np.dot(v, w))))
+        badge = f"φ {dih:.1f}°"
+        anchor = ((pts2d[1][0] + pts2d[2][0]) * 0.5, (pts2d[1][1] + pts2d[2][1]) * 0.5)
+
+    draw = ImageDraw.Draw(target_img, "RGBA")
+    line_col = (45, 212, 191, 240) if dark_backdrop else (13, 148, 136, 245)
+    for k in range(len(pts2d) - 1):
+        _draw_dashed_segment(draw, pts2d[k], pts2d[k + 1], fill=line_col, width=2)
+
+    font_px = max(11, min(16, int(round(min(fw, fh) * 0.024))))
+    font = _load_overlay_font(font_px)
+    if font is None:
+        return
+    tb = draw.textbbox((0, 0), badge, font=font)
+    tw = tb[2] - tb[0]
+    th = tb[3] - tb[1]
+    pad_x, pad_y = 7.0, 4.0
+    bx0 = max(6.0, min(fw - tw - 2 * pad_x - 6.0, anchor[0] - (tw * 0.5 + pad_x)))
+    by0 = max(6.0, min(fh - th - 2 * pad_y - 6.0, anchor[1] - (th * 0.5 + pad_y)))
+    draw.rounded_rectangle(
+        (bx0, by0, bx0 + tw + 2 * pad_x, by0 + th + 2 * pad_y),
+        radius=6,
+        fill=(15, 23, 42, 225),
+        outline=(45, 212, 191, 245),
+        width=1,
+    )
+    draw.text((bx0 + pad_x - tb[0], by0 + pad_y - tb[1]), badge, font=font, fill=(248, 250, 252, 255))
+
+
+def compose_dual_view_panel(
+    top_img: Any,
+    side_img: Any,
+    dark_backdrop: bool = True,
+    top_title: str = "(a) Top View",
+    side_title: str = "(b) Side View",
+) -> Any:
+    """Stitch Top and Side rendered images horizontally into one labeled publication panel."""
+    if not _HAS_PIL:
+        raise RuntimeError("Pillow is required to compose dual-view panels.")
+    t_img = top_img.convert("RGBA")
+    s_img = side_img.convert("RGBA")
+    h = max(t_img.height, s_img.height)
+    if t_img.height != h:
+        t_img = t_img.resize((max(1, int(round(t_img.width * (h / t_img.height)))), h), Image.Resampling.LANCZOS)
+    if s_img.height != h:
+        s_img = s_img.resize((max(1, int(round(s_img.width * (h / s_img.height)))), h), Image.Resampling.LANCZOS)
+
+    gap = max(12, int(round(h * 0.015)))
+    header_h = max(36, int(round(h * 0.06)))
+    margin = max(12, int(round(h * 0.015)))
+    total_w = margin * 2 + t_img.width + gap + s_img.width
+    total_h = margin * 2 + header_h + h
+
+    bg = (21, 23, 28, 255) if dark_backdrop else (248, 250, 252, 255)
+    fg = (248, 250, 252, 255) if dark_backdrop else (15, 23, 42, 255)
+    div_col = (51, 65, 85, 255) if dark_backdrop else (203, 213, 225, 255)
+
+    canvas = Image.new("RGBA", (total_w, total_h), bg)
+    y_img = margin + header_h
+    x_top = margin
+    x_side = margin + t_img.width + gap
+    canvas.paste(t_img, (x_top, y_img), t_img)
+    canvas.paste(s_img, (x_side, y_img), s_img)
+
+    draw = ImageDraw.Draw(canvas, "RGBA")
+    font_px = max(14, min(32, int(round(header_h * 0.56))))
+    font = _load_overlay_font(font_px)
+    div_x = margin + t_img.width + gap * 0.5
+    draw.line((div_x, margin, div_x, total_h - margin), fill=div_col, width=max(1, gap // 8))
+    if font is not None:
+        for title, px0, pw in ((top_title, x_top, t_img.width), (side_title, x_side, s_img.width)):
+            tb = draw.textbbox((0, 0), title, font=font)
+            tx = px0 + pw * 0.5 - (tb[2] - tb[0]) * 0.5 - tb[0]
+            ty = margin + (header_h - (tb[3] - tb[1])) * 0.5 - tb[1]
+            draw.text((tx, ty), title, font=font, fill=fg)
+    return canvas
