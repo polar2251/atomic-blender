@@ -146,7 +146,7 @@ def build_render_cli_args(
     return args
 
 
-def compute_preview_resolution(res_w: int, res_h: int, max_side: int = 560) -> tuple[int, int]:
+def compute_preview_resolution(res_w: int, res_h: int, max_side: int = 400) -> tuple[int, int]:
     """Scale target output resolution down for fast interactive Blender previews."""
     rw = max(16, int(res_w))
     rh = max(16, int(res_h))
@@ -155,6 +155,228 @@ def compute_preview_resolution(res_w: int, res_h: int, max_side: int = 560) -> t
         return rw, rh
     scale = max_side / float(longest)
     return max(16, int(round(rw * scale))), max(16, int(round(rh * scale)))
+
+
+class DarkCheckbutton(tk.Frame):
+    """Crisp pixel-aligned dark-theme checkbox backed by a BooleanVar."""
+
+    def __init__(
+        self,
+        parent: Any,
+        text: str,
+        variable: tk.BooleanVar,
+        command: Any = None,
+        bg: str = "#1E2128",
+        fg: str = "#E5E7EB",
+        font: tuple[str, int] = ("Segoe UI", 9),
+    ) -> None:
+        super().__init__(parent, bg=bg)
+        self._var = variable
+        self._cmd = command
+        self._bg = bg
+        self._fg = fg
+        self._disabled = False
+
+        self._box = tk.Canvas(self, width=18, height=18, bg=bg, highlightthickness=0, cursor="hand2")
+        self._box.pack(side=tk.LEFT, padx=(0, 5))
+        self._lbl = tk.Label(self, text=text, bg=bg, fg=fg, font=font, cursor="hand2")
+        self._lbl.pack(side=tk.LEFT)
+
+        self._box.bind("<Button-1>", self._on_click)
+        self._lbl.bind("<Button-1>", self._on_click)
+        self._trace_id = self._var.trace_add("write", lambda *_: self._safe_redraw())
+        self.bind("<Destroy>", self._on_destroy)
+        self._redraw()
+
+    def _on_destroy(self, event: tk.Event) -> None:
+        if event.widget is self:
+            try:
+                self._var.trace_remove("write", self._trace_id)
+            except Exception:
+                pass
+
+    def _on_click(self, _event: tk.Event) -> None:
+        if self._disabled:
+            return
+        self._var.set(not bool(self._var.get()))
+        self._redraw()
+        if self._cmd is not None:
+            self._cmd()
+
+    def _safe_redraw(self) -> None:
+        if self.winfo_exists():
+            self._redraw()
+
+    def _redraw(self) -> None:
+        self._box.delete("all")
+        checked = bool(self._var.get())
+        if self._disabled:
+            fill = "#181B21"
+            outline = "#3F4654"
+            check_col = "#64748B"
+            self._lbl.configure(fg="#64748B")
+        else:
+            fill = "#0D9488" if checked else "#14161A"
+            outline = "#14B8A6" if checked else "#64748B"
+            check_col = "#FFFFFF"
+            self._lbl.configure(fg=self._fg)
+        self._box.create_rectangle(2, 2, 15, 15, fill=fill, outline=outline, width=1.4)
+        if checked:
+            self._box.create_line(
+                5, 9, 7.5, 11.5, 12.5, 6, fill=check_col, width=1.8, capstyle=tk.ROUND, joinstyle=tk.ROUND
+            )
+
+    def configure(self, cnf: Any = None, **kw: Any) -> Any:  # type: ignore[override]
+        if "state" in kw:
+            state = kw.pop("state")
+            self._disabled = str(state) == "disabled"
+            cursor = "arrow" if self._disabled else "hand2"
+            self._box.configure(cursor=cursor)
+            self._lbl.configure(cursor=cursor)
+            self._redraw()
+        if cnf or kw:
+            return super().configure(cnf, **kw)
+        return None
+
+
+class DarkRadiobutton(tk.Frame):
+    """Crisp dark-theme radio button backed by a StringVar."""
+
+    def __init__(
+        self,
+        parent: Any,
+        text: str,
+        variable: tk.StringVar,
+        value: str,
+        command: Any = None,
+        bg: str = "#1E2128",
+        fg: str = "#E5E7EB",
+        font: tuple[str, int] = ("Segoe UI", 9),
+    ) -> None:
+        super().__init__(parent, bg=bg)
+        self._var = variable
+        self._value = value
+        self._cmd = command
+        self._bg = bg
+        self._fg = fg
+
+        self._dot = tk.Canvas(self, width=18, height=18, bg=bg, highlightthickness=0, cursor="hand2")
+        self._dot.pack(side=tk.LEFT, padx=(0, 5))
+        self._lbl = tk.Label(self, text=text, bg=bg, fg=fg, font=font, cursor="hand2")
+        self._lbl.pack(side=tk.LEFT)
+
+        self._dot.bind("<Button-1>", self._on_click)
+        self._lbl.bind("<Button-1>", self._on_click)
+        self._trace_id = self._var.trace_add("write", lambda *_: self._safe_redraw())
+        self.bind("<Destroy>", self._on_destroy)
+        self._redraw()
+
+    def _on_destroy(self, event: tk.Event) -> None:
+        if event.widget is self:
+            try:
+                self._var.trace_remove("write", self._trace_id)
+            except Exception:
+                pass
+
+    def _on_click(self, _event: tk.Event) -> None:
+        self._var.set(self._value)
+        self._redraw()
+        if self._cmd is not None:
+            self._cmd()
+
+    def _safe_redraw(self) -> None:
+        if self.winfo_exists():
+            self._redraw()
+
+    def _redraw(self) -> None:
+        self._dot.delete("all")
+        selected = self._var.get() == self._value
+        outline = "#14B8A6" if selected else "#64748B"
+        self._dot.create_oval(2, 2, 15, 15, fill="#14161A", outline=outline, width=1.5)
+        if selected:
+            self._dot.create_oval(5, 5, 12, 12, fill="#14B8A6", outline="")
+
+
+class DarkSpinbox(tk.Frame):
+    """Compact dark stepper widget ([-][Entry][+]) replacing ttk.Spinbox."""
+
+    def __init__(
+        self,
+        parent: Any,
+        variable: tk.IntVar,
+        from_: int = 1,
+        to: int = 100,
+        increment: int = 1,
+        width: int = 4,
+        command: Any = None,
+    ) -> None:
+        super().__init__(parent, bg="#14161A", highlightbackground="#323844", highlightthickness=1)
+        self._var = variable
+        self._from = int(from_)
+        self._to = int(to)
+        self._inc = int(increment)
+        self._cmd = command
+
+        btn_cfg = {
+            "bg": "#2B303B",
+            "fg": "#E5E7EB",
+            "activebackground": "#363C49",
+            "activeforeground": "#FFFFFF",
+            "bd": 0,
+            "relief": tk.FLAT,
+            "width": 2,
+            "cursor": "hand2",
+            "font": ("Segoe UI", 9, "bold"),
+        }
+        self._btn_dec = tk.Button(self, text="-", command=lambda: self._step(-self._inc), **btn_cfg)
+        self._btn_dec.pack(side=tk.LEFT, fill=tk.Y)
+
+        self._entry = tk.Entry(
+            self,
+            textvariable=self._var,
+            width=width,
+            justify=tk.CENTER,
+            bg="#14161A",
+            fg="#E5E7EB",
+            insertbackground="#E5E7EB",
+            relief=tk.FLAT,
+            bd=0,
+            font=("Segoe UI", 9),
+        )
+        self._entry.pack(side=tk.LEFT, fill=tk.Y, padx=2)
+        self._entry.bind("<Return>", lambda _e: self._commit_entry())
+        self._entry.bind("<FocusOut>", lambda _e: self._commit_entry())
+        self._entry.bind(
+            "<MouseWheel>",
+            lambda e: self._step(self._inc if e.delta > 0 else -self._inc),
+        )
+
+        self._btn_inc = tk.Button(self, text="+", command=lambda: self._step(self._inc), **btn_cfg)
+        self._btn_inc.pack(side=tk.LEFT, fill=tk.Y)
+
+    def _clamp(self, val: int) -> int:
+        return max(self._from, min(self._to, val))
+
+    def _step(self, delta: int) -> None:
+        try:
+            cur = int(self._var.get())
+        except Exception:
+            cur = self._from
+        nxt = self._clamp(cur + delta)
+        self._var.set(nxt)
+        if self._cmd is not None:
+            self._cmd()
+
+    def _commit_entry(self) -> None:
+        try:
+            cur = int(self._var.get())
+        except Exception:
+            cur = self._from
+        clamped = self._clamp(cur)
+        if cur != clamped:
+            self._var.set(clamped)
+        if self._cmd is not None:
+            self._cmd()
 
 
 class BlenderPreviewWorker:
@@ -317,7 +539,8 @@ def inspect_structure_summary(
         data = json.loads(p.read_text(encoding="utf-8"))
         syms = data.get("symbols", [])
         elems = ", ".join(sorted(set(syms)))
-        n_atoms = len(syms) * max(1, replicate[0]) * max(1, replicate[1]) * max(1, replicate[2])
+        eff_rep = replicate if data.get("has_cell", False) else (1, 1, 1)
+        n_atoms = len(syms) * max(1, eff_rep[0]) * max(1, eff_rep[1]) * max(1, eff_rep[2])
         if data.get("has_cell", False):
             import math
 
@@ -325,7 +548,7 @@ def inspect_structure_summary(
             lens = [math.sqrt(sum(c * c for c in v)) for v in vecs]
             return (
                 f"{p.name} | {n_atoms} atoms ({elems}) | "
-                f"cell {lens[0]*replicate[0]:.2f}×{lens[1]*replicate[1]:.2f}×{lens[2]*replicate[2]:.2f} Å"
+                f"cell {lens[0]*eff_rep[0]:.2f}×{lens[1]*eff_rep[1]:.2f}×{lens[2]*eff_rep[2]:.2f} Å"
             )
         return f"{p.name} | {n_atoms} atoms ({elems}) | no periodic cell"
 
@@ -614,6 +837,7 @@ class AtomicBlenderApp(tk.Tk):
         self.var_blender = tk.StringVar(value=detected_blender)
         self.var_canvas_mode = tk.StringVar(value="3d")
         self.var_status = tk.StringVar(value="Ready")
+        self.var_input.trace_add("write", lambda *_: self._sync_type_map_visibility())
 
     def _build_layout(self) -> None:
         banner = ttk.Frame(self, padding=(10, 6, 10, 4), style="Outer.TFrame")
@@ -676,11 +900,14 @@ class AtomicBlenderApp(tk.Tk):
         ttk.Entry(f_io, textvariable=self.var_output, width=34).grid(row=1, column=1, sticky=tk.EW, padx=4, pady=2)
         ttk.Button(f_io, text="Save As...", command=self._browse_output).grid(row=1, column=2, pady=2)
 
-        ttk.Label(f_io, text="Type Map").grid(row=2, column=0, sticky=tk.W, pady=2)
-        entry_tm = ttk.Entry(f_io, textvariable=self.var_type_map)
-        entry_tm.grid(row=2, column=1, sticky=tk.EW, padx=4, pady=2)
-        entry_tm.bind("<FocusOut>", lambda _e: self._schedule_inspect())
-        ttk.Button(f_io, text="Inspect", command=self._schedule_inspect).grid(row=2, column=2, pady=2)
+        self.lbl_type_map = ttk.Label(f_io, text="Type Map")
+        self.entry_type_map = ttk.Entry(f_io, textvariable=self.var_type_map)
+        self.entry_type_map.bind("<FocusOut>", lambda _e: self._schedule_inspect())
+        self.btn_inspect_tm = ttk.Button(f_io, text="Inspect", command=self._schedule_inspect)
+        self.lbl_type_map.grid(row=2, column=0, sticky=tk.W, pady=2)
+        self.entry_type_map.grid(row=2, column=1, sticky=tk.EW, padx=4, pady=2)
+        self.btn_inspect_tm.grid(row=2, column=2, pady=2)
+        self._sync_type_map_visibility()
 
         row_smart = ttk.Frame(f_io)
         row_smart.grid(row=3, column=0, columnspan=3, sticky=tk.EW, pady=(4, 0))
@@ -694,7 +921,9 @@ class AtomicBlenderApp(tk.Tk):
         # 2. Style & Representation
         self.f_rep = ttk.LabelFrame(parent, text="Style & Representation", padding=8)
         self.f_rep.pack(fill=tk.X, pady=(0, 6))
-        f_rep = self.f_rep
+        self.f_rep_body = ttk.Frame(self.f_rep)
+        self.f_rep_body.pack(fill=tk.X)
+        f_rep = self.f_rep_body
         f_rep.columnconfigure(1, weight=1)
 
         ttk.Label(f_rep, text="Style").grid(row=0, column=0, sticky=tk.W, pady=2)
@@ -740,7 +969,7 @@ class AtomicBlenderApp(tk.Tk):
         )
         cb_bcol.pack(side=tk.LEFT)
         cb_bcol.bind("<<ComboboxSelected>>", lambda _e: self._on_repr_changed())
-        ttk.Checkbutton(
+        DarkCheckbutton(
             row_b, text="Show Cell", variable=self.var_show_cell, command=self._on_repr_changed
         ).pack(side=tk.LEFT, padx=(8, 0))
 
@@ -751,12 +980,12 @@ class AtomicBlenderApp(tk.Tk):
 
         row_vm = ttk.Frame(f_sv)
         row_vm.grid(row=0, column=0, columnspan=3, sticky=tk.W, pady=(0, 4))
-        ttk.Radiobutton(
+        DarkRadiobutton(
             row_vm, text="Preset", variable=self.var_view_mode, value="preset", command=self._sync_view_mode
         ).pack(side=tk.LEFT)
-        ttk.Radiobutton(
+        DarkRadiobutton(
             row_vm, text="view.json", variable=self.var_view_mode, value="file", command=self._sync_view_mode
-        ).pack(side=tk.LEFT, padx=(10, 0))
+        ).pack(side=tk.LEFT, padx=(12, 0))
 
         row_vp = ttk.Frame(f_sv)
         row_vp.grid(row=1, column=0, columnspan=3, sticky=tk.EW, pady=2)
@@ -778,7 +1007,7 @@ class AtomicBlenderApp(tk.Tk):
         self.btn_view_file = ttk.Button(f_sv, text="Browse...", command=self._browse_view_file)
         self.btn_view_file.grid(row=3, column=2, pady=2)
 
-        self.chk_fit_view = ttk.Checkbutton(
+        self.chk_fit_view = DarkCheckbutton(
             f_sv, text="Re-fit view.json angle to structure (--fit-view)", variable=self.var_fit_view
         )
         self.chk_fit_view.grid(row=4, column=1, columnspan=2, sticky=tk.W, padx=4, pady=2)
@@ -787,16 +1016,18 @@ class AtomicBlenderApp(tk.Tk):
         # 4. Supercell & Crop Z
         self.f_geom = ttk.LabelFrame(parent, text="Supercell & Framing", padding=8)
         self.f_geom.pack(fill=tk.X, pady=(0, 6))
-        f_geom = self.f_geom
+        self.f_geom_body = ttk.Frame(self.f_geom)
+        self.f_geom_body.pack(fill=tk.X)
+        f_geom = self.f_geom_body
         f_geom.columnconfigure(1, weight=1)
 
         ttk.Label(f_geom, text="Replicate").grid(row=0, column=0, sticky=tk.W, pady=2)
         row_rep = ttk.Frame(f_geom)
         row_rep.grid(row=0, column=1, sticky=tk.W, padx=4, pady=2)
         for var in (self.var_rep_x, self.var_rep_y, self.var_rep_z):
-            sb = ttk.Spinbox(row_rep, from_=1, to=20, textvariable=var, width=4, command=self._schedule_inspect)
+            sb = DarkSpinbox(row_rep, from_=1, to=20, variable=var, width=3, command=self._schedule_inspect)
             sb.pack(side=tk.LEFT, padx=(0, 4))
-        ttk.Checkbutton(row_rep, text="Wrap into cell", variable=self.var_wrap).pack(side=tk.LEFT, padx=(6, 0))
+        DarkCheckbutton(row_rep, text="Wrap into cell", variable=self.var_wrap).pack(side=tk.LEFT, padx=(6, 0))
 
         ttk.Label(f_geom, text="Crop Z").grid(row=1, column=0, sticky=tk.W, pady=2)
         row_cz = ttk.Frame(f_geom)
@@ -818,16 +1049,16 @@ class AtomicBlenderApp(tk.Tk):
         ttk.Label(f_ren, text="Resolution").grid(row=0, column=0, sticky=tk.W, pady=2)
         row_res = ttk.Frame(f_ren)
         row_res.grid(row=0, column=1, columnspan=2, sticky=tk.W, padx=4, pady=2)
-        ttk.Spinbox(row_res, from_=64, to=8192, increment=100, textvariable=self.var_res_w, width=6).pack(side=tk.LEFT)
+        DarkSpinbox(row_res, from_=64, to=8192, increment=100, variable=self.var_res_w, width=5).pack(side=tk.LEFT)
         ttk.Label(row_res, text="×").pack(side=tk.LEFT, padx=4)
-        ttk.Spinbox(row_res, from_=64, to=8192, increment=100, textvariable=self.var_res_h, width=6).pack(side=tk.LEFT)
+        DarkSpinbox(row_res, from_=64, to=8192, increment=100, variable=self.var_res_h, width=5).pack(side=tk.LEFT)
         for label, w, h in (("700²", 700, 700), ("1400²", 1400, 1400), ("Slab", 1400, 1200)):
             ttk.Button(
                 row_res, text=label, width=5, command=lambda ww=w, hh=h: self._set_resolution(ww, hh)
             ).pack(side=tk.LEFT, padx=(4, 0))
 
         ttk.Label(f_ren, text="Samples").grid(row=1, column=0, sticky=tk.W, pady=2)
-        ttk.Spinbox(f_ren, from_=1, to=2048, textvariable=self.var_samples, width=8).grid(
+        DarkSpinbox(f_ren, from_=1, to=2048, increment=8, variable=self.var_samples, width=6).grid(
             row=1, column=1, sticky=tk.W, padx=4, pady=2
         )
 
@@ -856,10 +1087,10 @@ class AtomicBlenderApp(tk.Tk):
         f_disp.pack(fill=tk.X, pady=(0, 6))
 
         rows = (
-            ("ball_stick", "Ball and Stick", self.var_disp_ball_stick, lambda: self._toggle_section(self.f_rep)),
-            ("licorice", "Licorice", self.var_disp_licorice, lambda: self._toggle_section(self.f_rep)),
-            ("vdw", "Van der Waals", self.var_disp_vdw, lambda: self._toggle_section(self.f_rep)),
-            ("crystal_lattice", "Crystal Lattice", self.var_show_cell, lambda: self._toggle_section(self.f_geom)),
+            ("ball_stick", "Ball and Stick", self.var_disp_ball_stick, lambda: self._toggle_section(self.f_rep_body)),
+            ("licorice", "Licorice", self.var_disp_licorice, lambda: self._toggle_section(self.f_rep_body)),
+            ("vdw", "Van der Waals", self.var_disp_vdw, lambda: self._toggle_section(self.f_rep_body)),
+            ("crystal_lattice", "Crystal Lattice", self.var_show_cell, lambda: self._toggle_section(self.f_geom_body)),
             ("atom_labels", "Atom Labels", self.var_show_labels, None),
             ("reference_axes", "Reference Axes", self.var_show_axes, self._toggle_axes_options),
         )
@@ -897,25 +1128,41 @@ class AtomicBlenderApp(tk.Tk):
         tk.Label(self.f_axes_opts, text="Axes:", bg="#181A20", fg="#94A3B8", font=("Segoe UI", 8, "bold")).pack(
             side=tk.LEFT, padx=(0, 6)
         )
-        ttk.Checkbutton(
+        DarkCheckbutton(
             self.f_axes_opts,
             text="x, y, z Labels",
             variable=self.var_axes_labels,
             command=self._on_axes_option_changed,
+            bg="#181A20",
         ).pack(side=tk.LEFT, padx=(0, 8))
-        ttk.Checkbutton(
+        DarkCheckbutton(
             self.f_axes_opts,
             text="Fix (Default)",
             variable=self.var_axes_fixed,
             command=self._on_axes_fix_toggled,
+            bg="#181A20",
         ).pack(side=tk.LEFT)
         self._axes_opts_visible = True
 
-    def _toggle_section(self, frame: ttk.LabelFrame) -> None:
+    def _sync_type_map_visibility(self) -> None:
+        if not hasattr(self, "lbl_type_map"):
+            return
+        in_path = self.var_input.get().strip().lower()
+        show_tm = in_path.endswith((".data", ".lmp")) or bool(self.var_type_map.get().strip())
+        if show_tm:
+            self.lbl_type_map.grid(row=2, column=0, sticky=tk.W, pady=2)
+            self.entry_type_map.grid(row=2, column=1, sticky=tk.EW, padx=4, pady=2)
+            self.btn_inspect_tm.grid(row=2, column=2, pady=2)
+        else:
+            self.lbl_type_map.grid_remove()
+            self.entry_type_map.grid_remove()
+            self.btn_inspect_tm.grid_remove()
+
+    def _toggle_section(self, frame: ttk.Frame) -> None:
         if frame.winfo_manager():
             frame.pack_forget()
         else:
-            frame.pack(fill=tk.X, pady=(0, 6))
+            frame.pack(fill=tk.X)
 
     def _toggle_axes_options(self) -> None:
         if self._axes_opts_visible:
@@ -927,17 +1174,13 @@ class AtomicBlenderApp(tk.Tk):
 
     def _draw_rounded_checkbox(self, canvas: tk.Canvas, checked: bool) -> None:
         canvas.delete("all")
-        fill = "#0F6B75" if checked else "#14161A"
+        fill = "#0D9488" if checked else "#14161A"
         outline = "#14B8A6" if checked else "#64748B"
-        x0, y0, x1, y1, r = 2, 2, 19, 19, 4
-        pts = [
-            x0 + r, y0, x1 - r, y0, x1, y0, x1, y0 + r,
-            x1, y1 - r, x1, y1, x1 - r, y1, x0 + r, y1,
-            x0, y1, x0, y1 - r, x0, y0 + r, x0, y0,
-        ]
-        canvas.create_polygon(pts, smooth=True, fill=fill, outline=outline, width=1.4)
+        canvas.create_rectangle(3, 3, 18, 18, fill=fill, outline=outline, width=1.4)
         if checked:
-            canvas.create_line(6, 11, 9.5, 14.5, 15.5, 7, fill="#F8FAFC", width=2.0, capstyle=tk.ROUND, joinstyle=tk.ROUND)
+            canvas.create_line(
+                6, 11, 9.5, 14.5, 15, 7, fill="#FFFFFF", width=2.0, capstyle=tk.ROUND, joinstyle=tk.ROUND
+            )
 
     def _refresh_display_checks(self) -> None:
         for canvas, var in self._display_checks.values():
@@ -1017,15 +1260,15 @@ class AtomicBlenderApp(tk.Tk):
         f_prev = ttk.LabelFrame(v_pane, text="Viewport & Render Preview", padding=4)
         tb = ttk.Frame(f_prev)
         tb.pack(fill=tk.X, pady=(0, 4))
-        ttk.Radiobutton(
+        DarkRadiobutton(
             tb, text="3D Interactive", variable=self.var_canvas_mode, value="3d", command=self._redraw_canvas
         ).pack(side=tk.LEFT)
-        ttk.Radiobutton(
+        DarkRadiobutton(
             tb, text="Rendered PNG", variable=self.var_canvas_mode, value="png", command=self._redraw_canvas
         ).pack(side=tk.LEFT, padx=(8, 12))
         ttk.Button(tb, text="Reset / Fit View", command=self._on_reset_view).pack(side=tk.LEFT, padx=(0, 4))
         ttk.Button(tb, text="Save view.json...", command=self._on_save_view_json).pack(side=tk.LEFT, padx=(0, 8))
-        ttk.Checkbutton(
+        DarkCheckbutton(
             tb, text="Dark Backdrop", variable=self.var_dark_backdrop, command=self._on_backdrop_toggled
         ).pack(side=tk.LEFT)
         ttk.Label(
@@ -1159,13 +1402,15 @@ class AtomicBlenderApp(tk.Tk):
                     return
                 if p.suffix.lower() == ".json":
                     neutral = json.loads(p.read_text(encoding="utf-8"))
-                    if rep != (1, 1, 1) and neutral.get("has_cell", False):
+                    eff_rep = rep if neutral.get("has_cell", False) else (1, 1, 1)
+                    if eff_rep != (1, 1, 1):
                         atoms = read_structure(p, type_map=type_map.strip() or None)
-                        neutral = atoms_to_neutral_dict(atoms, source=str(p), replicate=rep, wrap=wrap)
+                        neutral = atoms_to_neutral_dict(atoms, source=str(p), replicate=eff_rep, wrap=wrap)
                 else:
                     atoms = read_structure(p, type_map=type_map.strip() or None)
-                    neutral = atoms_to_neutral_dict(atoms, source=str(p), replicate=rep, wrap=wrap)
-                summary = inspect_structure_summary(path, type_map=type_map, replicate=rep)
+                    eff_rep = rep if atoms.cell.rank == 3 else (1, 1, 1)
+                    neutral = atoms_to_neutral_dict(atoms, source=str(p), replicate=eff_rep, wrap=wrap)
+                summary = inspect_structure_summary(path, type_map=type_map, replicate=eff_rep)
                 self._queue.put(("structure", (summary, neutral)))
             except Exception as exc:
                 self._queue.put(("inspect", f"Inspect error: {exc}"))
@@ -1221,6 +1466,9 @@ class AtomicBlenderApp(tk.Tk):
             self.var_blender.set(path)
 
     def _collect_config(self) -> GuiRenderConfig:
+        rep = (int(self.var_rep_x.get()), int(self.var_rep_y.get()), int(self.var_rep_z.get()))
+        if self._structure_cache is not None and not self._structure_cache.get("has_cell", False):
+            rep = (1, 1, 1)
         return GuiRenderConfig(
             input_path=self.var_input.get(),
             output_path=self.var_output.get(),
@@ -1230,7 +1478,7 @@ class AtomicBlenderApp(tk.Tk):
             view_file=self.var_view_file.get(),
             fit_view=bool(self.var_fit_view.get()),
             type_map=self.var_type_map.get(),
-            replicate=(int(self.var_rep_x.get()), int(self.var_rep_y.get()), int(self.var_rep_z.get())),
+            replicate=rep,
             wrap=bool(self.var_wrap.get()),
             crop_z_mode=self.var_crop_z_mode.get(),
             crop_z_custom=self.var_crop_z_custom.get(),
@@ -1480,8 +1728,8 @@ class AtomicBlenderApp(tk.Tk):
 
         style_path = resolve_style_path(self.var_style.get().strip() or "default")
         style_mtime = style_path.stat().st_mtime if style_path.is_file() else 0.0
-        prev_w, prev_h = compute_preview_resolution(int(self.var_res_w.get()), int(self.var_res_h.get()), max_side=560)
-        prev_samples = min(10, max(4, int(self.var_samples.get())))
+        prev_w, prev_h = compute_preview_resolution(int(self.var_res_w.get()), int(self.var_res_h.get()), max_side=400)
+        prev_samples = min(4, max(2, int(self.var_samples.get())))
 
         crop_mode = self.var_crop_z_mode.get()
         if crop_mode == "auto":
@@ -1678,7 +1926,7 @@ class AtomicBlenderApp(tk.Tk):
     def _schedule_hq_redraw(self) -> None:
         if self._hq_after_id is not None:
             self.after_cancel(self._hq_after_id)
-        self._hq_after_id = self.after(220, self._run_hq_redraw)
+        self._hq_after_id = self.after(300, self._run_hq_redraw)
 
     def _run_hq_redraw(self) -> None:
         self._hq_after_id = None

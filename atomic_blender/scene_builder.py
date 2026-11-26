@@ -916,6 +916,12 @@ def run_preview_server() -> None:
             style = json.loads(Path(cmd["style"]).read_text(encoding="utf-8"))
             if cmd.get("samples") is not None:
                 style.setdefault("render", {})["samples"] = int(cmd["samples"])
+            # Lightweight mesh counts for fast low-memory interactive preview renders
+            style.setdefault("atom_mesh", {})
+            style["atom_mesh"]["segments"] = 16
+            style["atom_mesh"]["ring_count"] = 8
+            style.setdefault("bonds", {})["segments"] = 8
+            style.setdefault("cell", {})["segments"] = 8
             res = tuple(int(x) for x in cmd["resolution"])
             view_arg = _resolve_view_arg(cmd["view"])
 
