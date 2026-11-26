@@ -293,18 +293,18 @@ def render_reference_axes_overlay(
     cx = u * tw
     cy = v * th
 
-    arm_len = float(arm_px) if arm_px is not None else max(24.0, min(58.0, min(tw, th) * 0.068))
+    arm_len = float(arm_px) if arm_px is not None else max(22.0, min(46.0, min(tw, th) * 0.060))
     if not _HAS_PIL:
         return cx, cy, max(34.0, arm_len * 1.15)
 
     ss = 1
-    box_half = int(math.ceil(arm_len * 1.55))
+    box_half = int(math.ceil(arm_len * 1.48))
     size_ss = box_half * 2 * ss
     badge = Image.new("RGBA", (size_ss, size_ss), (0, 0, 0, 0))
     draw = ImageDraw.Draw(badge, "RGBA")
     oc = box_half * ss
 
-    disc_r = arm_len * 1.30 * ss
+    disc_r = arm_len * 1.22 * ss
     if dark_backdrop:
         disc_fill = (18, 22, 28, 155)
         disc_edge = (94, 108, 128, 165)
@@ -875,7 +875,7 @@ class ViewportScene:
         border_col = (71, 85, 105, 255) if self.dark_backdrop else (148, 163, 184, 255)
 
         img = Image.new("RGBA", (rw, rh), outer_bg)
-        pad = min(24.0 * ss, min(rw, rh) * 0.2)
+        pad = min(14.0 * ss, min(rw, rh) * 0.12)
         scale = max(1e-4, min((rw - pad) / max(1, res_w), (rh - pad) / max(1, res_h)))
         fw = res_w * scale
         fh = res_h * scale
@@ -1022,7 +1022,7 @@ class ViewportScene:
                         )
                     if self.show_labels and diam_px >= 10:
                         lbl = atom_label(idx, self.symbols[idx])
-                        px_font = max(9, min(18, int(round(diam_px * (0.34 if len(lbl) >= 3 else 0.40)))))
+                        px_font = max(9, min(15, int(round(diam_px * (0.31 if len(lbl) >= 3 else 0.36)))))
                         lfont = _load_overlay_font(px_font)
                         if lfont is not None:
                             bbox = draw.textbbox((0, 0), lbl, font=lfont)
@@ -1127,7 +1127,7 @@ def render_atom_labels_and_selection_overlay(
             )
         if draw_labels and diam_px >= 10:
             lbl = atom_label(idx, vp.symbols[idx])
-            px_font = max(9, min(18, int(round(diam_px * (0.34 if len(lbl) >= 3 else 0.40)))))
+            px_font = max(9, min(15, int(round(diam_px * (0.31 if len(lbl) >= 3 else 0.36)))))
             lfont = _load_overlay_font(px_font)
             if lfont is not None:
                 bbox = draw.textbbox((0, 0), lbl, font=lfont)
