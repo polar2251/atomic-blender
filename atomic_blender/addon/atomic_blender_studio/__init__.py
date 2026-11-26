@@ -58,6 +58,22 @@ def _import_scene_builder():
     return scene_builder
 
 
+def _import_elements():
+    if (_ADDON_DIR / "elements.py").is_file():
+        from . import elements  # type: ignore
+        return elements
+    cfg = _load_addon_config()
+    repo_root = cfg.get("repo_root")
+    if repo_root and repo_root not in sys.path:
+        sys.path.insert(0, repo_root)
+    repo_candidate = _ADDON_DIR.parent.parent
+    if (repo_candidate / "atomic_blender" / "elements.py").is_file():
+        if str(repo_candidate) not in sys.path:
+            sys.path.insert(0, str(repo_candidate))
+    from atomic_blender import elements
+    return elements
+
+
 def _resolve_style_file(style_preset: str, custom_path: str) -> Path | None:
     if style_preset == "CUSTOM":
         p = Path(bpy.path.abspath(custom_path)) if custom_path else None
@@ -651,7 +667,40 @@ class ATOMIC_STUDIO_PT_panel(Panel):
         box_ren.operator("atomic_studio.render", icon="RENDER_STILL")
 
 
-_CLASSES = (
+class ATOMIC_STUDIO_OT_drop_file(Operator):
+    bl_idname = "atomic_studio.drop_file"
+    bl_label = "Drop Atomic Structure / View / Style"
+    bl_description = "Load a structure, view.json, or style.json dropped into the 3D Viewport"
+    bl_options = {"REGISTER", "UNDO"}
+
+    filepath: StringProperty(subtype="FILE_PATH", options={"SKIP_SAVE"})
+
+    def execute(self, context):
+        path = Path(bpy.path.abspath(self.filepath))
+        if not path.is_file():
+            self.report({"ERROR"}, f"Dropped file not found: {path}")
+            return {"CANCELLED"}
+
+        elems = _import_elements()
+        kind = elems.classify_dropped_file(path)
+        props = context.scene.atomic_studio
+
+        if kind == "view":
+            props.view_json_path = str(path)
+            return bpy.ops.atomic_studio.load_view()
+        if kind == "style":
+            props.style_preset = "CUSTOM"
+            props.style_path = str(path)
+            if context.scene.get("atomic_studio_structure"):
+                return bpy.ops.atomic_studio.update_style()
+            self.report({"INFO"}, f"Selected custom style: {path.name}")
+            return {"FINISHED"}
+
+        props.structure_path = str(path)
+        return bpy.ops.atomic_studio.load_structure()
+
+
+_CLASSES: tuple[type, ...] = (
     AtomicStudioProperties,
     ATOMIC_STUDIO_OT_load_structure,
     ATOMIC_STUDIO_OT_update_style,
@@ -662,8 +711,23 @@ _CLASSES = (
     ATOMIC_STUDIO_OT_save_view,
     ATOMIC_STUDIO_OT_load_view,
     ATOMIC_STUDIO_OT_render,
+    ATOMIC_STUDIO_OT_drop_file,
     ATOMIC_STUDIO_PT_panel,
 )
+
+if hasattr(bpy.types, "FileHandler"):
+
+    class ATOMIC_STUDIO_FH_drop(bpy.types.FileHandler):
+        bl_idname = "ATOMIC_STUDIO_FH_drop"
+        bl_label = "Atomic Blender Studio Drop Handler"
+        bl_import_operator = "atomic_studio.drop_file"
+        bl_file_extensions = ".cif;.vasp;.poscar;.contcar;.xyz;.extxyz;.data;.lmp;.json"
+
+        @classmethod
+        def poll_drop(cls, context):
+            return bool(context.area and context.area.type == "VIEW_3D")
+
+    _CLASSES = _CLASSES + (ATOMIC_STUDIO_FH_drop,)
 
 
 def register():

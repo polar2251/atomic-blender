@@ -6,6 +6,8 @@ Python and Blender's embedded Python interpreter.
 
 from __future__ import annotations
 
+import json
+from pathlib import Path
 from typing import Any
 
 VIEW_PRESETS: tuple[str, ...] = ("iso", "side-oblique", "a", "b", "c")
@@ -107,3 +109,18 @@ def resolve_element_radius(symbol: str, style: dict[str, Any]) -> float:
         scale = float(fb.get("covalent_scale", 0.75))
         return max(0.25, cov * scale)
     return float(fb.get("default", 0.80))
+
+
+def classify_dropped_file(path: Path) -> str:
+    """Classify a dropped file as ``'view'``, ``'style'``, or ``'structure'``."""
+    if path.suffix.lower() == ".json":
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except Exception:
+            return "structure"
+        if isinstance(data, dict):
+            if "rotation_quaternion" in data or "ortho_scale" in data:
+                return "view"
+            if "elements" in data and any(k in data for k in ("material", "lighting", "render")):
+                return "style"
+    return "structure"

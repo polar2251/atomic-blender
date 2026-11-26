@@ -20,7 +20,12 @@ from atomic_blender.cli import (
     resolve_style_path,
 )
 from atomic_blender.convert import atoms_to_neutral_dict, convert_file, parse_type_map
-from atomic_blender.elements import METAL_ELEMENTS, resolve_element_color, resolve_element_radius
+from atomic_blender.elements import (
+    METAL_ELEMENTS,
+    classify_dropped_file,
+    resolve_element_color,
+    resolve_element_radius,
+)
 from atomic_blender.gui import (
     GuiRenderConfig,
     build_render_cli_args,
@@ -211,6 +216,36 @@ class TestAtomicBlender(unittest.TestCase):
             self.assertEqual(parsed.bond_color, "bicolor")
             self.assertAlmostEqual(parsed.radius_scale, 0.85)
             self.assertTrue(parsed.no_cell)
+
+    def test_classify_dropped_file_and_gui_drop_handler(self) -> None:
+        from atomic_blender.gui import AtomicBlenderApp
+
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            cif = tmp_path / "bulk.cif"
+            cif.write_text("data_test\n", encoding="utf-8")
+            struct_json = tmp_path / "struct.json"
+            struct_json.write_text(json.dumps({"symbols": ["Cu"], "positions": [[0, 0, 0]]}), encoding="utf-8")
+            view_json = tmp_path / "cam_view.json"
+            view_json.write_text(json.dumps({"rotation_quaternion": [1, 0, 0, 0], "ortho_scale": 10.0}), encoding="utf-8")
+            style_json = tmp_path / "my_style.json"
+            style_json.write_text(json.dumps({"elements": {}, "material": {}}), encoding="utf-8")
+
+            self.assertEqual(classify_dropped_file(cif), "structure")
+            self.assertEqual(classify_dropped_file(struct_json), "structure")
+            self.assertEqual(classify_dropped_file(view_json), "view")
+            self.assertEqual(classify_dropped_file(style_json), "style")
+
+            app = AtomicBlenderApp()
+            app.withdraw()
+            try:
+                app.handle_dropped_files([str(cif), str(view_json), str(style_json)])
+                self.assertEqual(app.var_input.get(), str(cif))
+                self.assertEqual(app.var_view_mode.get(), "file")
+                self.assertEqual(app.var_view_file.get(), str(view_json))
+                self.assertEqual(app.var_style.get(), str(style_json))
+            finally:
+                app.destroy()
 
 
 if __name__ == "__main__":
