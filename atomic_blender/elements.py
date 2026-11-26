@@ -8,6 +8,8 @@ from __future__ import annotations
 
 from typing import Any
 
+VIEW_PRESETS: tuple[str, ...] = ("iso", "side-oblique", "a", "b", "c")
+
 # Jmol CPK color palette (Z = 1..109) matching ase.data.colors.jmol_colors
 JMOL_COLORS: dict[str, str] = {
     "H": "#FFFFFF", "He": "#D9FFFF", "Li": "#CC80FF", "Be": "#C2FF00",

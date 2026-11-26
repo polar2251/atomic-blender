@@ -20,6 +20,7 @@ from mathutils import Matrix, Quaternion, Vector
 try:
     from atomic_blender.elements import (
         COVALENT_RADII,
+        VIEW_PRESETS,
         resolve_element_color,
         resolve_element_radius,
     )
@@ -27,6 +28,7 @@ except ImportError:
     if __package__:
         from .elements import (  # type: ignore[no-redef]
             COVALENT_RADII,
+            VIEW_PRESETS,
             resolve_element_color,
             resolve_element_radius,
         )
@@ -36,12 +38,12 @@ except ImportError:
             sys.path.insert(0, _here)
         from elements import (  # type: ignore[import-not-found,no-redef]
             COVALENT_RADII,
+            VIEW_PRESETS,
             resolve_element_color,
             resolve_element_radius,
         )
 
 COLLECTION_NAME = "AtomicBlender"
-VIEW_PRESETS = ("iso", "side-oblique", "a", "b", "c")
 
 
 def srgb_hex_to_linear_rgba(hex_color: str) -> tuple[float, float, float, float]:

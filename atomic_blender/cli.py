@@ -300,6 +300,13 @@ def cmd_install_addon(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_gui(args: argparse.Namespace) -> int:
+    """Launch the standalone desktop GUI client."""
+    from atomic_blender.gui import launch_gui
+
+    return launch_gui(initial_input=str(args.input) if args.input else None)
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="atomic-blender", description="Publication atomic renderer CLI")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -344,6 +351,10 @@ def build_parser() -> argparse.ArgumentParser:
     p_inst.add_argument("--zip", type=Path, default=None, help="Export a standalone addon .zip instead of installing")
     p_inst.add_argument("--no-enable", action="store_true", help="Copy files without enabling in Blender preferences")
     p_inst.set_defaults(func=cmd_install_addon)
+
+    p_gui = sub.add_parser("gui", help="Launch the standalone desktop GUI client")
+    p_gui.add_argument("input", nargs="?", type=Path, default=None, help="Optional structure file to prefill")
+    p_gui.set_defaults(func=cmd_gui)
 
     return parser
 

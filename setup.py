@@ -16,6 +16,7 @@ setup(
     entry_points={
         "console_scripts": [
             "atomic-blender=atomic_blender.cli:main",
+            "atomic-blender-gui=atomic_blender.gui:main",
         ]
     },
 )
