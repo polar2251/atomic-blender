@@ -374,8 +374,8 @@ class TestAtomicBlender(unittest.TestCase):
 
                 self.assertEqual(len(recorder.requests), 1)
                 req1 = recorder.requests[0]
-                self.assertEqual(req1["resolution"], [400, 343])
-                self.assertEqual(req1["samples"], 4)
+                self.assertEqual(req1["resolution"], [640, 549])
+                self.assertEqual(req1["samples"], 8)
                 seq1 = int(req1["seq"])  # type: ignore[arg-type]
 
                 # Matching preview_done flips canvas cleanly to rendered PNG

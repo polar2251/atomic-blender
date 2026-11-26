@@ -43,7 +43,7 @@ from atomic_blender.viewport3d import (
 )
 
 try:
-    from PIL import Image, ImageTk  # type: ignore
+    from PIL import Image, ImageFilter, ImageTk  # type: ignore
 
     _HAS_PIL = True
 except Exception:
@@ -996,8 +996,8 @@ class AtomicBlenderApp(tk.Tk):
         _enable_hidpi()
         super().__init__()
         self.title("Atomic Blender Studio — Desktop Client")
-        self.geometry("1280x840")
-        self.minsize(1040, 680)
+        self.geometry("1340x860")
+        self.minsize(1100, 680)
 
         self._configure_theme()
 
@@ -1278,7 +1278,7 @@ class AtomicBlenderApp(tk.Tk):
         left_body = ttk.Frame(left_host, padding=0, style="Outer.TFrame")
         left_body.pack(side=tk.TOP, fill=tk.BOTH, expand=True)
 
-        left_canvas = tk.Canvas(left_body, bg="#0F1115", highlightthickness=0, width=378)
+        left_canvas = tk.Canvas(left_body, bg="#0F1115", highlightthickness=0, width=436)
         left_scroll = ttk.Scrollbar(left_body, orient=tk.VERTICAL, command=left_canvas.yview)
         left = ttk.Frame(left_canvas, padding=6, style="Outer.TFrame")
         left_win = left_canvas.create_window((0, 0), window=left, anchor=tk.NW)
@@ -1701,7 +1701,7 @@ class AtomicBlenderApp(tk.Tk):
             textvariable=self.var_measurement,
             foreground="#2DD4BF",
             font=("Segoe UI", 9, "bold"),
-            wraplength=330,
+            wraplength=396,
         ).pack(fill=tk.X, pady=(6, 0))
 
         f_op = ttk.LabelFrame(parent, text="APPEARANCE", padding=(10, 8))
@@ -3619,8 +3619,8 @@ class AtomicBlenderApp(tk.Tk):
             merged_style = self._resolve_style_dict()
             eff_style_path = Path(self._preview_tmp_dir.name) / "preview_style.json"
             eff_style_path.write_text(json.dumps(merged_style, indent=2), encoding="utf-8")
-        prev_w, prev_h = compute_preview_resolution(int(self.var_res_w.get()), int(self.var_res_h.get()), max_side=400)
-        prev_samples = min(4, max(2, int(self.var_samples.get())))
+        prev_w, prev_h = compute_preview_resolution(int(self.var_res_w.get()), int(self.var_res_h.get()), max_side=640)
+        prev_samples = min(8, max(4, int(self.var_samples.get())))
 
         crop_mode = self.var_crop_z_mode.get()
         if crop_mode == "auto":
@@ -4018,6 +4018,7 @@ class AtomicBlenderApp(tk.Tk):
             nw = max(1, int(iw * scale))
             nh = max(1, int(ih * scale))
             resized = self._pil_image.resize((nw, nh), Image.Resampling.LANCZOS).copy()
+            resized = resized.filter(ImageFilter.UnsharpMask(radius=0.9, percent=45, threshold=2))
             res_w = max(16, int(self.var_res_w.get()))
             res_h = max(16, int(self.var_res_h.get()))
             if self._vp_scene is not None and (self.var_show_labels.get() or self._selected_atoms):

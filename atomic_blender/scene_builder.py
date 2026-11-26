@@ -987,6 +987,28 @@ def _resolve_view_arg(view_val: str | dict[str, Any]) -> str | dict[str, Any]:
     raise FileNotFoundError(f"Unknown preset or missing view file: {view_str}")
 
 
+def _apply_fast_preview_cycles_settings(scene: bpy.types.Scene) -> None:
+    """Tune Cycles bounce caps, adaptive sampling, and AA filter for fast crisp previews."""
+    if scene.render.engine != "CYCLES":
+        return
+    c = scene.cycles
+    c.max_bounces = 2
+    c.diffuse_bounces = 1
+    c.glossy_bounces = 1
+    c.transmission_bounces = 2
+    c.transparent_max_bounces = 4
+    c.caustics_reflective = False
+    c.caustics_refractive = False
+    c.use_adaptive_sampling = True
+    c.adaptive_threshold = 0.05
+    c.filter_width = 1.1
+    if hasattr(c, "denoising_prefilter"):
+        try:
+            c.denoising_prefilter = "FAST"
+        except Exception:
+            pass
+
+
 def run_preview_server() -> None:
     """Keep Blender warm and render preview PNGs on demand from JSON-line commands on stdin."""
     current_scene_key: str | None = None
@@ -1012,12 +1034,12 @@ def run_preview_server() -> None:
             style = json.loads(Path(cmd["style"]).read_text(encoding="utf-8"))
             if cmd.get("samples") is not None:
                 style.setdefault("render", {})["samples"] = int(cmd["samples"])
-            # Lightweight mesh counts for fast low-memory interactive preview renders
+            # Smooth instanced prototype meshes with minimal overhead
             style.setdefault("atom_mesh", {})
-            style["atom_mesh"]["segments"] = 16
-            style["atom_mesh"]["ring_count"] = 8
-            style.setdefault("bonds", {})["segments"] = 8
-            style.setdefault("cell", {})["segments"] = 8
+            style["atom_mesh"]["segments"] = 24
+            style["atom_mesh"]["ring_count"] = 14
+            style.setdefault("bonds", {})["segments"] = 12
+            style.setdefault("cell", {})["segments"] = 10
             res = tuple(int(x) for x in cmd["resolution"])
             view_arg = _resolve_view_arg(cmd["view"])
 
@@ -1036,6 +1058,7 @@ def run_preview_server() -> None:
                     bond_color_override=cmd.get("bond_color"),
                     show_cell_override=False if cmd.get("no_cell", False) else None,
                 )
+                _apply_fast_preview_cycles_settings(bpy.context.scene)
                 current_scene_key = scene_key
                 cached_style = style
             else:
@@ -1045,6 +1068,7 @@ def run_preview_server() -> None:
                 scene.render.resolution_percentage = 100
                 if cmd.get("samples") is not None and scene.render.engine == "CYCLES":
                     scene.cycles.samples = int(cmd["samples"])
+                _apply_fast_preview_cycles_settings(scene)
                 apply_camera_view(
                     scene=scene,
                     cam_obj=scene.camera,
