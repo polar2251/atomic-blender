@@ -73,9 +73,10 @@ atomic-blender gui
 atomic-blender-gui [optional_structure_file]
 ```
 
-Inside the desktop client you can:
+Inside the desktop client (styled in a modern dark studio UI) you can:
+- **Avogadro-Style Display Types**: Toggle **Ball and Stick**, **Licorice**, **Van der Waals**, **Crystal Lattice**, **Atom Labels**, and **Reference Axes** (`x, y, z` axis triad with **x, y, z Labels** toggle and **Fix (Default)** reset; click and drag the axes gizmo directly on the viewport to reposition it anywhere).
 - **Drag & drop** structure files (`POSCAR`, `.cif`, `.xyz`, `.data`, `.json`), `view.json`, or custom `style.json` files directly onto the window (or click **Browse...**), triggering an instant **fast low-resolution Blender Cycles preview** alongside the live structure inspector banner (formula, atom count, lattice parameters, PBC) and one-click **Smart Slab Preset** / **Cube / Bulk Preset**.
-- **Hybrid 3D Drag + Auto Blender Preview**: Rotate (`left-drag`), pan (`right-drag` or `Shift + left-drag`), and zoom (`scroll`) smoothly in the real-time 3D viewport (showing shaded spheres, thicker bonds, and subtle outlines on Hydrogen atoms), then automatically re-render a fast Cycles preview of that exact camera view as soon as interaction pauses. Click **Save view.json...** to export the exact camera state or **Reset / Fit View** to re-frame.
+- **Hybrid 3D Drag + Auto Blender Preview**: Rotate (`left-drag`), pan (`right-drag` or `Shift + left-drag`), and zoom (`scroll`) smoothly in the real-time 3D viewport (showing shaded spheres, thicker bonds, subtle outlines on Hydrogen atoms, and a **Dark Backdrop** toggle), then automatically re-render a fast Cycles preview of that exact camera view as soon as interaction pauses. Click **Save view.json...** to export the exact camera state or **Reset / Fit View** to re-frame.
 - Choose a style (`studio`, `matte`, `ball_and_stick`, `default`, or a custom `.json`), tune **Atom Scale** (`0.4`–`1.6`), toggle **Show Cell**, set **Bond Color** (`bicolor` or `single`), switch view presets (`Iso`, `Side`, `a`, `b`, `c`) or a saved `view.json` (`--fit-view`), and configure supercell replication, `wrap`, `--crop-z`, resolution, and Cycles samples.
 - Click **Render High-Res Output** to raytrace the exact current camera angle and zoom at your full target resolution and Cycles sample count to the output PNG.
 - Click **Open in Blender** to generate a `.blend` scene with the active settings and launch the Blender GUI.
