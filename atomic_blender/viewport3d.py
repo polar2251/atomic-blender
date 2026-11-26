@@ -775,6 +775,11 @@ class ViewportScene:
     def orbit(self, d_yaw_rad: float, d_pitch_rad: float) -> None:
         self.quat = orbit_quat(self.quat, d_yaw_rad, d_pitch_rad)
 
+    def roll(self, d_roll_rad: float) -> None:
+        _, _, back = quat_to_axes(self.quat)
+        q_roll = quat_from_axis_angle(back, -d_roll_rad)
+        self.quat = quat_mul(q_roll, self.quat)
+
     def pan(self, dx_angstrom: float, dy_angstrom: float) -> None:
         right, up, _ = quat_to_axes(self.quat)
         self.target = self.target - right * dx_angstrom + up * dy_angstrom
