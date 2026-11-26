@@ -1,0 +1,109 @@
+{
+  "name": "default",
+  "description": "Default publication style (Principled BSDF, orthographic, Cycles 64 samples, transparent RGBA PNG).",
+  "elements": {
+    "colors": {
+      "Al": "#A9C8E6",
+      "C": "#3F3F46",
+      "H": "#F5F5F5",
+      "O": "#D7382E",
+      "Cr": "#6E7FA8",
+      "Mn": "#9B5FB5",
+      "Fe": "#D9A441",
+      "Co": "#3C8DBC",
+      "Ni": "#4DAF7C"
+    },
+    "color_fallback": "jmol",
+    "radii": {
+      "H": 0.30,
+      "C": 0.55,
+      "O": 0.55,
+      "Al": 1.10,
+      "Cr": 1.05,
+      "Mn": 1.05,
+      "Fe": 1.05,
+      "Co": 1.05,
+      "Ni": 1.05
+    },
+    "radius_fallback": {
+      "transition_metal": 1.05,
+      "covalent_scale": 0.75,
+      "default": 0.80
+    }
+  },
+  "material": {
+    "roughness": 0.35,
+    "specular": 0.4
+  },
+  "atom_mesh": {
+    "segments": 24,
+    "ring_count": 12,
+    "smooth": true
+  },
+  "bonds": {
+    "enabled": true,
+    "mode": "table",
+    "color": "#9CA3AF",
+    "radius": 0.12,
+    "roughness": 0.45,
+    "specular": 0.25,
+    "segments": 14,
+    "smooth": true,
+    "skip_pbc": true,
+    "covalent_tolerance": 1.2,
+    "cutoffs": {
+      "C-H": 1.25,
+      "O-H": 1.20,
+      "C-C": 1.75,
+      "C-O": 1.50,
+      "N-H": 1.20,
+      "C-N": 1.60
+    }
+  },
+  "cell": {
+    "enabled": true,
+    "color": "#111111",
+    "radius": 0.06,
+    "roughness": 0.5,
+    "specular": 0.1,
+    "segments": 14,
+    "smooth": true
+  },
+  "camera": {
+    "type": "ORTHO",
+    "distance": 200.0,
+    "clip_start": 1.0,
+    "clip_end": 1000.0,
+    "margin": 1.08,
+    "default_preset": "iso",
+    "default_resolution": [1400, 1400]
+  },
+  "lighting": {
+    "sun": {
+      "energy": 3.0,
+      "rotation_deg": [35.0, -20.0, 30.0]
+    },
+    "fill": {
+      "type": "AREA",
+      "energy": 4000.0,
+      "size": 40.0,
+      "azimuth_deg": -40.0,
+      "elevation_deg": 25.0,
+      "distance": 45.0
+    }
+  },
+  "world": {
+    "color": [0.85, 0.85, 0.85, 1.0],
+    "strength": 0.6
+  },
+  "render": {
+    "engine": "CYCLES",
+    "device_priority": ["OPTIX", "CUDA", "CPU"],
+    "samples": 64,
+    "use_denoising": true,
+    "film_transparent": true,
+    "file_format": "PNG",
+    "color_mode": "RGBA",
+    "color_depth": "8"
+  }
+}

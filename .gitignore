@@ -1,0 +1,37 @@
+# Rendered outputs and Blender files
+*.png
+*.jpg
+*.jpeg
+*.exr
+*.blend
+*.blend1
+*.blend2
+!examples/renders/*.png
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.pytest_cache/
+dist/
+build/
+
+# Large structure files & trajectories
+*.traj
+*.dump
+*.lammpstrj
+*.cube
+*.xsf
+*.data
+!examples/*.cif
+!examples/*.xyz
+!examples/*.vasp
+!examples/*.json
+
+# Environment & OS
+.env
+.venv/
+venv/
+.DS_Store
+Thumbs.db

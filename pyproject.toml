@@ -1,0 +1,20 @@
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "atomic-blender"
+version = "0.1.0"
+description = "Reusable publication-quality atomic structure renderer using ASE and Blender Cycles"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "ase>=3.22",
+    "numpy>=1.22",
+]
+
+[project.scripts]
+atomic-blender = "atomic_blender.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["atomic_blender*"]
