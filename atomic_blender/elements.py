@@ -72,6 +72,17 @@ TRANSITION_METALS: frozenset[str] = frozenset({
     "Ac", "Rf", "Db", "Sg", "Bh", "Hs", "Mt",
 })
 
+METAL_ELEMENTS: frozenset[str] = TRANSITION_METALS | frozenset({
+    # Alkali & alkaline earth
+    "Li", "Na", "K", "Rb", "Cs", "Fr",
+    "Be", "Mg", "Ca", "Sr", "Ba", "Ra",
+    # Post-transition metals
+    "Al", "Ga", "In", "Sn", "Tl", "Pb", "Bi", "Po",
+    # Lanthanides & actinides
+    "Ce", "Pr", "Nd", "Pm", "Sm", "Eu", "Gd", "Tb", "Dy", "Ho", "Er", "Tm", "Yb", "Lu",
+    "Th", "Pa", "U", "Np", "Pu", "Am", "Cm", "Bk", "Cf", "Es", "Fm", "Md", "No", "Lr",
+})
+
 
 def resolve_element_color(symbol: str, style: dict[str, Any]) -> str:
     """Return hex RGB color string for an element symbol using style overrides + Jmol fallback."""

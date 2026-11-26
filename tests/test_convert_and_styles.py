@@ -20,8 +20,13 @@ from atomic_blender.cli import (
     resolve_style_path,
 )
 from atomic_blender.convert import atoms_to_neutral_dict, convert_file, parse_type_map
-from atomic_blender.elements import resolve_element_color, resolve_element_radius
-from atomic_blender.gui import GuiRenderConfig, build_render_cli_args, validate_gui_config
+from atomic_blender.elements import METAL_ELEMENTS, resolve_element_color, resolve_element_radius
+from atomic_blender.gui import (
+    GuiRenderConfig,
+    build_render_cli_args,
+    inspect_structure_summary,
+    validate_gui_config,
+)
 
 
 class TestAtomicBlender(unittest.TestCase):
@@ -101,17 +106,25 @@ class TestAtomicBlender(unittest.TestCase):
         self.assertEqual(args.view, "iso")
 
     def test_packaged_styles_and_addon_match_root(self) -> None:
-        pkg_style = package_dir() / "styles" / "default.json"
-        root_style = package_root() / "styles" / "default.json"
-        self.assertTrue(pkg_style.is_file())
-        self.assertTrue(root_style.is_file())
-        self.assertEqual(pkg_style.read_text(encoding="utf-8"), root_style.read_text(encoding="utf-8"))
+        repo_root = Path(__file__).resolve().parent.parent
+        for style_name in ("default.json", "studio.json", "matte.json", "ball_and_stick.json"):
+            pkg_style = package_dir() / "styles" / style_name
+            root_style = repo_root / "styles" / style_name
+            self.assertTrue(pkg_style.is_file(), f"Missing packaged style {style_name}")
+            self.assertTrue(root_style.is_file(), f"Missing root style {style_name}")
+            self.assertEqual(pkg_style.read_text(encoding="utf-8"), root_style.read_text(encoding="utf-8"))
 
         pkg_addon = package_dir() / "addon" / "atomic_blender_studio" / "__init__.py"
-        root_addon = package_root() / "addon" / "atomic_blender_studio" / "__init__.py"
+        root_addon = repo_root / "addon" / "atomic_blender_studio" / "__init__.py"
         self.assertTrue(pkg_addon.is_file())
         self.assertTrue(root_addon.is_file())
         self.assertEqual(pkg_addon.read_text(encoding="utf-8"), root_addon.read_text(encoding="utf-8"))
+
+    def test_metal_classification(self) -> None:
+        for sym in ("Al", "Pt", "Cu", "Fe", "Li", "Mg"):
+            self.assertIn(sym, METAL_ELEMENTS)
+        for sym in ("H", "C", "N", "O", "S", "Cl"):
+            self.assertNotIn(sym, METAL_ELEMENTS)
 
     def test_install_addon_zip_and_dir(self) -> None:
         import zipfile
@@ -167,10 +180,15 @@ class TestAtomicBlender(unittest.TestCase):
                 wrap=False,
                 crop_z_mode="auto",
                 bonds="auto",
+                bond_color="bicolor",
+                radius_scale=0.85,
+                show_cell=False,
                 resolution=(1200, 900),
                 samples=32,
             )
             self.assertEqual(validate_gui_config(cfg), struct_file)
+            summary = inspect_structure_summary(str(struct_file))
+            self.assertIn("1 atoms", summary)
             cli_args = build_render_cli_args(cfg, save_blend=Path(tmp) / "scene.blend")
             self.assertEqual(cli_args[0], "render")
             self.assertIn("--fit-view", cli_args)
@@ -180,13 +198,19 @@ class TestAtomicBlender(unittest.TestCase):
             self.assertIn("--type-map", cli_args)
             self.assertIn("1:Al,2:C", cli_args)
             self.assertIn("--bonds", cli_args)
-            self.assertIn("auto", cli_args)
+            self.assertIn("--bond-color", cli_args)
+            self.assertIn("bicolor", cli_args)
+            self.assertIn("--radius-scale", cli_args)
+            self.assertIn("--no-cell", cli_args)
             self.assertIn("--save-blend", cli_args)
             # Confirm build_parser parses generated CLI args cleanly
             parsed = parser.parse_args(cli_args)
             self.assertEqual(parsed.replicate, [2, 2, 1])
             self.assertEqual(parsed.resolution, [1200, 900])
             self.assertEqual(parsed.samples, 32)
+            self.assertEqual(parsed.bond_color, "bicolor")
+            self.assertAlmostEqual(parsed.radius_scale, 0.85)
+            self.assertTrue(parsed.no_cell)
 
 
 if __name__ == "__main__":

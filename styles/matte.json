@@ -1,0 +1,125 @@
+{
+  "name": "matte",
+  "description": "Soft clay / Goodsell-inspired illustrative style with strong AO contact shading, even ambient lighting, and bicolor bonds.",
+  "elements": {
+    "colors": {
+      "Al": "#A9C8E6",
+      "C": "#4A4A52",
+      "H": "#F5F5F5",
+      "O": "#DF4B3E",
+      "Cr": "#798BB3",
+      "Mn": "#A46EC0",
+      "Fe": "#E0AE4F",
+      "Co": "#4D9AC7",
+      "Ni": "#5CC08C"
+    },
+    "color_fallback": "jmol",
+    "radii": {
+      "H": 0.30,
+      "C": 0.55,
+      "O": 0.55,
+      "Al": 1.10,
+      "Cr": 1.05,
+      "Mn": 1.05,
+      "Fe": 1.05,
+      "Co": 1.05,
+      "Ni": 1.05
+    },
+    "radius_scale": 1.0,
+    "radius_fallback": {
+      "transition_metal": 1.05,
+      "covalent_scale": 0.75,
+      "default": 0.80
+    }
+  },
+  "material": {
+    "roughness": 0.75,
+    "specular": 0.15,
+    "ao_factor": 0.55,
+    "ao_distance": 3.0,
+    "nonmetal": {
+      "metallic": 0.0,
+      "roughness": 0.78,
+      "specular": 0.12,
+      "subsurface_weight": 0.08,
+      "subsurface_scale": 0.10
+    },
+    "metal": {
+      "metallic": 0.10,
+      "roughness": 0.65,
+      "specular": 0.22
+    }
+  },
+  "atom_mesh": {
+    "segments": 32,
+    "ring_count": 16,
+    "smooth": true
+  },
+  "bonds": {
+    "enabled": true,
+    "mode": "table",
+    "color_mode": "bicolor",
+    "color": "#9CA3AF",
+    "radius": 0.14,
+    "roughness": 0.75,
+    "specular": 0.15,
+    "segments": 16,
+    "smooth": true,
+    "skip_pbc": true,
+    "covalent_tolerance": 1.2,
+    "cutoffs": {
+      "C-H": 1.25,
+      "O-H": 1.20,
+      "C-C": 1.75,
+      "C-O": 1.50,
+      "N-H": 1.20,
+      "C-N": 1.60
+    }
+  },
+  "cell": {
+    "enabled": true,
+    "color": "#222222",
+    "radius": 0.055,
+    "roughness": 0.7,
+    "specular": 0.05,
+    "segments": 14,
+    "smooth": true
+  },
+  "camera": {
+    "type": "ORTHO",
+    "distance": 200.0,
+    "clip_start": 1.0,
+    "clip_end": 1000.0,
+    "margin": 1.08,
+    "default_preset": "iso",
+    "default_resolution": [1400, 1400]
+  },
+  "lighting": {
+    "sun": {
+      "energy": 1.8,
+      "rotation_deg": [40.0, -15.0, 25.0]
+    },
+    "fill": {
+      "type": "AREA",
+      "energy": 3500.0,
+      "size": 50.0,
+      "azimuth_deg": -45.0,
+      "elevation_deg": 30.0,
+      "distance": 48.0
+    }
+  },
+  "world": {
+    "color": [0.92, 0.92, 0.92, 1.0],
+    "strength": 0.95
+  },
+  "render": {
+    "engine": "CYCLES",
+    "device_priority": ["OPTIX", "CUDA", "CPU"],
+    "samples": 64,
+    "use_denoising": true,
+    "film_transparent": true,
+    "file_format": "PNG",
+    "color_mode": "RGBA",
+    "color_depth": "8"
+  }
+}

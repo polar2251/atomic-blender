@@ -185,6 +185,12 @@ def cmd_render(args: argparse.Namespace) -> int:
             blender_args.extend(["--samples", str(args.samples)])
         if args.bonds is not None:
             blender_args.extend(["--bonds", args.bonds])
+        if args.bond_color is not None:
+            blender_args.extend(["--bond-color", args.bond_color])
+        if args.radius_scale != 1.0:
+            blender_args.extend(["--radius-scale", str(args.radius_scale)])
+        if args.no_cell:
+            blender_args.append("--no-cell")
         if args.fit_view:
             blender_args.append("--fit-view")
 
@@ -322,6 +328,9 @@ def build_parser() -> argparse.ArgumentParser:
     p_ren.add_argument("--resolution", nargs=2, type=int, default=None, metavar=("W", "H"))
     p_ren.add_argument("--samples", type=int, default=None, help="Override Cycles samples")
     p_ren.add_argument("--bonds", choices=["table", "auto", "none"], default=None)
+    p_ren.add_argument("--bond-color", choices=["style", "single", "bicolor"], default=None)
+    p_ren.add_argument("--radius-scale", type=float, default=1.0, help="Scale factor for atom sphere radii")
+    p_ren.add_argument("--no-cell", action="store_true", help="Hide periodic cell wireframe")
     p_ren.add_argument("--fit-view", action="store_true", help="Re-fit view.json camera orientation to structure")
     p_ren.add_argument("--format", default=None, help="Explicit ASE format override")
     p_ren.add_argument("--type-map", default=None, help="LAMMPS type map, e.g. '1:Al,2:C,3:H'")

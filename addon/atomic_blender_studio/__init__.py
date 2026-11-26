@@ -9,14 +9,15 @@ from __future__ import annotations
 bl_info = {
     "name": "Atomic Blender Studio (Publication Renderer)",
     "author": "polar2251",
-    "version": (0, 1, 0),
+    "version": (0, 2, 0),
     "blender": (4, 0, 0),
     "location": "View3D > Sidebar (N) > Atomic Studio",
-    "description": "Load styled atomic structures, frame interactively, save/reuse view.json, and render.",
+    "description": "Load styled atomic structures, adjust representations, frame interactively, and render.",
     "category": "Import-Export",
 }
 
 import json
+import os
 import subprocess
 import sys
 import tempfile
@@ -26,9 +27,8 @@ from typing import Any
 import bpy
 from bpy.props import BoolProperty, EnumProperty, FloatProperty, IntProperty, IntVectorProperty, StringProperty
 from bpy.types import Operator, Panel, PropertyGroup
-from mathutils import Vector
+from mathutils import Quaternion, Vector
 
-# Locate bundled scene_builder (when installed via `install-addon`) or repo package
 _ADDON_DIR = Path(__file__).resolve().parent
 _CONFIG_PATH = _ADDON_DIR / "config.json"
 
@@ -58,23 +58,33 @@ def _import_scene_builder():
     return scene_builder
 
 
-def _default_style_path() -> str:
-    local_style = _ADDON_DIR / "styles" / "default.json"
-    if local_style.is_file():
-        return str(local_style)
+def _resolve_style_file(style_preset: str, custom_path: str) -> Path | None:
+    if style_preset == "CUSTOM":
+        p = Path(bpy.path.abspath(custom_path)) if custom_path else None
+        return p if p and p.is_file() else None
+
+    fname = f"{style_preset}.json"
+    candidates = [
+        _ADDON_DIR / "styles" / fname,
+        _ADDON_DIR.parent.parent / "styles" / fname,
+        _ADDON_DIR.parent.parent / "atomic_blender" / "styles" / fname,
+    ]
     cfg = _load_addon_config()
     repo_root = cfg.get("repo_root")
     if repo_root:
-        for p in (
-            Path(repo_root) / "styles" / "default.json",
-            Path(repo_root) / "atomic_blender" / "styles" / "default.json",
-        ):
-            if p.is_file():
-                return str(p)
-    repo_style = _ADDON_DIR.parent.parent / "styles" / "default.json"
-    if repo_style.is_file():
-        return str(repo_style)
-    return ""
+        candidates.extend([
+            Path(repo_root) / "styles" / fname,
+            Path(repo_root) / "atomic_blender" / "styles" / fname,
+        ])
+    for path in candidates:
+        if path.is_file():
+            return path
+    return None
+
+
+def _default_style_path() -> str:
+    found = _resolve_style_file("default", "")
+    return str(found) if found else ""
 
 
 def _default_python_exe() -> str:
@@ -113,8 +123,6 @@ def _load_structure_any(
             cmd.extend(["--type-map", type_map.strip()])
         if not wrap:
             cmd.append("--no-wrap")
-        import os
-
         env = os.environ.copy()
         if Path(repo_root).is_dir():
             pp = env.get("PYTHONPATH", "")
@@ -127,8 +135,13 @@ def _load_structure_any(
         return json.loads(out_json.read_text(encoding="utf-8"))
 
 
-def _store_framing_metadata(scene: bpy.types.Scene, framing_data: dict[str, Any]) -> None:
-    """Persist lightweight framing points on the scene so preset switching works anytime."""
+def _store_scene_metadata(
+    scene: bpy.types.Scene,
+    structure: dict[str, Any],
+    framing_data: dict[str, Any],
+) -> None:
+    """Persist structure JSON and framing bounds on the scene for style/preset updates."""
+    scene["atomic_studio_structure"] = json.dumps(structure)
     payload = {
         "target": [float(v) for v in framing_data["target"]],
         "pts_frame": [[float(v) for v in p] for p in framing_data["pts_frame"]],
@@ -139,6 +152,16 @@ def _store_framing_metadata(scene: bpy.types.Scene, framing_data: dict[str, Any]
         ),
     }
     scene["atomic_studio_framing"] = json.dumps(payload)
+
+    cell = structure.get("cell", [[0, 0, 0], [0, 0, 0], [0, 0, 0]])
+    lengths = [Vector(v).length for v in cell]
+    n_atoms = int(framing_data.get("n_atoms", len(structure.get("symbols", []))))
+    n_bonds = int(framing_data.get("n_bonds", 0))
+    if structure.get("has_cell", True):
+        cell_str = f"{lengths[0]:.1f}×{lengths[1]:.1f}×{lengths[2]:.1f} Å"
+    else:
+        cell_str = "no cell"
+    scene["atomic_studio_summary"] = f"{n_atoms} atoms | {n_bonds} bonds | {cell_str}"
 
 
 def _load_framing_metadata(scene: bpy.types.Scene) -> dict[str, Any] | None:
@@ -153,15 +176,83 @@ def _load_framing_metadata(scene: bpy.types.Scene) -> dict[str, Any] | None:
     }
 
 
+def _build_from_props(
+    context: bpy.types.Context,
+    structure: dict[str, Any],
+    style: dict[str, Any],
+    preserve_camera: bool = False,
+) -> dict[str, Any]:
+    scene = context.scene
+    props = scene.atomic_studio
+    sb = _import_scene_builder()
+
+    saved_cam = None
+    if preserve_camera and scene.camera is not None:
+        cam = scene.camera
+        cam.rotation_mode = "QUATERNION"
+        saved_cam = {
+            "type": cam.data.type,
+            "location": Vector(cam.location),
+            "quat": Quaternion(cam.rotation_quaternion),
+            "ortho_scale": float(cam.data.ortho_scale),
+            "lens": float(cam.data.lens),
+            "clip_start": float(cam.data.clip_start),
+            "clip_end": float(cam.data.clip_end),
+        }
+
+    style.setdefault("render", {})["samples"] = int(props.samples)
+    crop_z = (props.crop_z_bot, props.crop_z_top) if props.crop_z_auto else None
+    bonds_override = None if props.bonds_mode == "STYLE" else props.bonds_mode
+    bond_color_override = None if props.bond_color == "STYLE" else props.bond_color
+
+    framing = sb.build_scene(
+        structure=structure,
+        style=style,
+        view=props.preset,
+        crop_z=crop_z,
+        resolution=(int(props.res_x), int(props.res_y)),
+        bonds_mode_override=bonds_override,
+        reset_factory=False,
+        radius_scale=float(props.radius_scale),
+        bond_color_override=bond_color_override,
+        show_cell_override=bool(props.show_cell),
+    )
+
+    if saved_cam is not None and scene.camera is not None:
+        cam = scene.camera
+        cam.data.type = saved_cam["type"]
+        cam.location = saved_cam["location"]
+        cam.rotation_mode = "QUATERNION"
+        cam.rotation_quaternion = saved_cam["quat"]
+        cam.data.ortho_scale = saved_cam["ortho_scale"]
+        cam.data.lens = saved_cam["lens"]
+        cam.data.clip_start = saved_cam["clip_start"]
+        cam.data.clip_end = saved_cam["clip_end"]
+
+    _store_scene_metadata(scene, structure, framing)
+    return framing
+
+
 class AtomicStudioProperties(PropertyGroup):
     structure_path: StringProperty(
         name="Structure",
         description="Structure file (.json, .cif, POSCAR, .xyz, LAMMPS .data)",
         subtype="FILE_PATH",
     )
+    style_preset: EnumProperty(
+        name="Style",
+        items=[
+            ("default", "Default (KANG-D3)", "Original flat Principled BSDF publication style"),
+            ("studio", "Studio (SSS + AO + Rim)", "Subsurface scattering, AO contact shadows, metallic slabs, bicolor bonds"),
+            ("matte", "Matte Clay (AO)", "Soft illustrative clay finish with strong AO and even ambient lighting"),
+            ("ball_and_stick", "Ball & Stick", "Compact sphere radii with auto covalent bicolor bonds"),
+            ("CUSTOM", "Custom JSON...", "Specify a custom style JSON file"),
+        ],
+        default="default",
+    )
     style_path: StringProperty(
-        name="Style JSON",
-        description="Path to style JSON file",
+        name="Custom JSON",
+        description="Path to custom style JSON file",
         subtype="FILE_PATH",
         default=_default_style_path(),
     )
@@ -208,6 +299,13 @@ class AtomicStudioProperties(PropertyGroup):
     )
     crop_z_bot: FloatProperty(name="Z Margin Bottom", default=2.0, min=0.0, max=50.0)
     crop_z_top: FloatProperty(name="Z Margin Top", default=4.0, min=0.0, max=50.0)
+    radius_scale: FloatProperty(
+        name="Atom Scale",
+        description="Multiplier for atomic sphere radii",
+        default=1.0,
+        min=0.3,
+        max=2.0,
+    )
     bonds_mode: EnumProperty(
         name="Bonds",
         items=[
@@ -217,6 +315,20 @@ class AtomicStudioProperties(PropertyGroup):
             ("none", "None", "Do not draw bonds"),
         ],
         default="STYLE",
+    )
+    bond_color: EnumProperty(
+        name="Bond Color",
+        items=[
+            ("STYLE", "From Style", "Use bond color mode from style JSON"),
+            ("bicolor", "Bicolor", "Split each bond into half-cylinders matching endpoint elements"),
+            ("single", "Single Gray", "Uniform bond cylinder color"),
+        ],
+        default="STYLE",
+    )
+    show_cell: BoolProperty(
+        name="Show Cell Box",
+        description="Display the 12-edge periodic cell wireframe",
+        default=True,
     )
     preset: EnumProperty(
         name="Preset",
@@ -237,20 +349,19 @@ class AtomicStudioProperties(PropertyGroup):
 class ATOMIC_STUDIO_OT_load_structure(Operator):
     bl_idname = "atomic_studio.load_structure"
     bl_label = "Load Structure"
-    bl_description = "Load atomic structure with the selected style and preset"
+    bl_description = "Load atomic structure with the selected style and representation"
     bl_options = {"REGISTER", "UNDO"}
 
     def execute(self, context):
         props = context.scene.atomic_studio
-        sb = _import_scene_builder()
         struct_path = Path(bpy.path.abspath(props.structure_path))
         if not struct_path.is_file():
             self.report({"ERROR"}, f"Structure file not found: {struct_path}")
             return {"CANCELLED"}
 
-        style_file = Path(bpy.path.abspath(props.style_path)) if props.style_path else Path(_default_style_path())
-        if not style_file.is_file():
-            self.report({"ERROR"}, f"Style JSON not found: {style_file}")
+        style_file = _resolve_style_file(props.style_preset, props.style_path)
+        if style_file is None:
+            self.report({"ERROR"}, "Style JSON not found.")
             return {"CANCELLED"}
 
         try:
@@ -266,21 +377,34 @@ class ATOMIC_STUDIO_OT_load_structure(Operator):
             self.report({"ERROR"}, str(exc))
             return {"CANCELLED"}
 
-        style.setdefault("render", {})["samples"] = int(props.samples)
-        crop_z = (props.crop_z_bot, props.crop_z_top) if props.crop_z_auto else None
-        bonds_override = None if props.bonds_mode == "STYLE" else props.bonds_mode
-
-        framing = sb.build_scene(
-            structure=structure,
-            style=style,
-            view=props.preset,
-            crop_z=crop_z,
-            resolution=(int(props.res_x), int(props.res_y)),
-            bonds_mode_override=bonds_override,
-            reset_factory=False,
-        )
-        _store_framing_metadata(context.scene, framing)
+        _build_from_props(context, structure, style, preserve_camera=False)
         self.report({"INFO"}, f"Loaded {len(structure['symbols'])} atoms from {struct_path.name}")
+        return {"FINISHED"}
+
+
+class ATOMIC_STUDIO_OT_update_style(Operator):
+    bl_idname = "atomic_studio.update_style"
+    bl_label = "Update Style / Representation"
+    bl_description = "Rebuild loaded structure with the selected style, atom scale, bonds, and cell settings while keeping current camera"
+    bl_options = {"REGISTER", "UNDO"}
+
+    def execute(self, context):
+        scene = context.scene
+        props = scene.atomic_studio
+        raw_struct = scene.get("atomic_studio_structure")
+        if not raw_struct:
+            self.report({"ERROR"}, "Load a structure first before updating style.")
+            return {"CANCELLED"}
+
+        style_file = _resolve_style_file(props.style_preset, props.style_path)
+        if style_file is None:
+            self.report({"ERROR"}, "Style JSON not found.")
+            return {"CANCELLED"}
+
+        structure = json.loads(raw_struct)
+        style = json.loads(style_file.read_text(encoding="utf-8"))
+        _build_from_props(context, structure, style, preserve_camera=True)
+        self.report({"INFO"}, f"Applied style '{props.style_preset}' (camera preserved)")
         return {"FINISHED"}
 
 
@@ -299,15 +423,44 @@ class ATOMIC_STUDIO_OT_apply_preset(Operator):
             return {"CANCELLED"}
         sb = _import_scene_builder()
         style = {}
-        if props.style_path:
-            sp = Path(bpy.path.abspath(props.style_path))
-            if sp.is_file():
-                style = json.loads(sp.read_text(encoding="utf-8"))
+        sf = _resolve_style_file(props.style_preset, props.style_path)
+        if sf is not None:
+            style = json.loads(sf.read_text(encoding="utf-8"))
         scene.render.resolution_x = int(props.res_x)
         scene.render.resolution_y = int(props.res_y)
         framing = _load_framing_metadata(scene)
         sb.apply_camera_view(scene, cam, props.preset, framing_data=framing, style=style)
         self.report({"INFO"}, f"Applied preset '{props.preset}'")
+        return {"FINISHED"}
+
+
+class ATOMIC_STUDIO_OT_quick_preset(Operator):
+    bl_idname = "atomic_studio.quick_preset"
+    bl_label = "Quick View Preset"
+    bl_description = "Immediately snap camera to this preset"
+    bl_options = {"REGISTER", "UNDO"}
+
+    preset_name: StringProperty(default="iso")
+
+    def execute(self, context):
+        context.scene.atomic_studio.preset = self.preset_name
+        return bpy.ops.atomic_studio.apply_preset()
+
+
+class ATOMIC_STUDIO_OT_set_resolution(Operator):
+    bl_idname = "atomic_studio.set_resolution"
+    bl_label = "Set Resolution"
+    bl_description = "Set render width and height"
+
+    width: IntProperty(default=1400)
+    height: IntProperty(default=1400)
+
+    def execute(self, context):
+        props = context.scene.atomic_studio
+        props.res_x = int(self.width)
+        props.res_y = int(self.height)
+        context.scene.render.resolution_x = int(self.width)
+        context.scene.render.resolution_y = int(self.height)
         return {"FINISHED"}
 
 
@@ -337,11 +490,9 @@ class ATOMIC_STUDIO_OT_camera_to_view(Operator):
             self.report({"INFO"}, "Viewport is already locked to the active camera.")
             return {"FINISHED"}
 
-        # Set exact camera world transform from the 3D Viewport view matrix
         cam.matrix_world = rv3d.view_matrix.inverted()
         cam.rotation_mode = "QUATERNION"
 
-        # Match visible orthographic framing to the current viewport zoom distance
         if cam.data.type == "ORTHO":
             sensor_fit = cam.data.sensor_fit
             sensor_size = cam.data.sensor_height if sensor_fit == "VERTICAL" else cam.data.sensor_width
@@ -432,12 +583,18 @@ class ATOMIC_STUDIO_PT_panel(Panel):
 
     def draw(self, context):
         layout = self.layout
-        props = context.scene.atomic_studio
+        scene = context.scene
+        props = scene.atomic_studio
 
+        summary = scene.get("atomic_studio_summary")
+        if summary:
+            badge = layout.box()
+            badge.label(text=str(summary), icon="INFO")
+
+        # 1. Input Structure
         box_in = layout.box()
-        box_in.label(text="Structure & Style", icon="MESH_UVSPHERE")
+        box_in.label(text="Structure Input", icon="IMPORT")
         box_in.prop(props, "structure_path")
-        box_in.prop(props, "style_path")
         box_in.prop(props, "python_exe")
         box_in.prop(props, "type_map")
         box_in.prop(props, "replicate")
@@ -448,25 +605,47 @@ class ATOMIC_STUDIO_PT_panel(Panel):
             row_z = box_in.row(align=True)
             row_z.prop(props, "crop_z_bot")
             row_z.prop(props, "crop_z_top")
-        box_in.prop(props, "bonds_mode")
-        box_in.operator("atomic_studio.load_structure", icon="IMPORT")
+        box_in.operator("atomic_studio.load_structure", icon="FILE_REFRESH")
 
+        # 2. Style & Representation
+        box_st = layout.box()
+        box_st.label(text="Style & Representation", icon="SHADING_RENDERED")
+        box_st.prop(props, "style_preset")
+        if props.style_preset == "CUSTOM":
+            box_st.prop(props, "style_path")
+        box_st.prop(props, "radius_scale", slider=True)
+        box_st.prop(props, "bonds_mode")
+        box_st.prop(props, "bond_color")
+        box_st.prop(props, "show_cell")
+        if scene.get("atomic_studio_structure"):
+            box_st.operator("atomic_studio.update_style", icon="MATERIAL")
+
+        # 3. View & Framing
         box_cam = layout.box()
         box_cam.label(text="View & Framing", icon="CAMERA_DATA")
-        row_p = box_cam.row(align=True)
-        row_p.prop(props, "preset", text="")
-        row_p.operator("atomic_studio.apply_preset", text="Apply")
+        row_q = box_cam.row(align=True)
+        for label, pname in (("Iso", "iso"), ("Side", "side-oblique"), ("a", "a"), ("b", "b"), ("c", "c")):
+            op = row_q.operator("atomic_studio.quick_preset", text=label)
+            op.preset_name = pname
         box_cam.operator("atomic_studio.camera_to_view", icon="OUTLINER_OB_CAMERA")
+        if context.space_data and context.space_data.type == "VIEW_3D":
+            box_cam.prop(context.space_data, "lock_camera", text="Lock Camera to View")
         box_cam.prop(props, "view_json_path")
         row_v = box_cam.row(align=True)
         row_v.operator("atomic_studio.save_view", icon="FILE_TICK")
         row_v.operator("atomic_studio.load_view", icon="FILE_FOLDER")
 
+        # 4. Render
         box_ren = layout.box()
         box_ren.label(text="Render", icon="RENDER_STILL")
         row_r = box_ren.row(align=True)
         row_r.prop(props, "res_x")
         row_r.prop(props, "res_y")
+        row_rp = box_ren.row(align=True)
+        for label, rw, rh in (("700²", 700, 700), ("1400²", 1400, 1400), ("Slab", 1400, 1200)):
+            op = row_rp.operator("atomic_studio.set_resolution", text=label)
+            op.width = rw
+            op.height = rh
         box_ren.prop(props, "samples")
         box_ren.prop(props, "render_out_path")
         box_ren.operator("atomic_studio.render", icon="RENDER_STILL")
@@ -475,7 +654,10 @@ class ATOMIC_STUDIO_PT_panel(Panel):
 _CLASSES = (
     AtomicStudioProperties,
     ATOMIC_STUDIO_OT_load_structure,
+    ATOMIC_STUDIO_OT_update_style,
     ATOMIC_STUDIO_OT_apply_preset,
+    ATOMIC_STUDIO_OT_quick_preset,
+    ATOMIC_STUDIO_OT_set_resolution,
     ATOMIC_STUDIO_OT_camera_to_view,
     ATOMIC_STUDIO_OT_save_view,
     ATOMIC_STUDIO_OT_load_view,

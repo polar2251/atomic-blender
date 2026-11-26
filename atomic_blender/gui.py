@@ -9,7 +9,6 @@ from pathlib import Path
 import queue
 import subprocess
 import sys
-import tempfile
 import threading
 import time
 import tkinter as tk
@@ -17,6 +16,7 @@ from tkinter import filedialog, messagebox, scrolledtext, ttk
 from typing import Any
 
 from atomic_blender.cli import _collect_style_files, find_blender_executable
+from atomic_blender.convert import read_structure
 from atomic_blender.elements import VIEW_PRESETS
 
 try:
@@ -44,6 +44,9 @@ class GuiRenderConfig:
     crop_z_mode: str = "none"  # "none", "auto", "custom"
     crop_z_custom: str = "2.0,4.0"
     bonds: str = "style"  # "style", "table", "auto", "none"
+    bond_color: str = "style"  # "style", "bicolor", "single"
+    radius_scale: float = 1.0
+    show_cell: bool = True
     resolution: tuple[int, int] = (1400, 1400)
     samples: int = 64
     blender_exe: str = ""
@@ -71,6 +74,8 @@ def validate_gui_config(cfg: GuiRenderConfig) -> Path:
         raise ValueError("Cycles samples must be >= 1.")
     if any(n < 1 for n in cfg.replicate):
         raise ValueError("Replication counts must be >= 1.")
+    if cfg.radius_scale <= 0.0:
+        raise ValueError("Atom scale must be > 0.")
     return in_path
 
 
@@ -111,6 +116,12 @@ def build_render_cli_args(
         args.extend(["--crop-z", cfg.crop_z_custom.strip()])
     if cfg.bonds in ("table", "auto", "none"):
         args.extend(["--bonds", cfg.bonds])
+    if cfg.bond_color in ("single", "bicolor"):
+        args.extend(["--bond-color", cfg.bond_color])
+    if abs(cfg.radius_scale - 1.0) > 1e-6:
+        args.extend(["--radius-scale", f"{cfg.radius_scale:.3f}"])
+    if not cfg.show_cell:
+        args.append("--no-cell")
     if cfg.blender_exe.strip():
         args.extend(["--blender", cfg.blender_exe.strip()])
 
@@ -123,6 +134,48 @@ def build_render_cli_args(
         args.extend(["--save-blend", str(blend_target)])
 
     return args
+
+
+def inspect_structure_summary(
+    path: str,
+    type_map: str = "",
+    replicate: tuple[int, int, int] = (1, 1, 1),
+) -> str:
+    """Return a compact one-line structure summary via ASE for the GUI inspector banner."""
+    p = Path(path).expanduser()
+    if not p.is_file():
+        return "No structure loaded"
+    if p.suffix.lower() == ".json":
+        import json
+
+        data = json.loads(p.read_text(encoding="utf-8"))
+        syms = data.get("symbols", [])
+        elems = ", ".join(sorted(set(syms)))
+        n_atoms = len(syms) * max(1, replicate[0]) * max(1, replicate[1]) * max(1, replicate[2])
+        if data.get("has_cell", False):
+            import math
+
+            vecs = data.get("cell", [[0, 0, 0], [0, 0, 0], [0, 0, 0]])
+            lens = [math.sqrt(sum(c * c for c in v)) for v in vecs]
+            return (
+                f"{p.name} | {n_atoms} atoms ({elems}) | "
+                f"cell {lens[0]*replicate[0]:.2f}×{lens[1]*replicate[1]:.2f}×{lens[2]*replicate[2]:.2f} Å"
+            )
+        return f"{p.name} | {n_atoms} atoms ({elems}) | no periodic cell"
+
+    atoms = read_structure(p, type_map=type_map.strip() or None)
+    if replicate != (1, 1, 1) and atoms.cell.rank == 3:
+        atoms = atoms.repeat(replicate)
+    elems = ", ".join(sorted(set(atoms.get_chemical_symbols())))
+    formula = atoms.get_chemical_formula()
+    if atoms.cell.rank == 3:
+        la, lb, lc, alpha, beta, gamma = atoms.cell.cellpar()
+        pbc_str = "".join("T" if f else "F" for f in atoms.pbc)
+        return (
+            f"{formula} | {len(atoms)} atoms ({elems}) | "
+            f"{la:.2f}×{lb:.2f}×{lc:.2f} Å ({alpha:.1f}°, {beta:.1f}°, {gamma:.1f}°) | PBC={pbc_str}"
+        )
+    return f"{formula} | {len(atoms)} atoms ({elems}) | no periodic cell"
 
 
 def _open_folder(folder: Path) -> None:
@@ -141,14 +194,15 @@ class AtomicBlenderApp(tk.Tk):
     def __init__(self, initial_input: str | None = None) -> None:
         super().__init__()
         self.title("Atomic Blender Studio — Desktop Client")
-        self.geometry("1180x760")
-        self.minsize(960, 640)
+        self.geometry("1240x820")
+        self.minsize(1000, 680)
 
         self._configure_theme()
 
         self._queue: queue.Queue[tuple[str, Any]] = queue.Queue()
         self._busy = False
         self._task_start = 0.0
+        self._inspect_after_id: str | None = None
         self._preview_path: Path | None = None
         self._pil_image: Any = None
         self._photo_ref: Any = None
@@ -156,6 +210,8 @@ class AtomicBlenderApp(tk.Tk):
         self._init_variables(initial_input)
         self._build_layout()
         self.after(100, self._poll_queue)
+        if initial_input:
+            self._schedule_inspect()
 
     def _configure_theme(self) -> None:
         style = ttk.Style(self)
@@ -174,14 +230,14 @@ class AtomicBlenderApp(tk.Tk):
         styles = sorted(_collect_style_files().keys()) or ["default"]
         self._available_styles = styles
 
+        self.var_inspector = tk.StringVar(value="Select an atomic structure file (.cif, POSCAR, .xyz, .data, .json)")
         self.var_input = tk.StringVar(value=initial_input or "")
         self.var_output = tk.StringVar(value="")
         if initial_input:
-            p = Path(initial_input)
-            self.var_output.set(str(p.with_suffix(".png")))
+            self.var_output.set(str(Path(initial_input).with_suffix(".png")))
 
         self.var_type_map = tk.StringVar(value="")
-        self.var_style = tk.StringVar(value="default" if "default" in styles else styles[0])
+        self.var_style = tk.StringVar(value="studio" if "studio" in styles else styles[0])
         self.var_view_mode = tk.StringVar(value="preset")
         self.var_view_preset = tk.StringVar(value="iso")
         self.var_view_file = tk.StringVar(value="")
@@ -194,6 +250,10 @@ class AtomicBlenderApp(tk.Tk):
         self.var_crop_z_mode = tk.StringVar(value="none")
         self.var_crop_z_custom = tk.StringVar(value="2.0,4.0")
         self.var_bonds = tk.StringVar(value="style")
+        self.var_bond_color = tk.StringVar(value="style")
+        self.var_radius_scale = tk.DoubleVar(value=1.0)
+        self.var_radius_label = tk.StringVar(value="1.00×")
+        self.var_show_cell = tk.BooleanVar(value=True)
 
         self.var_res_w = tk.IntVar(value=1400)
         self.var_res_h = tk.IntVar(value=1400)
@@ -202,8 +262,13 @@ class AtomicBlenderApp(tk.Tk):
         self.var_status = tk.StringVar(value="Ready")
 
     def _build_layout(self) -> None:
+        banner = ttk.Frame(self, padding=(10, 6, 10, 2))
+        banner.pack(fill=tk.X)
+        ttk.Label(banner, text="Structure:", font=("TkDefaultFont", 9, "bold")).pack(side=tk.LEFT)
+        ttk.Label(banner, textvariable=self.var_inspector, foreground="#1E40AF").pack(side=tk.LEFT, padx=(6, 0))
+
         paned = ttk.PanedWindow(self, orient=tk.HORIZONTAL)
-        paned.pack(fill=tk.BOTH, expand=True, padx=8, pady=(8, 4))
+        paned.pack(fill=tk.BOTH, expand=True, padx=8, pady=(2, 4))
 
         left = ttk.Frame(paned, padding=6)
         right = ttk.Frame(paned, padding=6)
@@ -224,7 +289,9 @@ class AtomicBlenderApp(tk.Tk):
         f_io.columnconfigure(1, weight=1)
 
         ttk.Label(f_io, text="Input").grid(row=0, column=0, sticky=tk.W, pady=2)
-        ttk.Entry(f_io, textvariable=self.var_input, width=34).grid(row=0, column=1, sticky=tk.EW, padx=4, pady=2)
+        entry_in = ttk.Entry(f_io, textvariable=self.var_input, width=34)
+        entry_in.grid(row=0, column=1, sticky=tk.EW, padx=4, pady=2)
+        entry_in.bind("<FocusOut>", lambda _e: self._schedule_inspect())
         ttk.Button(f_io, text="Browse...", command=self._browse_input).grid(row=0, column=2, pady=2)
 
         ttk.Label(f_io, text="Output PNG").grid(row=1, column=0, sticky=tk.W, pady=2)
@@ -232,23 +299,70 @@ class AtomicBlenderApp(tk.Tk):
         ttk.Button(f_io, text="Save As...", command=self._browse_output).grid(row=1, column=2, pady=2)
 
         ttk.Label(f_io, text="Type Map").grid(row=2, column=0, sticky=tk.W, pady=2)
-        ttk.Entry(f_io, textvariable=self.var_type_map).grid(row=2, column=1, columnspan=2, sticky=tk.EW, padx=(4, 0), pady=2)
-        ttk.Label(f_io, text="LAMMPS optional (e.g. 1:Al,2:C,3:H)", foreground="#666666").grid(
-            row=3, column=1, columnspan=2, sticky=tk.W, padx=4
+        entry_tm = ttk.Entry(f_io, textvariable=self.var_type_map)
+        entry_tm.grid(row=2, column=1, sticky=tk.EW, padx=4, pady=2)
+        entry_tm.bind("<FocusOut>", lambda _e: self._schedule_inspect())
+        ttk.Button(f_io, text="Inspect", command=self._schedule_inspect).grid(row=2, column=2, pady=2)
+
+        row_smart = ttk.Frame(f_io)
+        row_smart.grid(row=3, column=0, columnspan=3, sticky=tk.EW, pady=(4, 0))
+        ttk.Button(row_smart, text="Smart Slab Preset", command=self._apply_slab_preset).pack(
+            side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 4)
+        )
+        ttk.Button(row_smart, text="Cube / Bulk Preset", command=self._apply_bulk_preset).pack(
+            side=tk.LEFT, fill=tk.X, expand=True
         )
 
-        # 2. Style & View
-        f_sv = ttk.LabelFrame(parent, text="Style & Camera View", padding=8)
+        # 2. Style & Representation
+        f_rep = ttk.LabelFrame(parent, text="Style & Representation", padding=8)
+        f_rep.pack(fill=tk.X, pady=(0, 6))
+        f_rep.columnconfigure(1, weight=1)
+
+        ttk.Label(f_rep, text="Style").grid(row=0, column=0, sticky=tk.W, pady=2)
+        self.combo_style = ttk.Combobox(f_rep, textvariable=self.var_style, values=self._available_styles, width=24)
+        self.combo_style.grid(row=0, column=1, sticky=tk.EW, padx=4, pady=2)
+        ttk.Button(f_rep, text="JSON...", command=self._browse_style).grid(row=0, column=2, pady=2)
+
+        ttk.Label(f_rep, text="Atom Scale").grid(row=1, column=0, sticky=tk.W, pady=2)
+        row_sc = ttk.Frame(f_rep)
+        row_sc.grid(row=1, column=1, columnspan=2, sticky=tk.EW, padx=4, pady=2)
+        ttk.Scale(
+            row_sc, from_=0.4, to=1.6, variable=self.var_radius_scale, command=self._on_scale_changed
+        ).pack(side=tk.LEFT, fill=tk.X, expand=True)
+        ttk.Label(row_sc, textvariable=self.var_radius_label, width=6).pack(side=tk.LEFT, padx=(6, 0))
+
+        row_repr_btns = ttk.Frame(f_rep)
+        row_repr_btns.grid(row=2, column=1, columnspan=2, sticky=tk.EW, padx=4, pady=(0, 4))
+        for lbl, rscale, bmode, bcol in (
+            ("Ball & Stick", 0.78, "auto", "bicolor"),
+            ("Default", 1.00, "style", "style"),
+            ("Spacefill", 1.35, "none", "style"),
+        ):
+            ttk.Button(
+                row_repr_btns,
+                text=lbl,
+                command=lambda rs=rscale, bm=bmode, bc=bcol: self._set_representation(rs, bm, bc),
+            ).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 3))
+
+        ttk.Label(f_rep, text="Bonds").grid(row=3, column=0, sticky=tk.W, pady=2)
+        row_b = ttk.Frame(f_rep)
+        row_b.grid(row=3, column=1, columnspan=2, sticky=tk.EW, padx=4, pady=2)
+        ttk.Combobox(
+            row_b, textvariable=self.var_bonds, values=["style", "table", "auto", "none"], state="readonly", width=8
+        ).pack(side=tk.LEFT)
+        ttk.Label(row_b, text="Color").pack(side=tk.LEFT, padx=(8, 4))
+        ttk.Combobox(
+            row_b, textvariable=self.var_bond_color, values=["style", "bicolor", "single"], state="readonly", width=9
+        ).pack(side=tk.LEFT)
+        ttk.Checkbutton(row_b, text="Show Cell", variable=self.var_show_cell).pack(side=tk.LEFT, padx=(8, 0))
+
+        # 3. Camera View
+        f_sv = ttk.LabelFrame(parent, text="Camera View", padding=8)
         f_sv.pack(fill=tk.X, pady=(0, 6))
         f_sv.columnconfigure(1, weight=1)
 
-        ttk.Label(f_sv, text="Style").grid(row=0, column=0, sticky=tk.W, pady=2)
-        self.combo_style = ttk.Combobox(f_sv, textvariable=self.var_style, values=self._available_styles, width=24)
-        self.combo_style.grid(row=0, column=1, sticky=tk.EW, padx=4, pady=2)
-        ttk.Button(f_sv, text="JSON...", command=self._browse_style).grid(row=0, column=2, pady=2)
-
         row_vm = ttk.Frame(f_sv)
-        row_vm.grid(row=1, column=0, columnspan=3, sticky=tk.W, pady=(4, 2))
+        row_vm.grid(row=0, column=0, columnspan=3, sticky=tk.W, pady=(0, 4))
         ttk.Radiobutton(
             row_vm, text="Preset", variable=self.var_view_mode, value="preset", command=self._sync_view_mode
         ).pack(side=tk.LEFT)
@@ -256,11 +370,18 @@ class AtomicBlenderApp(tk.Tk):
             row_vm, text="view.json", variable=self.var_view_mode, value="file", command=self._sync_view_mode
         ).pack(side=tk.LEFT, padx=(10, 0))
 
+        row_vp = ttk.Frame(f_sv)
+        row_vp.grid(row=1, column=0, columnspan=3, sticky=tk.EW, pady=2)
+        for lbl, pname in (("Iso", "iso"), ("Side", "side-oblique"), ("a", "a"), ("b", "b"), ("c", "c")):
+            ttk.Button(
+                row_vp, text=lbl, width=5, command=lambda p=pname: self._pick_view_preset(p)
+            ).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 2))
+
+        ttk.Label(f_sv, text="Preset").grid(row=2, column=0, sticky=tk.W, pady=2)
         self.combo_preset = ttk.Combobox(
             f_sv, textvariable=self.var_view_preset, values=list(VIEW_PRESETS), state="readonly"
         )
         self.combo_preset.grid(row=2, column=1, columnspan=2, sticky=tk.EW, padx=(4, 0), pady=2)
-        ttk.Label(f_sv, text="Preset").grid(row=2, column=0, sticky=tk.W, pady=2)
 
         ttk.Label(f_sv, text="View JSON").grid(row=3, column=0, sticky=tk.W, pady=2)
         self.entry_view_file = ttk.Entry(f_sv, textvariable=self.var_view_file)
@@ -274,8 +395,8 @@ class AtomicBlenderApp(tk.Tk):
         self.chk_fit_view.grid(row=4, column=1, columnspan=2, sticky=tk.W, padx=4, pady=2)
         self._sync_view_mode()
 
-        # 3. Supercell & Geometry
-        f_geom = ttk.LabelFrame(parent, text="Supercell & Geometry", padding=8)
+        # 4. Supercell & Crop Z
+        f_geom = ttk.LabelFrame(parent, text="Supercell & Framing", padding=8)
         f_geom.pack(fill=tk.X, pady=(0, 6))
         f_geom.columnconfigure(1, weight=1)
 
@@ -283,7 +404,8 @@ class AtomicBlenderApp(tk.Tk):
         row_rep = ttk.Frame(f_geom)
         row_rep.grid(row=0, column=1, sticky=tk.W, padx=4, pady=2)
         for var in (self.var_rep_x, self.var_rep_y, self.var_rep_z):
-            ttk.Spinbox(row_rep, from_=1, to=20, textvariable=var, width=4).pack(side=tk.LEFT, padx=(0, 4))
+            sb = ttk.Spinbox(row_rep, from_=1, to=20, textvariable=var, width=4, command=self._schedule_inspect)
+            sb.pack(side=tk.LEFT, padx=(0, 4))
         ttk.Checkbutton(row_rep, text="Wrap into cell", variable=self.var_wrap).pack(side=tk.LEFT, padx=(6, 0))
 
         ttk.Label(f_geom, text="Crop Z").grid(row=1, column=0, sticky=tk.W, pady=2)
@@ -298,12 +420,7 @@ class AtomicBlenderApp(tk.Tk):
         self.entry_crop_z.pack(side=tk.LEFT, padx=(6, 0))
         self._sync_crop_z()
 
-        ttk.Label(f_geom, text="Bonds").grid(row=2, column=0, sticky=tk.W, pady=2)
-        ttk.Combobox(
-            f_geom, textvariable=self.var_bonds, values=["style", "table", "auto", "none"], state="readonly", width=12
-        ).grid(row=2, column=1, sticky=tk.W, padx=4, pady=2)
-
-        # 4. Render Settings
+        # 5. Render Settings
         f_ren = ttk.LabelFrame(parent, text="Cycles Render", padding=8)
         f_ren.pack(fill=tk.X, pady=(0, 8))
         f_ren.columnconfigure(1, weight=1)
@@ -328,7 +445,7 @@ class AtomicBlenderApp(tk.Tk):
         ttk.Entry(f_ren, textvariable=self.var_blender).grid(row=2, column=1, sticky=tk.EW, padx=4, pady=2)
         ttk.Button(f_ren, text="Browse...", command=self._browse_blender).grid(row=2, column=2, pady=2)
 
-        # 5. Actions
+        # 6. Actions
         f_act = ttk.Frame(parent)
         f_act.pack(fill=tk.X)
         self.btn_render = ttk.Button(f_act, text="Render & Preview", command=self._on_render)
@@ -357,6 +474,36 @@ class AtomicBlenderApp(tk.Tk):
         v_pane.add(f_prev, weight=4)
         v_pane.add(f_log, weight=1)
 
+    def _on_scale_changed(self, _val: str) -> None:
+        self.var_radius_label.set(f"{self.var_radius_scale.get():.2f}×")
+
+    def _set_representation(self, radius_scale: float, bonds: str, bond_color: str) -> None:
+        self.var_radius_scale.set(radius_scale)
+        self.var_radius_label.set(f"{radius_scale:.2f}×")
+        self.var_bonds.set(bonds)
+        self.var_bond_color.set(bond_color)
+
+    def _apply_slab_preset(self) -> None:
+        self.var_view_mode.set("preset")
+        self._sync_view_mode()
+        self.var_view_preset.set("side-oblique")
+        self.var_crop_z_mode.set("auto")
+        self._sync_crop_z()
+        self._set_resolution(1400, 1200)
+
+    def _apply_bulk_preset(self) -> None:
+        self.var_view_mode.set("preset")
+        self._sync_view_mode()
+        self.var_view_preset.set("iso")
+        self.var_crop_z_mode.set("none")
+        self._sync_crop_z()
+        self._set_resolution(1400, 1400)
+
+    def _pick_view_preset(self, preset: str) -> None:
+        self.var_view_mode.set("preset")
+        self._sync_view_mode()
+        self.var_view_preset.set(preset)
+
     def _sync_view_mode(self) -> None:
         is_file = self.var_view_mode.get() == "file"
         self.combo_preset.configure(state="disabled" if is_file else "readonly")
@@ -373,6 +520,29 @@ class AtomicBlenderApp(tk.Tk):
         self.var_res_w.set(w)
         self.var_res_h.set(h)
 
+    def _schedule_inspect(self) -> None:
+        if self._inspect_after_id is not None:
+            self.after_cancel(self._inspect_after_id)
+        self._inspect_after_id = self.after(150, self._run_inspect_async)
+
+    def _run_inspect_async(self) -> None:
+        self._inspect_after_id = None
+        path = self.var_input.get().strip()
+        if not path:
+            self.var_inspector.set("Select an atomic structure file (.cif, POSCAR, .xyz, .data, .json)")
+            return
+        type_map = self.var_type_map.get()
+        rep = (int(self.var_rep_x.get()), int(self.var_rep_y.get()), int(self.var_rep_z.get()))
+
+        def worker() -> None:
+            try:
+                summary = inspect_structure_summary(path, type_map=type_map, replicate=rep)
+            except Exception as exc:
+                summary = f"Inspect error: {exc}"
+            self._queue.put(("inspect", summary))
+
+        threading.Thread(target=worker, daemon=True).start()
+
     def _browse_input(self) -> None:
         path = filedialog.askopenfilename(
             title="Select Atomic Structure",
@@ -386,6 +556,7 @@ class AtomicBlenderApp(tk.Tk):
         self.var_input.set(path)
         if not self.var_output.get().strip():
             self.var_output.set(str(Path(path).with_suffix(".png")))
+        self._schedule_inspect()
 
     def _browse_output(self) -> None:
         initial = self.var_output.get().strip() or "render.png"
@@ -428,6 +599,9 @@ class AtomicBlenderApp(tk.Tk):
             crop_z_mode=self.var_crop_z_mode.get(),
             crop_z_custom=self.var_crop_z_custom.get(),
             bonds=self.var_bonds.get(),
+            bond_color=self.var_bond_color.get(),
+            radius_scale=float(self.var_radius_scale.get()),
+            show_cell=bool(self.var_show_cell.get()),
             resolution=(int(self.var_res_w.get()), int(self.var_res_h.get())),
             samples=int(self.var_samples.get()),
             blender_exe=self.var_blender.get(),
@@ -526,7 +700,6 @@ class AtomicBlenderApp(tk.Tk):
         cw = max(1, self.canvas.winfo_width())
         ch = max(1, self.canvas.winfo_height())
 
-        # Subtle checkerboard background so transparent RGBA borders remain visible
         tile = 20
         for y in range(0, ch, tile):
             for x in range(0, cw, tile):
@@ -563,7 +736,9 @@ class AtomicBlenderApp(tk.Tk):
                 kind, payload = self._queue.get_nowait()
             except queue.Empty:
                 break
-            if kind == "log":
+            if kind == "inspect":
+                self.var_inspector.set(str(payload))
+            elif kind == "log":
                 self._append_log(str(payload))
             elif kind == "done":
                 mode, rc, target_path = payload
