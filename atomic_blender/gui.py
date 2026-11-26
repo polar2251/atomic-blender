@@ -931,21 +931,21 @@ class AtomicBlenderApp(tk.Tk):
         self.var_status.set(f"Saved view -> {Path(path).name}")
 
     def _on_canvas_lbutton_down(self, event: tk.Event) -> None:
-        if self.var_canvas_mode.get() != "3d" or self._vp_scene is None:
+        if self._vp_scene is None:
             return
         self._dragging = True
         self._drag_mode = "pan" if (event.state & 0x0001) else "orbit"
         self._drag_last = (event.x, event.y)
 
     def _on_canvas_pan_down(self, event: tk.Event) -> None:
-        if self.var_canvas_mode.get() != "3d" or self._vp_scene is None:
+        if self._vp_scene is None:
             return
         self._dragging = True
         self._drag_mode = "pan"
         self._drag_last = (event.x, event.y)
 
     def _on_canvas_motion(self, event: tk.Event) -> None:
-        if not self._dragging or self._vp_scene is None or self.var_canvas_mode.get() != "3d":
+        if not self._dragging or self._vp_scene is None:
             return
         dx = event.x - self._drag_last[0]
         dy = event.y - self._drag_last[1]
@@ -959,6 +959,7 @@ class AtomicBlenderApp(tk.Tk):
             px_per_a = self._viewport_px_per_angstrom()
             self._vp_scene.pan(dx / max(1e-3, px_per_a), dy / max(1e-3, px_per_a))
 
+        self.var_canvas_mode.set("3d")
         self._use_interactive_cam = True
         self._draw_3d_viewport()
 
@@ -970,14 +971,15 @@ class AtomicBlenderApp(tk.Tk):
                 self._draw_3d_viewport()
 
     def _on_canvas_wheel(self, event: tk.Event) -> None:
-        if self.var_canvas_mode.get() != "3d" or self._vp_scene is None:
+        if self._vp_scene is None:
             return
         factor = 0.9 if event.delta > 0 else 1.111
         self._zoom_3d(factor)
 
     def _zoom_3d(self, factor: float) -> None:
-        if self._vp_scene is None or self.var_canvas_mode.get() != "3d":
+        if self._vp_scene is None:
             return
+        self.var_canvas_mode.set("3d")
         self._vp_scene.zoom(factor)
         self._use_interactive_cam = True
         self._draw_3d_viewport()
@@ -1117,6 +1119,8 @@ class AtomicBlenderApp(tk.Tk):
 
         # Re-stroke frame border cleanly on top
         self.canvas.create_rectangle(x0, y0, x1, y1, outline="#94A3B8", width=1)
+
+    def _redraw_preview(self) -> None:
         self.canvas.delete("all")
         cw = max(1, self.canvas.winfo_width())
         ch = max(1, self.canvas.winfo_height())

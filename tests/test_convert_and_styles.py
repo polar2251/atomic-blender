@@ -287,12 +287,28 @@ class TestAtomicBlender(unittest.TestCase):
         app = AtomicBlenderApp()
         app.withdraw()
         try:
+            app.canvas.configure(width=600, height=600)
+            app.update_idletasks()
             app._structure_cache = structure
             app._rebuild_viewport(reset_camera=True)
             self.assertIsNotNone(app._vp_scene)
-            app._vp_scene.orbit(0.3, 0.2)
+            app._draw_3d_viewport()
+            items_before = app.canvas.find_all()
+            self.assertGreater(len(items_before), 5)
+            coords_before = [app.canvas.coords(cid) for cid in items_before if app.canvas.type(cid) == "oval"]
+            self.assertGreater(len(coords_before), 0)
+
+            app._vp_scene.orbit(0.4, 0.25)
             app._use_interactive_cam = True
             app._draw_3d_viewport()
+            items_after = app.canvas.find_all()
+            self.assertGreater(len(items_after), 5)
+            coords_after = [app.canvas.coords(cid) for cid in items_after if app.canvas.type(cid) == "oval"]
+            self.assertNotEqual(coords_before, coords_after)
+
+            # Verify _redraw_preview runs cleanly without AttributeError
+            app._redraw_preview()
+
             eff = app._effective_cfg_for_cli(app._collect_config())
             self.assertEqual(eff.view_mode, "file")
             self.assertTrue(Path(eff.view_file).is_file())
