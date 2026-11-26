@@ -141,6 +141,162 @@ def build_render_cli_args(
     return args
 
 
+def compute_preview_resolution(res_w: int, res_h: int, max_side: int = 560) -> tuple[int, int]:
+    """Scale target output resolution down for fast interactive Blender previews."""
+    rw = max(16, int(res_w))
+    rh = max(16, int(res_h))
+    longest = max(rw, rh)
+    if longest <= max_side:
+        return rw, rh
+    scale = max_side / float(longest)
+    return max(16, int(round(rw * scale))), max(16, int(round(rh * scale)))
+
+
+class BlenderPreviewWorker:
+    """Coalescing persistent Blender subprocess for fast low-res camera previews."""
+
+    def __init__(self, on_done: Any, on_error: Any, on_status: Any = None) -> None:
+        self._on_done = on_done
+        self._on_error = on_error
+        self._on_status = on_status
+        self._cond = threading.Condition()
+        self._pending: dict[str, Any] | None = None
+        self._stopped = False
+        self._proc: subprocess.Popen[str] | None = None
+        self._active_blender: str | None = None
+        self._thread: threading.Thread | None = None
+
+    def request(self, payload: dict[str, Any]) -> None:
+        """Queue the latest preview request, superseding any unstarted prior request."""
+        with self._cond:
+            if self._stopped:
+                return
+            if self._thread is None or not self._thread.is_alive():
+                self._thread = threading.Thread(target=self._loop, daemon=True)
+                self._thread.start()
+            self._pending = dict(payload)
+            self._cond.notify_all()
+
+    def _close_proc(self) -> None:
+        proc = self._proc
+        self._proc = None
+        self._active_blender = None
+        if proc is None:
+            return
+        try:
+            if proc.poll() is None and proc.stdin is not None:
+                proc.stdin.write(json.dumps({"action": "quit"}) + "\n")
+                proc.stdin.flush()
+                proc.wait(timeout=1.5)
+        except Exception:
+            pass
+        try:
+            if proc.poll() is None:
+                proc.kill()
+        except Exception:
+            pass
+
+    def _ensure_proc(self, blender_exe: str) -> subprocess.Popen[str]:
+        if self._proc is not None and self._proc.poll() is None and self._active_blender == blender_exe:
+            return self._proc
+        self._close_proc()
+        scene_script = Path(__file__).resolve().parent / "scene_builder.py"
+        env = os.environ.copy()
+        pkg_parent = str(Path(__file__).resolve().parent.parent)
+        existing_pp = env.get("PYTHONPATH", "")
+        env["PYTHONPATH"] = f"{pkg_parent}{os.pathsep}{existing_pp}" if existing_pp else pkg_parent
+        kwargs: dict[str, Any] = {}
+        creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+        if creationflags:
+            kwargs["creationflags"] = creationflags
+        proc = subprocess.Popen(
+            [
+                blender_exe,
+                "--background",
+                "--factory-startup",
+                "--python",
+                str(scene_script),
+                "--",
+                "--preview-server",
+            ],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            bufsize=1,
+            env=env,
+            **kwargs,
+        )
+        assert proc.stdout is not None
+        ready = False
+        for line in proc.stdout:
+            if line.strip() == "PREVIEW_READY":
+                ready = True
+                break
+        if not ready:
+            try:
+                proc.kill()
+            except Exception:
+                pass
+            raise RuntimeError("Blender preview server exited before becoming ready.")
+        self._proc = proc
+        self._active_blender = blender_exe
+        return proc
+
+    def _loop(self) -> None:
+        while True:
+            with self._cond:
+                while not self._stopped and self._pending is None:
+                    self._cond.wait()
+                if self._stopped:
+                    break
+                cmd = self._pending
+                self._pending = None
+            assert cmd is not None
+            seq = int(cmd["seq"])
+            try:
+                if self._on_status is not None:
+                    self._on_status(seq, "Rendering Blender preview...")
+                proc = self._ensure_proc(str(cmd["blender_exe"]))
+                assert proc.stdin is not None and proc.stdout is not None
+                wire_cmd = {k: v for k, v in cmd.items() if k != "blender_exe"}
+                proc.stdin.write(json.dumps(wire_cmd) + "\n")
+                proc.stdin.flush()
+
+                finished = False
+                for raw_line in proc.stdout:
+                    line = raw_line.strip()
+                    if line.startswith("PREVIEW_DONE "):
+                        parts = line.split(" ", 2)
+                        done_seq = int(parts[1])
+                        out_path = Path(parts[2])
+                        self._on_done(done_seq, out_path)
+                        finished = True
+                        break
+                    if line.startswith("PREVIEW_ERR "):
+                        parts = line.split(" ", 2)
+                        err_seq = int(parts[1])
+                        msg = parts[2] if len(parts) > 2 else "Unknown error"
+                        self._on_error(err_seq, msg)
+                        finished = True
+                        break
+                if not finished:
+                    self._close_proc()
+                    self._on_error(seq, "Blender preview server terminated unexpectedly.")
+            except Exception as exc:
+                self._close_proc()
+                self._on_error(seq, str(exc))
+        self._close_proc()
+
+    def stop(self) -> None:
+        """Terminate the background Blender preview subprocess cleanly."""
+        with self._cond:
+            self._stopped = True
+            self._pending = None
+            self._cond.notify_all()
+        self._close_proc()
+
+
 def inspect_structure_summary(
     path: str,
     type_map: str = "",
@@ -229,12 +385,22 @@ class AtomicBlenderApp(tk.Tk):
         self._photo_ref: Any = None
         self._vp_photo_ref: Any = None
         self._structure_cache: dict[str, Any] | None = None
+        self._structure_version = 0
+        self._written_struct_version = -1
         self._vp_scene: ViewportScene | None = None
         self._use_interactive_cam = False
         self._dragging = False
         self._drag_mode: str | None = None
         self._drag_last: tuple[int, int] = (0, 0)
         self._temp_view_files: list[Path] = []
+        self._preview_tmp_dir = tempfile.TemporaryDirectory(prefix="atomic_blender_prev_")
+        self._preview_seq = 0
+        self._destroyed = False
+        self._poll_after_id: str | None = None
+        self._preview_worker = BlenderPreviewWorker(
+            on_done=lambda seq, p: self._queue.put(("preview_done", (seq, p))),
+            on_error=lambda seq, msg: self._queue.put(("preview_err", (seq, msg))),
+        )
 
         self._init_variables(initial_input)
         self._build_layout()
@@ -242,7 +408,7 @@ class AtomicBlenderApp(tk.Tk):
         self._orig_wndproc: Any = None
         self.update_idletasks()
         self._enable_file_drop()
-        self.after(100, self._poll_queue)
+        self._poll_after_id = self.after(100, self._poll_queue)
         if initial_input:
             self._schedule_inspect()
 
@@ -492,7 +658,7 @@ class AtomicBlenderApp(tk.Tk):
         # 6. Actions
         f_act = ttk.Frame(parent)
         f_act.pack(fill=tk.X)
-        self.btn_render = ttk.Button(f_act, text="Render & Preview", command=self._on_render)
+        self.btn_render = ttk.Button(f_act, text="Render High-Res Output", command=self._on_render)
         self.btn_render.pack(fill=tk.X, pady=(0, 4))
 
         row_sub = ttk.Frame(f_act)
@@ -548,34 +714,34 @@ class AtomicBlenderApp(tk.Tk):
         self.var_radius_label.set(f"{self.var_radius_scale.get():.2f}×")
 
     def _on_repr_changed(self) -> None:
-        self._rebuild_viewport(reset_camera=False)
+        self._rebuild_viewport(reset_camera=False, trigger_preview=True)
 
     def _set_representation(self, radius_scale: float, bonds: str, bond_color: str) -> None:
         self.var_radius_scale.set(radius_scale)
         self.var_radius_label.set(f"{radius_scale:.2f}×")
         self.var_bonds.set(bonds)
         self.var_bond_color.set(bond_color)
-        self._rebuild_viewport(reset_camera=False)
+        self._rebuild_viewport(reset_camera=False, trigger_preview=True)
 
     def _apply_slab_preset(self) -> None:
         self.var_view_mode.set("preset")
         self._sync_view_mode()
         self.var_view_preset.set("side-oblique")
         self.var_crop_z_mode.set("auto")
-        self._sync_crop_z()
-        self._set_resolution(1400, 1200)
+        self._sync_crop_z(trigger_preview=False)
+        self._set_resolution(1400, 1200, trigger_preview=False)
         self._use_interactive_cam = False
-        self._rebuild_viewport(reset_camera=True)
+        self._rebuild_viewport(reset_camera=True, trigger_preview=True)
 
     def _apply_bulk_preset(self) -> None:
         self.var_view_mode.set("preset")
         self._sync_view_mode()
         self.var_view_preset.set("iso")
         self.var_crop_z_mode.set("none")
-        self._sync_crop_z()
-        self._set_resolution(1400, 1400)
+        self._sync_crop_z(trigger_preview=False)
+        self._set_resolution(1400, 1400, trigger_preview=False)
         self._use_interactive_cam = False
-        self._rebuild_viewport(reset_camera=True)
+        self._rebuild_viewport(reset_camera=True, trigger_preview=True)
 
     def _pick_view_preset(self, preset: str) -> None:
         self.var_view_mode.set("preset")
@@ -586,6 +752,7 @@ class AtomicBlenderApp(tk.Tk):
             self._apply_view_to_viewport(self._vp_scene)
             self.var_canvas_mode.set("3d")
             self._redraw_canvas()
+            self._request_blender_preview()
 
     def _sync_view_mode(self) -> None:
         is_file = self.var_view_mode.get() == "file"
@@ -595,17 +762,19 @@ class AtomicBlenderApp(tk.Tk):
         self.btn_view_file.configure(state=state_file)
         self.chk_fit_view.configure(state=state_file)
 
-    def _sync_crop_z(self) -> None:
+    def _sync_crop_z(self, trigger_preview: bool = True) -> None:
         is_custom = self.var_crop_z_mode.get() == "custom"
         self.entry_crop_z.configure(state="normal" if is_custom else "disabled")
-        self._rebuild_viewport(reset_camera=not self._use_interactive_cam)
+        self._rebuild_viewport(reset_camera=not self._use_interactive_cam, trigger_preview=trigger_preview)
 
-    def _set_resolution(self, w: int, h: int) -> None:
+    def _set_resolution(self, w: int, h: int, trigger_preview: bool = True) -> None:
         self.var_res_w.set(w)
         self.var_res_h.set(h)
         if self._vp_scene is not None and not self._use_interactive_cam:
             self._apply_view_to_viewport(self._vp_scene)
         self._redraw_canvas()
+        if trigger_preview:
+            self._request_blender_preview()
 
     def _schedule_inspect(self) -> None:
         if self._inspect_after_id is not None:
@@ -673,7 +842,7 @@ class AtomicBlenderApp(tk.Tk):
         path = filedialog.askopenfilename(title="Select Style JSON", filetypes=[("JSON files", "*.json")])
         if path:
             self.var_style.set(path)
-            self._rebuild_viewport(reset_camera=False)
+            self._rebuild_viewport(reset_camera=False, trigger_preview=True)
 
     def _browse_view_file(self) -> None:
         path = filedialog.askopenfilename(title="Select view.json", filetypes=[("JSON files", "*.json")])
@@ -684,6 +853,7 @@ class AtomicBlenderApp(tk.Tk):
                 self._apply_view_to_viewport(self._vp_scene)
                 self.var_canvas_mode.set("3d")
                 self._redraw_canvas()
+                self._request_blender_preview()
 
     def _browse_blender(self) -> None:
         path = filedialog.askopenfilename(title="Select Blender Executable")
@@ -894,7 +1064,7 @@ class AtomicBlenderApp(tk.Tk):
         q = preset_to_quat(self.var_view_preset.get(), cell)
         vp.fit_camera(quat=q, aspect=aspect, crop_z=crop_z)
 
-    def _rebuild_viewport(self, reset_camera: bool) -> None:
+    def _rebuild_viewport(self, reset_camera: bool, trigger_preview: bool = False) -> None:
         if self._structure_cache is None:
             return
         prev_cam = None
@@ -918,6 +1088,88 @@ class AtomicBlenderApp(tk.Tk):
         if reset_camera:
             self.var_canvas_mode.set("3d")
         self._redraw_canvas()
+        if trigger_preview:
+            self._request_blender_preview()
+
+    def _request_blender_preview(self) -> None:
+        """Request a fast low-res Blender Cycles preview of the current viewport state."""
+        if self._structure_cache is None or self._vp_scene is None:
+            return
+        blender_raw = self.var_blender.get().strip()
+        if not blender_raw:
+            try:
+                blender_raw = str(find_blender_executable())
+                self.var_blender.set(blender_raw)
+            except FileNotFoundError:
+                return
+        blender_path = Path(blender_raw).expanduser()
+        if not blender_path.is_file():
+            return
+
+        struct_json = Path(self._preview_tmp_dir.name) / "preview_structure.json"
+        if self._written_struct_version != self._structure_version or not struct_json.is_file():
+            struct_json.write_text(json.dumps(self._structure_cache), encoding="utf-8")
+            self._written_struct_version = self._structure_version
+
+        style_path = resolve_style_path(self.var_style.get().strip() or "default")
+        style_mtime = style_path.stat().st_mtime if style_path.is_file() else 0.0
+        prev_w, prev_h = compute_preview_resolution(int(self.var_res_w.get()), int(self.var_res_h.get()), max_side=560)
+        prev_samples = min(10, max(4, int(self.var_samples.get())))
+
+        crop_mode = self.var_crop_z_mode.get()
+        if crop_mode == "auto":
+            crop_z: str | None = "auto"
+        elif crop_mode == "custom":
+            crop_z = self.var_crop_z_custom.get().strip() or None
+        else:
+            crop_z = None
+
+        if self._use_interactive_cam:
+            view_arg: str | dict[str, Any] = self._vp_scene.to_view_dict(prev_w, prev_h)
+        elif self.var_view_mode.get() == "file" and self.var_view_file.get().strip():
+            view_arg = str(Path(self.var_view_file.get().strip()).expanduser())
+        else:
+            view_arg = self.var_view_preset.get().strip() or "iso"
+
+        scene_key = json.dumps(
+            [
+                self._structure_version,
+                str(style_path),
+                style_mtime,
+                self.var_bonds.get(),
+                self.var_bond_color.get(),
+                round(float(self.var_radius_scale.get()), 4),
+                bool(self.var_show_cell.get()),
+                crop_z,
+                bool(self.var_fit_view.get()),
+            ]
+        )
+
+        self._preview_seq += 1
+        seq = self._preview_seq
+        out_png = Path(self._preview_tmp_dir.name) / f"preview_{seq % 2}.png"
+        if not self._busy:
+            self.var_status.set("Rendering fast Blender preview...")
+        self._preview_worker.request(
+            {
+                "action": "render",
+                "seq": seq,
+                "blender_exe": str(blender_path),
+                "scene_key": scene_key,
+                "structure": str(struct_json),
+                "style": str(style_path),
+                "crop_z": crop_z,
+                "resolution": [prev_w, prev_h],
+                "samples": prev_samples,
+                "bonds": None if self.var_bonds.get() == "style" else self.var_bonds.get(),
+                "bond_color": None if self.var_bond_color.get() == "style" else self.var_bond_color.get(),
+                "radius_scale": float(self.var_radius_scale.get()),
+                "no_cell": not bool(self.var_show_cell.get()),
+                "fit_view": bool(self.var_fit_view.get()) if self.var_view_mode.get() == "file" else False,
+                "view": view_arg,
+                "out": str(out_png),
+            }
+        )
 
     def _on_reset_view(self) -> None:
         self._use_interactive_cam = False
@@ -925,6 +1177,7 @@ class AtomicBlenderApp(tk.Tk):
             self._apply_view_to_viewport(self._vp_scene)
             self.var_canvas_mode.set("3d")
             self._redraw_canvas()
+            self._request_blender_preview()
 
     def _on_save_view_json(self) -> None:
         if self._vp_scene is None:
@@ -978,6 +1231,7 @@ class AtomicBlenderApp(tk.Tk):
 
         self.var_canvas_mode.set("3d")
         self._use_interactive_cam = True
+        self._preview_seq += 1
         self._draw_3d_viewport()
 
     def _on_canvas_mouse_up(self, _event: tk.Event) -> None:
@@ -986,6 +1240,7 @@ class AtomicBlenderApp(tk.Tk):
             self._drag_mode = None
             if self.var_canvas_mode.get() == "3d":
                 self._draw_3d_viewport(interactive=False)
+                self._request_blender_preview()
 
     def _on_canvas_wheel(self, event: tk.Event) -> None:
         if self._vp_scene is None:
@@ -996,12 +1251,14 @@ class AtomicBlenderApp(tk.Tk):
     def _schedule_hq_redraw(self) -> None:
         if self._hq_after_id is not None:
             self.after_cancel(self._hq_after_id)
-        self._hq_after_id = self.after(140, self._run_hq_redraw)
+        self._hq_after_id = self.after(220, self._run_hq_redraw)
 
     def _run_hq_redraw(self) -> None:
         self._hq_after_id = None
-        if not self._dragging and self.var_canvas_mode.get() == "3d" and self._vp_scene is not None:
-            self._draw_3d_viewport(interactive=False)
+        if not self._dragging and self._vp_scene is not None:
+            if self.var_canvas_mode.get() == "3d":
+                self._draw_3d_viewport(interactive=False)
+            self._request_blender_preview()
 
     def _zoom_3d(self, factor: float) -> None:
         if self._vp_scene is None:
@@ -1009,6 +1266,7 @@ class AtomicBlenderApp(tk.Tk):
         self.var_canvas_mode.set("3d")
         self._vp_scene.zoom(factor)
         self._use_interactive_cam = True
+        self._preview_seq += 1
         self._draw_3d_viewport(interactive=True)
         self._schedule_hq_redraw()
 
@@ -1170,7 +1428,7 @@ class AtomicBlenderApp(tk.Tk):
             self.canvas.create_text(
                 cw // 2,
                 ch // 2,
-                text="Drag & drop a structure file (or view.json / style.json) anywhere on this window\nor click 'Browse...' and 'Render & Preview'",
+                text="Drag & drop a structure file (or view.json / style.json) anywhere on this window\nor click 'Browse...' and 'Render High-Res Output'",
                 justify=tk.CENTER,
                 fill="#555555",
             )
@@ -1192,6 +1450,22 @@ class AtomicBlenderApp(tk.Tk):
         self.canvas.create_image(cw // 2, ch // 2, image=self._photo_ref, anchor=tk.CENTER)
 
     def destroy(self) -> None:
+        self._destroyed = True
+        for aid_attr in ("_poll_after_id", "_inspect_after_id", "_hq_after_id"):
+            aid = getattr(self, aid_attr, None)
+            if aid is not None:
+                try:
+                    self.after_cancel(aid)
+                except Exception:
+                    pass
+                setattr(self, aid_attr, None)
+        if hasattr(self, "_preview_worker"):
+            self._preview_worker.stop()
+        if hasattr(self, "_preview_tmp_dir"):
+            try:
+                self._preview_tmp_dir.cleanup()
+            except Exception:
+                pass
         for tmp_p in getattr(self, "_temp_view_files", []):
             try:
                 tmp_p.unlink(missing_ok=True)
@@ -1200,6 +1474,9 @@ class AtomicBlenderApp(tk.Tk):
         super().destroy()
 
     def _poll_queue(self) -> None:
+        self._poll_after_id = None
+        if getattr(self, "_destroyed", False):
+            return
         while True:
             try:
                 kind, payload = self._queue.get_nowait()
@@ -1211,8 +1488,21 @@ class AtomicBlenderApp(tk.Tk):
                 summary, neutral = payload
                 self.var_inspector.set(str(summary))
                 self._structure_cache = neutral
+                self._structure_version += 1
                 self._use_interactive_cam = False
-                self._rebuild_viewport(reset_camera=True)
+                self._rebuild_viewport(reset_camera=True, trigger_preview=True)
+            elif kind == "preview_done":
+                seq, png_path = payload
+                if seq == self._preview_seq and not self._dragging:
+                    self._load_preview(png_path)
+                    if not self._busy:
+                        self.var_status.set("Blender preview ready (drag to rotate / scroll to zoom)")
+            elif kind == "preview_err":
+                seq, msg = payload
+                if seq == self._preview_seq:
+                    self._append_log(f"Preview error: {msg}")
+                    if not self._busy:
+                        self.var_status.set("3D preview active (Blender preview failed)")
             elif kind == "drop":
                 self.handle_dropped_files(list(payload))
             elif kind == "log":
@@ -1224,12 +1514,14 @@ class AtomicBlenderApp(tk.Tk):
                     self._set_busy(False, f"Failed (exit {rc}) after {elapsed:.1f}s")
                     messagebox.showerror("Render Failed", f"Command exited with status {rc}. Check Log for details.")
                 elif mode == "render":
+                    self._preview_seq += 1
                     self._set_busy(False, f"Rendered {target_path.name} in {elapsed:.1f}s")
                     self._load_preview(target_path)
                 elif mode == "open_blender":
                     self._set_busy(False, f"Opening {target_path.name} in Blender...")
                     subprocess.Popen([self._pending_blender_exe, str(target_path)])
-        self.after(100, self._poll_queue)
+        if not getattr(self, "_destroyed", False):
+            self._poll_after_id = self.after(100, self._poll_queue)
 
     def handle_dropped_files(self, paths: list[str]) -> None:
         """Apply dropped structure, view.json, or style.json files to the GUI state."""
@@ -1247,13 +1539,14 @@ class AtomicBlenderApp(tk.Tk):
                     self._apply_view_to_viewport(self._vp_scene)
                     self.var_canvas_mode.set("3d")
                     self._redraw_canvas()
+                    self._request_blender_preview()
                 self.var_status.set(f"Loaded view.json via drop: {p.name}")
                 self._append_log(f"Dropped view file: {p}")
             elif kind == "style":
                 self.var_style.set(str(p))
                 self.var_status.set(f"Loaded style JSON via drop: {p.name}")
                 self._append_log(f"Dropped style file: {p}")
-                self._rebuild_viewport(reset_camera=False)
+                self._rebuild_viewport(reset_camera=False, trigger_preview=True)
             else:
                 self.var_input.set(str(p))
                 self.var_output.set(str(p.with_suffix(".png")))

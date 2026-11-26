@@ -312,6 +312,100 @@ class TestAtomicBlender(unittest.TestCase):
         finally:
             app.destroy()
 
+    def test_h_outline_bonds_and_auto_preview_dispatch(self) -> None:
+        from PIL import Image
+        import numpy as np
+        from atomic_blender.cli import resolve_style_path
+        from atomic_blender.gui import AtomicBlenderApp, compute_preview_resolution
+        from atomic_blender.viewport3d import ViewportScene
+
+        self.assertEqual(compute_preview_resolution(1400, 1200, max_side=560), (560, 480))
+        self.assertEqual(compute_preview_resolution(800, 1400, max_side=560), (320, 560))
+        self.assertEqual(compute_preview_resolution(400, 300, max_side=560), (400, 300))
+
+        style = json.loads(resolve_style_path("studio").read_text(encoding="utf-8"))
+        structure = {
+            "symbols": ["O", "H", "H"],
+            "positions": [[0.0, 0.0, 0.0], [0.96, 0.0, 0.0], [-0.24, 0.93, 0.0]],
+            "cell": [[10.0, 0.0, 0.0], [0.0, 10.0, 0.0], [0.0, 0.0, 10.0]],
+            "pbc": [True, True, True],
+            "has_cell": True,
+            "origin": [0.0, 0.0, 0.0],
+        }
+        vp = ViewportScene.from_neutral_dict(structure, style)
+        self.assertIn("H", vp._outline_symbols)
+        h_sprite = vp._get_sprite("H", 40, 2)
+        self.assertIsNotNone(h_sprite)
+        arr = np.asarray(h_sprite)
+        # Edge pixel near silhouette should be slightly darker than pure center highlight
+        center_lum = float(arr[20, 20, :3].mean())
+        edge_lum = float(arr[20, 1, :3].mean())
+        self.assertLess(edge_lum, center_lum)
+
+        class _RecorderWorker:
+            def __init__(self) -> None:
+                self.requests: list[dict[str, object]] = []
+
+            def request(self, payload: dict[str, object]) -> None:
+                self.requests.append(payload)
+
+            def stop(self) -> None:
+                pass
+
+        with tempfile.TemporaryDirectory() as tmp:
+            fake_blender = Path(tmp) / "blender_stub.exe"
+            fake_blender.write_text("stub", encoding="utf-8")
+            fake_png = Path(tmp) / "preview.png"
+            Image.new("RGBA", (64, 64), (200, 220, 240, 255)).save(fake_png)
+
+            app = AtomicBlenderApp()
+            app.withdraw()
+            try:
+                recorder = _RecorderWorker()
+                app._preview_worker.stop()
+                app._preview_worker = recorder  # type: ignore[assignment]
+                app.var_blender.set(str(fake_blender))
+                app.var_res_w.set(1400)
+                app.var_res_h.set(1200)
+                app.var_samples.set(64)
+                app._structure_cache = structure
+                app._structure_version = 1
+                app._rebuild_viewport(reset_camera=True, trigger_preview=True)
+
+                self.assertEqual(len(recorder.requests), 1)
+                req1 = recorder.requests[0]
+                self.assertEqual(req1["resolution"], [560, 480])
+                self.assertEqual(req1["samples"], 10)
+                seq1 = int(req1["seq"])  # type: ignore[arg-type]
+
+                # Matching preview_done flips canvas cleanly to rendered PNG
+                app._queue.put(("preview_done", (seq1, fake_png)))
+                app._poll_queue()
+                self.assertEqual(app.var_canvas_mode.get(), "png")
+
+                # Simulate drag motion returning immediately to 3D and invalidating old seq
+                app._dragging = True
+                app._drag_mode = "orbit"
+                app._drag_last = (10, 10)
+                ev = type("E", (), {"x": 25, "y": 18, "state": 0})()
+                app._on_canvas_motion(ev)  # type: ignore[arg-type]
+                self.assertEqual(app.var_canvas_mode.get(), "3d")
+                self.assertGreater(app._preview_seq, seq1)
+
+                # Stale preview_done for seq1 is ignored while moving / invalidated
+                app._queue.put(("preview_done", (seq1, fake_png)))
+                app._poll_queue()
+                self.assertEqual(app.var_canvas_mode.get(), "3d")
+
+                # Release mouse -> triggers new Blender preview seq
+                app._on_canvas_mouse_up(ev)  # type: ignore[arg-type]
+                self.assertEqual(len(recorder.requests), 2)
+                req2 = recorder.requests[1]
+                self.assertIsInstance(req2["view"], dict)
+                self.assertEqual(req2["scene_key"], req1["scene_key"])
+            finally:
+                app.destroy()
+
 
 if __name__ == "__main__":
     unittest.main()

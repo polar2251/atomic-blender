@@ -254,6 +254,36 @@ def build_sphere_sprite(
     return Image.fromarray(rgba, mode="RGBA")
 
 
+def _needs_light_outline(symbol: str, hex_color: str) -> bool:
+    r, g, b = _hex_to_rgb(hex_color)
+    luminance = 0.299 * r + 0.587 * g + 0.114 * b
+    return symbol == "H" or luminance > 215.0
+
+
+def _apply_thin_outline(
+    sprite: Any,
+    outline_rgb: tuple[int, int, int] = (115, 120, 130),
+    strength: float = 0.65,
+) -> Any:
+    """Apply a very thin subtle outer outline so white/H spheres stay crisp on light backgrounds."""
+    w, h = sprite.size
+    if w < 6 or h < 6:
+        return sprite
+    arr = np.array(sprite, dtype=np.float32)
+    coords = np.arange(w, dtype=np.float32) - (w - 1) * 0.5
+    u, v = np.meshgrid(coords, coords)
+    dist_px = np.sqrt(u * u + v * v)
+    r_px = w * 0.5
+    ring = np.clip(1.0 - np.abs(dist_px - (r_px - 0.9)) / 0.9, 0.0, 1.0)
+    visible = arr[:, :, 3] > 20.0
+    blend = (ring * strength * visible)[:, :, None]
+    if not np.any(blend):
+        return sprite
+    target = np.array(outline_rgb, dtype=np.float32).reshape(1, 1, 3)
+    arr[:, :, :3] = arr[:, :, :3] * (1.0 - blend) + target * blend
+    return Image.fromarray(np.clip(arr, 0.0, 255.0).astype(np.uint8), mode="RGBA")
+
+
 def _blit_rgba(canvas: Any, sprite: Any, x0: int, y0: int) -> None:
     """Composite ``sprite`` onto ``canvas`` at ``(x0, y0)`` clipping to canvas bounds."""
     cw, ch = canvas.size
@@ -373,6 +403,7 @@ class ViewportScene:
     margin: float = 1.08
     _base_sprites: dict[tuple[str, int], Any] = field(default_factory=dict)
     _resized_sprites: dict[tuple[str, int, int], Any] = field(default_factory=dict)
+    _outline_symbols: set[str] = field(default_factory=set)
 
     def __post_init__(self) -> None:
         if self.target is None:
@@ -403,6 +434,7 @@ class ViewportScene:
         elem_out: dict[str, str] = {}
         elem_hi: dict[str, str] = {}
         base_sprites: dict[tuple[str, int], Any] = {}
+        outline_syms: set[str] = set()
 
         for sym in set(symbols):
             c = resolve_element_color(sym, style)
@@ -410,6 +442,8 @@ class ViewportScene:
             elem_out[sym] = _shade_hex(c, 0.62)
             elem_hi[sym] = _shade_hex(c, 1.0, mix_white=0.42)
             elem_r[sym] = resolve_element_radius(sym, style) * eff_scale
+            if _needs_light_outline(sym, c):
+                outline_syms.add(sym)
 
             if _HAS_PIL:
                 profile = mat_cfg.get("metal" if sym in METAL_ELEMENTS else "nonmetal", {})
@@ -491,6 +525,7 @@ class ViewportScene:
             cell_vecs=cell_vecs,
             margin=float(cam_cfg.get("margin", 1.08)),
             _base_sprites=base_sprites,
+            _outline_symbols=outline_syms,
         )
 
     def _get_sprite(self, symbol: str, diameter_px: int, bucket: int) -> Any:
@@ -504,6 +539,8 @@ class ViewportScene:
         if len(self._resized_sprites) > 600:
             self._resized_sprites.clear()
         resized = base.resize((diameter_px, diameter_px), Image.Resampling.LANCZOS)
+        if symbol in self._outline_symbols:
+            resized = _apply_thin_outline(resized)
         self._resized_sprites[key] = resized
         return resized
 
@@ -642,7 +679,7 @@ class ViewportScene:
             z_span = max(1e-3, z_max - z_min)
 
             if len(self.bond_i) > 0:
-                bond_w = max(2, min(20, int(round(2.0 * self.bond_radius * px_per_a))))
+                bond_w = max(3, min(26, int(round(2.7 * self.bond_radius * px_per_a))))
                 bi, bj = self.bond_i, self.bond_j
                 for k in range(len(bi)):
                     i_idx, j_idx = int(bi[k]), int(bj[k])
