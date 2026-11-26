@@ -29,12 +29,17 @@ from atomic_blender.viewport3d import (
     atom_label,
     choose_scale_bar_angstrom,
     compose_dual_view_panel,
+    compute_z_colormap_colors,
+    find_dashed_contacts,
+    merge_ghost_structure,
     preset_to_quat,
     quat_to_axes,
     render_atom_labels_and_selection_overlay,
+    render_colorbar_overlay,
     render_measurement_callout_overlay,
     render_reference_axes_overlay,
     render_scale_bar_overlay,
+    sample_colormap_hex,
 )
 
 try:
@@ -618,6 +623,32 @@ def compute_depth_fade_alphas(
     ]
 
 
+MATERIAL_FINISH_PRESETS: dict[str, dict[str, float]] = {
+    "studio": {},
+    "chalk": {
+        "roughness": 0.88,
+        "specular": 0.12,
+        "metallic": 0.0,
+        "coat_weight": 0.0,
+        "ao_factor": 0.35,
+    },
+    "flat": {
+        "roughness": 1.0,
+        "specular": 0.0,
+        "metallic": 0.0,
+        "coat_weight": 0.0,
+        "ao_factor": 0.0,
+    },
+    "metallic": {
+        "roughness": 0.18,
+        "specular": 0.85,
+        "metallic": 0.80,
+        "coat_weight": 0.25,
+        "ao_factor": 0.20,
+    },
+}
+
+
 def compute_selection_measurement(
     symbols: list[str],
     positions: Any,
@@ -980,6 +1011,8 @@ class AtomicBlenderApp(tk.Tk):
         self._photo_ref: Any = None
         self._vp_photo_ref: Any = None
         self._structure_cache: dict[str, Any] | None = None
+        self._base_structure_cache: dict[str, Any] | None = None
+        self._ghost_structure_cache: dict[str, Any] | None = None
         self._structure_version = 0
         self._written_struct_version = -1
         self._vp_scene: ViewportScene | None = None
@@ -1203,6 +1236,12 @@ class AtomicBlenderApp(tk.Tk):
         self.var_axes_labels = tk.BooleanVar(value=True)
         self.var_axes_fixed = tk.BooleanVar(value=True)
         self.var_show_scale_bar = tk.BooleanVar(value=False)
+        self.var_show_hbonds = tk.BooleanVar(value=False)
+        self.var_hbond_mode = tk.StringVar(value="hbond")
+        self.var_hbond_min = tk.DoubleVar(value=1.55)
+        self.var_hbond_max = tk.DoubleVar(value=2.55)
+        self.var_material_finish = tk.StringVar(value="studio")
+        self.var_color_map = tk.StringVar(value="none")
         self.var_dark_backdrop = tk.BooleanVar(value=True)
 
         self.var_res_w = tk.IntVar(value=1400)
@@ -1533,12 +1572,25 @@ class AtomicBlenderApp(tk.Tk):
             f_pub,
             text="Smart Slab Spotlight",
             command=self._apply_smart_slab_spotlight,
-        ).grid(row=0, column=0, sticky=tk.EW, padx=(0, 4))
+        ).grid(row=0, column=0, sticky=tk.EW, padx=(0, 4), pady=(0, 4))
         ttk.Button(
             f_pub,
             text="Render Top + Side Panel",
             command=self._on_render_top_side_panel,
-        ).grid(row=0, column=1, sticky=tk.EW)
+        ).grid(row=0, column=1, sticky=tk.EW, pady=(0, 4))
+        row_ghost = ttk.Frame(f_pub)
+        row_ghost.grid(row=1, column=0, sticky=tk.EW, padx=(0, 4))
+        row_ghost.columnconfigure(0, weight=1)
+        row_ghost.columnconfigure(1, weight=0)
+        ttk.Button(row_ghost, text="Ghost Overlay...", command=self._on_load_ghost_structure).grid(
+            row=0, column=0, sticky=tk.EW, padx=(0, 3)
+        )
+        ttk.Button(row_ghost, text="Clear", width=5, command=self._clear_ghost_structure).grid(row=0, column=1)
+        ttk.Button(
+            f_pub,
+            text="Batch Render Files...",
+            command=self._on_batch_render_files,
+        ).grid(row=1, column=1, sticky=tk.EW)
 
         # --- Selection Tab: Atom Labels, Opacity / Invert, Atom List ---
         self._build_selection_tab(self.tab_selection)
@@ -1726,6 +1778,7 @@ class AtomicBlenderApp(tk.Tk):
             ("crystal_lattice", "Crystal Lattice", self.var_show_cell, lambda: self._switch_tab("tool")),
             ("reference_axes", "Reference Axes", self.var_show_axes, self._toggle_axes_options),
             ("scale_bar", "Scale Bar (Å)", self.var_show_scale_bar, None),
+            ("hbonds", "H-Bonds / Contacts", self.var_show_hbonds, self._toggle_hbond_options),
         )
         for idx, (key, label_txt, var, dots_cb) in enumerate(rows):
             row_bg = "#1E2128" if idx % 2 == 0 else "#232730"
@@ -1795,6 +1848,31 @@ class AtomicBlenderApp(tk.Tk):
         cb_bcol.grid(row=2, column=1, sticky=tk.W, padx=4, pady=2)
         cb_bcol.bind("<<ComboboxSelected>>", lambda _e: self._on_repr_changed())
 
+        ttk.Label(self.f_rep_body, text="Color Map").grid(row=3, column=0, sticky=tk.W, pady=2)
+        cb_cmap = ttk.Combobox(
+            self.f_rep_body,
+            textvariable=self.var_color_map,
+            values=["none", "viridis", "coolwarm", "plasma"],
+            state="readonly",
+            width=12,
+        )
+        cb_cmap.grid(row=3, column=1, sticky=tk.W, padx=4, pady=2)
+        cb_cmap.bind("<<ComboboxSelected>>", lambda _e: self._on_colormap_changed())
+
+        ttk.Label(self.f_rep_body, text="Finish").grid(row=4, column=0, sticky=tk.W, pady=2)
+        row_fin = ttk.Frame(self.f_rep_body)
+        row_fin.grid(row=4, column=1, columnspan=2, sticky=tk.EW, padx=4, pady=2)
+        for c_i, (fin_lbl, fin_key) in enumerate((
+            ("Studio", "studio"),
+            ("Chalk", "chalk"),
+            ("Flat", "flat"),
+            ("Metal", "metallic"),
+        )):
+            row_fin.columnconfigure(c_i, weight=1, uniform="fin_btn")
+            ttk.Button(
+                row_fin, text=fin_lbl, command=lambda fk=fin_key: self._set_material_finish(fk)
+            ).grid(row=0, column=c_i, sticky=tk.EW, padx=(0, 2 if c_i < 3 else 0))
+
         self.f_axes_opts = tk.Frame(f_disp, bg="#181A20", padx=6, pady=4, highlightbackground="#2E3440", highlightthickness=1)
         self.f_axes_opts.pack(fill=tk.X, pady=(4, 0))
         tk.Label(self.f_axes_opts, text="Axes:", bg="#181A20", fg="#94A3B8", font=("Segoe UI", 8, "bold")).pack(
@@ -1815,6 +1893,29 @@ class AtomicBlenderApp(tk.Tk):
             bg="#181A20",
         ).pack(side=tk.LEFT)
         self._axes_opts_visible = True
+
+        self.f_hbond_opts = tk.Frame(f_disp, bg="#181A20", padx=6, pady=4, highlightbackground="#2E3440", highlightthickness=1)
+        tk.Label(self.f_hbond_opts, text="Contacts:", bg="#181A20", fg="#94A3B8", font=("Segoe UI", 8, "bold")).pack(
+            side=tk.LEFT, padx=(0, 4)
+        )
+        cb_hb = ttk.Combobox(
+            self.f_hbond_opts,
+            textvariable=self.var_hbond_mode,
+            values=["hbond", "interface", "range"],
+            state="readonly",
+            width=9,
+        )
+        cb_hb.pack(side=tk.LEFT, padx=(0, 4))
+        cb_hb.bind("<<ComboboxSelected>>", lambda _e: self._on_hbonds_changed())
+        ttk.Entry(self.f_hbond_opts, textvariable=self.var_hbond_min, width=5, justify=tk.CENTER).pack(
+            side=tk.LEFT, padx=(0, 2)
+        )
+        tk.Label(self.f_hbond_opts, text="~", bg="#181A20", fg="#94A3B8").pack(side=tk.LEFT)
+        ttk.Entry(self.f_hbond_opts, textvariable=self.var_hbond_max, width=5, justify=tk.CENTER).pack(
+            side=tk.LEFT, padx=(2, 4)
+        )
+        ttk.Button(self.f_hbond_opts, text="Apply", width=5, command=self._on_hbonds_changed).pack(side=tk.LEFT)
+        self._hbond_opts_visible = False
 
     def rotate_camera_deg(
         self,
@@ -1890,6 +1991,14 @@ class AtomicBlenderApp(tk.Tk):
             self.f_axes_opts.pack(fill=tk.X, pady=(4, 0))
             self._axes_opts_visible = True
 
+    def _toggle_hbond_options(self) -> None:
+        if getattr(self, "_hbond_opts_visible", False):
+            self.f_hbond_opts.pack_forget()
+            self._hbond_opts_visible = False
+        else:
+            self.f_hbond_opts.pack(fill=tk.X, pady=(4, 0))
+            self._hbond_opts_visible = True
+
     def _draw_rounded_checkbox(self, canvas: tk.Canvas, checked: bool) -> None:
         canvas.delete("all")
         fill = "#0D9488" if checked else "#14161A"
@@ -1961,6 +2070,12 @@ class AtomicBlenderApp(tk.Tk):
             if self._vp_scene is not None:
                 self._vp_scene.show_scale_bar = bool(self.var_show_scale_bar.get())
             self._redraw_canvas()
+            return
+
+        if key == "hbonds":
+            self.var_show_hbonds.set(not bool(self.var_show_hbonds.get()))
+            self._refresh_display_checks()
+            self._on_hbonds_changed()
 
     def _on_axes_option_changed(self) -> None:
         if self._vp_scene is not None:
@@ -2101,6 +2216,13 @@ class AtomicBlenderApp(tk.Tk):
                     self._vp_scene.ortho_scale,
                     res_w,
                     res_h,
+                    dark_backdrop=bool(self.var_dark_backdrop.get()),
+                )
+            cmap_info = getattr(self, "_active_colormap_info", None)
+            if cmap_info is not None and from_tmp_preview:
+                render_colorbar_overlay(
+                    out,
+                    *cmap_info,
                     dark_backdrop=bool(self.var_dark_backdrop.get()),
                 )
             if self.var_show_axes.get() and from_tmp_preview:
@@ -2556,6 +2678,240 @@ class AtomicBlenderApp(tk.Tk):
 
         threading.Thread(target=worker, daemon=True).start()
 
+    def _set_material_finish(self, finish_key: str) -> None:
+        if finish_key not in MATERIAL_FINISH_PRESETS:
+            finish_key = "studio"
+        self.var_material_finish.set(finish_key)
+        self.var_status.set(f"Material finish: {finish_key}")
+        self._rebuild_viewport(reset_camera=False, trigger_preview=True)
+
+    def _on_colormap_changed(self) -> None:
+        cmap = self.var_color_map.get()
+        self.var_status.set("Element CPK colors" if cmap == "none" else f"Z-Height colormap: {cmap}")
+        self._rebuild_viewport(reset_camera=False, trigger_preview=True)
+
+    def _on_hbonds_changed(self) -> None:
+        if self._structure_cache is not None:
+            self._rebuild_viewport(reset_camera=False, trigger_preview=True)
+        else:
+            self._refresh_display_checks()
+
+    def _apply_ghost_structure_dict(self, ghost_neutral: dict[str, Any], label_name: str = "ghost") -> None:
+        if self._structure_cache is None:
+            return
+        if self._base_structure_cache is None:
+            self._base_structure_cache = dict(self._structure_cache)
+        self._ghost_structure_cache = dict(ghost_neutral)
+        merged = merge_ghost_structure(self._base_structure_cache, self._ghost_structure_cache)
+        self._structure_cache = merged
+        self._structure_version += 1
+        self._written_struct_version = -1
+        self.var_status.set(f"Ghost overlay active: {label_name}")
+        self._rebuild_viewport(reset_camera=False, trigger_preview=True)
+
+    def _on_load_ghost_structure(self) -> None:
+        if self._structure_cache is None:
+            messagebox.showinfo("Ghost Overlay", "Load a main structure first.")
+            return
+        path = filedialog.askopenfilename(
+            title="Select Reference / Initial Structure for Ghost Overlay",
+            filetypes=[
+                ("Structure files", "*.cif *.vasp *.xyz *.extxyz *.data *.lmp *.json POSCAR CONTCAR"),
+                ("All files", "*.*"),
+            ],
+        )
+        if not path:
+            return
+        try:
+            p = Path(path).expanduser()
+            type_map = self.var_type_map.get().strip() or None
+            if p.suffix.lower() == ".json":
+                ghost_dict = json.loads(p.read_text(encoding="utf-8"))
+            else:
+                rep = (int(self.var_rep_x.get()), int(self.var_rep_y.get()), int(self.var_rep_z.get()))
+                atoms = read_structure(p, type_map=type_map)
+                eff_rep = rep if atoms.cell.rank == 3 else (1, 1, 1)
+                ghost_dict = atoms_to_neutral_dict(
+                    atoms, source=str(p), replicate=eff_rep, wrap=bool(self.var_wrap.get())
+                )
+            self._apply_ghost_structure_dict(ghost_dict, label_name=p.name)
+        except Exception as exc:
+            messagebox.showerror("Ghost Overlay Error", str(exc))
+
+    def _clear_ghost_structure(self) -> None:
+        if self._ghost_structure_cache is None or self._base_structure_cache is None:
+            self.var_status.set("No ghost overlay active")
+            return
+        self._ghost_structure_cache = None
+        self._structure_cache = dict(self._base_structure_cache)
+        self._structure_cache.pop("dashed_bonds", None)
+        self._structure_cache.pop("ghost_start_index", None)
+        self._structure_version += 1
+        self._written_struct_version = -1
+        self.var_status.set("Cleared ghost overlay")
+        self._rebuild_viewport(reset_camera=False, trigger_preview=True)
+
+    def _on_batch_render_files(self) -> None:
+        if self._busy:
+            return
+        paths = filedialog.askopenfilenames(
+            title="Select Structures for Batch Render",
+            filetypes=[
+                ("Structure files", "*.cif *.vasp *.xyz *.extxyz *.data *.lmp *.json POSCAR CONTCAR"),
+                ("All files", "*.*"),
+            ],
+        )
+        if not paths:
+            return
+        out_dir_str = filedialog.askdirectory(title="Select Output Folder for Batch PNGs")
+        if not out_dir_str:
+            return
+        try:
+            cfg = self._collect_config()
+            eff_style = self._effective_style_path_for_cli(cfg.style)
+        except Exception as exc:
+            messagebox.showerror("Batch Render Error", str(exc))
+            return
+
+        out_dir = Path(out_dir_str)
+        file_list = [Path(p) for p in paths]
+        self._task_start = time.monotonic()
+        self._set_busy(True, f"Batch rendering {len(file_list)} files...")
+
+        view_file_arg = ""
+        if self._vp_scene is not None and self._use_interactive_cam:
+            view_dict = self._vp_scene.to_view_dict(cfg.resolution[0], cfg.resolution[1])
+            tmp_fd, tmp_name = tempfile.mkstemp(prefix="atomic_batch_vp_", suffix=".json")
+            os.close(tmp_fd)
+            Path(tmp_name).write_text(json.dumps(view_dict, indent=2), encoding="utf-8")
+            self._temp_view_files.append(Path(tmp_name))
+            view_file_arg = tmp_name
+
+        def worker() -> None:
+            last_png: Path | None = None
+            for idx, src in enumerate(file_list, start=1):
+                out_p = out_dir / f"{src.stem}.png"
+                c = GuiRenderConfig(
+                    input_path=str(src),
+                    output_path=str(out_p),
+                    style=eff_style,
+                    view_mode="file" if view_file_arg else cfg.view_mode,
+                    view_preset=cfg.view_preset,
+                    view_file=view_file_arg or cfg.view_file,
+                    fit_view=False if view_file_arg else cfg.fit_view,
+                    type_map=cfg.type_map,
+                    replicate=cfg.replicate,
+                    wrap=cfg.wrap,
+                    crop_z_mode=cfg.crop_z_mode,
+                    crop_z_custom=cfg.crop_z_custom,
+                    bonds=cfg.bonds,
+                    bond_color=cfg.bond_color,
+                    radius_scale=cfg.radius_scale,
+                    show_cell=cfg.show_cell,
+                    resolution=cfg.resolution,
+                    samples=cfg.samples,
+                    blender_exe=cfg.blender_exe,
+                )
+                args = build_render_cli_args(c, out_png=out_p)
+                self._queue.put(("log", f"[{idx}/{len(file_list)}] $ atomic-blender {' '.join(args)}"))
+                proc = subprocess.Popen(
+                    [sys.executable, "-m", "atomic_blender.cli", *args],
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.STDOUT,
+                    text=True,
+                    bufsize=1,
+                )
+                assert proc.stdout is not None
+                for raw_line in proc.stdout:
+                    self._queue.put(("log", raw_line))
+                rc = proc.wait()
+                if rc != 0:
+                    self._queue.put(("done_batch", (rc, idx - 1, len(file_list), last_png)))
+                    return
+                last_png = out_p
+            self._queue.put(("done_batch", (0, len(file_list), len(file_list), last_png)))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _refresh_turnkey_structure_annotations(self, style: dict[str, Any]) -> tuple[str, float, float] | None:
+        """Compute active Z-height colormap and 3D dashed contact pairs on ``_structure_cache``."""
+        if self._structure_cache is None:
+            return None
+        syms = self._structure_cache.get("symbols", [])
+        pos = self._structure_cache.get("positions", [])
+        n = len(syms)
+        ghost_start = self._structure_cache.get("ghost_start_index")
+        gs_int = int(ghost_start) if isinstance(ghost_start, int) and 0 < ghost_start < n else None
+        ghost_tint = str(self._structure_cache.get("ghost_tint", "#38BDF8"))
+
+        cmap = self.var_color_map.get() if hasattr(self, "var_color_map") else "none"
+        cmap_info: tuple[str, float, float] | None = None
+        prev_colors = self._structure_cache.get("colors")
+        if cmap in ("viridis", "coolwarm", "plasma") and n > 0 and len(pos) == n:
+            main_count = gs_int if gs_int is not None else n
+            cols_main, z_lo, z_hi = compute_z_colormap_colors(pos[:main_count], cmap)
+            new_cols = cols_main + ([ghost_tint] * (n - main_count) if gs_int is not None else [])
+            if prev_colors != new_cols:
+                self._structure_cache["colors"] = new_cols
+                self._written_struct_version = -1
+            cmap_info = (cmap, z_lo, z_hi)
+        elif gs_int is not None:
+            from atomic_blender.elements import resolve_element_color
+
+            new_cols = [resolve_element_color(syms[i], style) for i in range(gs_int)] + [ghost_tint] * (n - gs_int)
+            if prev_colors != new_cols:
+                self._structure_cache["colors"] = new_cols
+                self._written_struct_version = -1
+        elif "colors" in self._structure_cache:
+            self._structure_cache.pop("colors", None)
+            self._written_struct_version = -1
+
+        dashed: list[list[int]] = []
+        if gs_int is not None and 2 * gs_int == n and len(pos) == n:
+            mp = np.asarray(pos[:gs_int], dtype=np.float64)
+            gp = np.asarray(pos[gs_int:], dtype=np.float64)
+            for i in range(gs_int):
+                if float(np.linalg.norm(mp[i] - gp[i])) >= 0.20:
+                    dashed.append([i, gs_int + i])
+
+        if hasattr(self, "var_show_hbonds") and self.var_show_hbonds.get() and n > 1 and len(pos) == n:
+            from atomic_blender.viewport3d import _find_bonds
+
+            bond_cfg = dict(style.get("bonds", {}))
+            if self.var_bonds.get() != "style":
+                bond_cfg["mode"] = self.var_bonds.get()
+                bond_cfg["enabled"] = self.var_bonds.get() != "none"
+            pos_arr = np.asarray(pos, dtype=np.float64)
+            bi, bj = _find_bonds(syms, pos_arr, bond_cfg, ghost_start_index=gs_int)
+            try:
+                d_lo = float(self.var_hbond_min.get())
+                d_hi = float(self.var_hbond_max.get())
+            except Exception:
+                d_lo, d_hi = 1.55, 2.55
+            contacts = find_dashed_contacts(
+                syms,
+                pos_arr,
+                bond_i=bi,
+                bond_j=bj,
+                mode=self.var_hbond_mode.get(),
+                d_min=d_lo,
+                d_max=d_hi,
+                focal_indices=self._selected_atoms or None,
+                ghost_start_index=gs_int,
+            )
+            seen_d = {(min(p[0], p[1]), max(p[0], p[1])) for p in dashed}
+            for ia, ib in contacts:
+                key = (min(ia, ib), max(ia, ib))
+                if key not in seen_d:
+                    seen_d.add(key)
+                    dashed.append([ia, ib])
+
+        prev_dashed = self._structure_cache.get("dashed_bonds", [])
+        if prev_dashed != dashed:
+            self._structure_cache["dashed_bonds"] = dashed
+            self._written_struct_version = -1
+        return cmap_info
+
     def _refresh_element_chip_styles(self) -> None:
         if not getattr(self, "_elem_chip_buttons", None) or self._structure_cache is None:
             return
@@ -2949,8 +3305,9 @@ class AtomicBlenderApp(tk.Tk):
         threading.Thread(target=worker, daemon=True).start()
 
     def _effective_style_path_for_cli(self, style_arg: str) -> str:
-        """Return ``style_arg`` or materialize a temporary style JSON with custom element colors."""
-        if not self._custom_element_colors:
+        """Return ``style_arg`` or materialize a temporary style JSON with custom element colors/finish."""
+        has_finish = hasattr(self, "var_material_finish") and self.var_material_finish.get() != "studio"
+        if not self._custom_element_colors and not has_finish:
             return style_arg
         merged = self._resolve_style_dict()
         tmp_fd, tmp_name = tempfile.mkstemp(prefix="atomic_style_", suffix=".json")
@@ -2961,7 +3318,7 @@ class AtomicBlenderApp(tk.Tk):
         return str(tmp_path)
 
     def _effective_cfg_for_cli(self, cfg: GuiRenderConfig) -> GuiRenderConfig:
-        """Materialize interactive camera view.json, per-atom transparency/scales, and custom element colors."""
+        """Materialize interactive camera view.json, per-atom transparency/scales/colors, and style."""
         eff_input = cfg.input_path
         eff_rep = cfg.replicate
         eff_style = self._effective_style_path_for_cli(cfg.style)
@@ -2970,7 +3327,10 @@ class AtomicBlenderApp(tk.Tk):
             r_scales = self._structure_cache.get("radius_scales")
             has_alpha = isinstance(alphas, list) and any(a < 0.995 for a in alphas)
             has_scale = isinstance(r_scales, list) and any(abs(s - 1.0) > 1e-3 for s in r_scales)
-            if has_alpha or has_scale:
+            has_cols = bool(self._structure_cache.get("colors"))
+            has_dashed = bool(self._structure_cache.get("dashed_bonds"))
+            has_ghost = self._structure_cache.get("ghost_start_index") is not None
+            if has_alpha or has_scale or has_cols or has_dashed or has_ghost:
                 tmp_sfd, tmp_sname = tempfile.mkstemp(prefix="atomic_sel_", suffix=".json")
                 os.close(tmp_sfd)
                 tmp_spath = Path(tmp_sname)
@@ -3118,6 +3478,16 @@ class AtomicBlenderApp(tk.Tk):
             elems = data.setdefault("elements", {})
             cols = elems.setdefault("colors", {})
             cols.update(self._custom_element_colors)
+        fin = self.var_material_finish.get() if hasattr(self, "var_material_finish") else "studio"
+        fin_overrides = MATERIAL_FINISH_PRESETS.get(fin)
+        if fin_overrides:
+            mat = data.setdefault("material", {})
+            mat.update(fin_overrides)
+            for sub_key in ("metal", "nonmetal"):
+                if isinstance(mat.get(sub_key), dict):
+                    for k, v in fin_overrides.items():
+                        if k != "ao_factor":
+                            mat[sub_key][k] = v
         return data
 
     def _apply_view_to_viewport(self, vp: ViewportScene) -> None:
@@ -3159,6 +3529,8 @@ class AtomicBlenderApp(tk.Tk):
             prev_cam = (self._vp_scene.quat, self._vp_scene.target.copy(), self._vp_scene.ortho_scale)
 
         style = self._resolve_style_dict()
+        cmap_info = self._refresh_turnkey_structure_annotations(style)
+        self._active_colormap_info = cmap_info
         vp = ViewportScene.from_neutral_dict(
             self._structure_cache,
             style=style,
@@ -3176,6 +3548,7 @@ class AtomicBlenderApp(tk.Tk):
             show_scale_bar=bool(self.var_show_scale_bar.get()),
             show_measure_overlay=bool(self.var_show_measure_overlay.get()),
             selection_order=list(self._selection_order),
+            colormap_info=cmap_info,
         )
         self._refresh_display_checks()
         self._rebuild_element_chips()
@@ -3221,7 +3594,8 @@ class AtomicBlenderApp(tk.Tk):
         style_path = resolve_style_path(self.var_style.get().strip() or "default")
         style_mtime = style_path.stat().st_mtime if style_path.is_file() else 0.0
         eff_style_path = style_path
-        if self._custom_element_colors:
+        fin_key = self.var_material_finish.get() if hasattr(self, "var_material_finish") else "studio"
+        if self._custom_element_colors or fin_key != "studio":
             merged_style = self._resolve_style_dict()
             eff_style_path = Path(self._preview_tmp_dir.name) / "preview_style.json"
             eff_style_path.write_text(json.dumps(merged_style, indent=2), encoding="utf-8")
@@ -3249,6 +3623,7 @@ class AtomicBlenderApp(tk.Tk):
                 str(style_path),
                 style_mtime,
                 sorted(self._custom_element_colors.items()),
+                fin_key,
                 self.var_bonds.get(),
                 self.var_bond_color.get(),
                 round(float(self.var_radius_scale.get()), 4),
@@ -3257,6 +3632,9 @@ class AtomicBlenderApp(tk.Tk):
                 bool(self.var_fit_view.get()),
                 [round(float(a), 3) for a in self._structure_cache.get("alphas", [])],
                 [round(float(s), 3) for s in self._structure_cache.get("radius_scales", [])],
+                list(self._structure_cache.get("colors", [])),
+                list(self._structure_cache.get("dashed_bonds", [])),
+                self._structure_cache.get("ghost_start_index"),
             ]
         )
 
@@ -3657,6 +4035,13 @@ class AtomicBlenderApp(tk.Tk):
                     res_h,
                     dark_backdrop=dark_bg,
                 )
+            cmap_info = getattr(self, "_active_colormap_info", None)
+            if cmap_info is not None and from_tmp_preview:
+                render_colorbar_overlay(
+                    resized,
+                    *cmap_info,
+                    dark_backdrop=dark_bg,
+                )
             if self.var_show_axes.get() and from_tmp_preview:
                 quat = self._vp_scene.quat if self._vp_scene is not None else (1.0, 0.0, 0.0, 0.0)
                 render_reference_axes_overlay(
@@ -3715,6 +4100,8 @@ class AtomicBlenderApp(tk.Tk):
                 self.var_inspector.set(str(summary))
                 self._selected_atoms.clear()
                 self._selection_order.clear()
+                self._base_structure_cache = dict(neutral)
+                self._ghost_structure_cache = None
                 self._structure_cache = neutral
                 self._structure_version += 1
                 self._use_interactive_cam = False
@@ -3747,7 +4134,12 @@ class AtomicBlenderApp(tk.Tk):
                 elif mode == "render":
                     self._preview_seq += 1
                     self._set_busy(False, f"Rendered {target_path.name} in {elapsed:.1f}s")
-                    if (self.var_show_axes.get() or self.var_show_scale_bar.get()) and _HAS_PIL and target_path.is_file():
+                    cmap_info = getattr(self, "_active_colormap_info", None)
+                    if (
+                        (self.var_show_axes.get() or self.var_show_scale_bar.get() or cmap_info is not None)
+                        and _HAS_PIL
+                        and target_path.is_file()
+                    ):
                         try:
                             out_img = Image.open(target_path).convert("RGBA")
                             if self.var_show_scale_bar.get() and self._vp_scene is not None:
@@ -3756,6 +4148,12 @@ class AtomicBlenderApp(tk.Tk):
                                     self._vp_scene.ortho_scale,
                                     max(16, int(self.var_res_w.get())),
                                     max(16, int(self.var_res_h.get())),
+                                    dark_backdrop=bool(self.var_dark_backdrop.get()),
+                                )
+                            if cmap_info is not None:
+                                render_colorbar_overlay(
+                                    out_img,
+                                    *cmap_info,
                                     dark_backdrop=bool(self.var_dark_backdrop.get()),
                                 )
                             if self.var_show_axes.get():
@@ -3784,6 +4182,16 @@ class AtomicBlenderApp(tk.Tk):
                     self._preview_seq += 1
                     self._set_busy(False, f"Saved panel {panel_png.name} in {elapsed:.1f}s")
                     self._load_preview(panel_png)
+            elif kind == "done_batch":
+                rc, done_cnt, total_cnt, last_png = payload
+                elapsed = time.monotonic() - self._task_start
+                if rc != 0:
+                    self._set_busy(False, f"Batch failed at {done_cnt + 1}/{total_cnt} after {elapsed:.1f}s")
+                    messagebox.showerror("Batch Render Failed", f"Stopped after {done_cnt}/{total_cnt} files.")
+                else:
+                    self._set_busy(False, f"Batch rendered {done_cnt}/{total_cnt} PNGs in {elapsed:.1f}s")
+                    if last_png is not None and Path(last_png).is_file():
+                        self._load_preview(Path(last_png))
         if not getattr(self, "_destroyed", False):
             self._poll_after_id = self.after(100, self._poll_queue)
 

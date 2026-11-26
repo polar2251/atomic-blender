@@ -450,6 +450,7 @@ def _find_bonds(
     symbols: list[str],
     positions: np.ndarray,
     bond_cfg: dict[str, Any],
+    ghost_start_index: int | None = None,
 ) -> tuple[np.ndarray, np.ndarray]:
     """Spatial-hash bond detection matching ``scene_builder._find_bonds_spatial``."""
     mode = str(bond_cfg.get("mode", "table"))
@@ -510,6 +511,12 @@ def _find_bonds(
                         for j in nbr:
                             if j <= i:
                                 continue
+                            if (
+                                ghost_start_index is not None
+                                and 0 < ghost_start_index < len(symbols)
+                                and (i < ghost_start_index) != (j < ghost_start_index)
+                            ):
+                                continue
                             cut = pair_cutoffs.get((ei, symbols[j]))
                             if cut is None:
                                 continue
@@ -559,6 +566,10 @@ class ViewportScene:
     show_scale_bar: bool = False
     show_measure_overlay: bool = True
     selection_order: list[int] = field(default_factory=list)
+    dashed_pairs: list[tuple[int, int]] = field(default_factory=list)
+    dashed_color: str = "#38BDF8"
+    colormap_info: tuple[str, float, float] | None = None
+    _sprite_keys: list[str] = field(default_factory=list)
 
     def __post_init__(self) -> None:
         if self.target is None:
@@ -587,6 +598,7 @@ class ViewportScene:
         show_scale_bar: bool = False,
         show_measure_overlay: bool = True,
         selection_order: list[int] | None = None,
+        colormap_info: tuple[str, float, float] | None = None,
     ) -> ViewportScene:
         symbols = list(structure["symbols"])
         positions = np.asarray(structure["positions"], dtype=np.float64).reshape(-1, 3)
@@ -603,24 +615,34 @@ class ViewportScene:
         mat_cfg = style.get("material", {})
         has_rim = isinstance(style.get("lighting", {}).get("rim"), dict)
 
+        raw_colors = structure.get("colors")
+        use_custom_cols = isinstance(raw_colors, list) and len(raw_colors) == len(symbols)
+        colors = (
+            [str(c) for c in raw_colors]
+            if use_custom_cols
+            else [resolve_element_color(s, style) for s in symbols]
+        )
+
         elem_r: dict[str, float] = {}
-        elem_c: dict[str, str] = {}
-        elem_out: dict[str, str] = {}
-        elem_hi: dict[str, str] = {}
+        for sym in set(symbols):
+            elem_r[sym] = resolve_element_radius(sym, style) * eff_scale
+
         base_sprites: dict[tuple[str, int], Any] = {}
         outline_syms: set[str] = set()
         dark_outline_syms: set[str] = set()
+        sprite_keys: list[str] = []
+        built_keys: set[str] = set()
 
-        for sym in set(symbols):
-            c = resolve_element_color(sym, style)
-            elem_c[sym] = c
-            elem_out[sym] = _shade_hex(c, 0.62)
-            elem_hi[sym] = _shade_hex(c, 1.0, mix_white=0.42)
-            elem_r[sym] = resolve_element_radius(sym, style) * eff_scale
+        for sym, c in zip(symbols, colors):
+            s_key = f"{sym}:{c}" if use_custom_cols else sym
+            sprite_keys.append(s_key)
+            if s_key in built_keys:
+                continue
+            built_keys.add(s_key)
             if _needs_light_outline(sym, c):
-                outline_syms.add(sym)
+                outline_syms.add(s_key)
             elif _needs_dark_rim_outline(c):
-                dark_outline_syms.add(sym)
+                dark_outline_syms.add(s_key)
 
             if _HAS_PIL:
                 profile = mat_cfg.get("metal" if sym in METAL_ELEMENTS else "nonmetal", {})
@@ -632,7 +654,7 @@ class ViewportScene:
                 sss = float(profile.get("subsurface_weight", mat_cfg.get("subsurface_weight", 0.0)))
                 coat = float(profile.get("coat_weight", mat_cfg.get("coat_weight", 0.0)))
                 ao_factor = float(mat_cfg.get("ao_factor", 0.0))
-                base_sprites[(sym, 0)] = build_sphere_sprite(
+                base_sprites[(s_key, 0)] = build_sphere_sprite(
                     hex_color=c,
                     roughness=roughness,
                     specular=specular,
@@ -650,15 +672,29 @@ class ViewportScene:
         if isinstance(raw_r_scales, list) and len(raw_r_scales) == len(symbols):
             r_mult = np.clip(np.asarray(raw_r_scales, dtype=np.float64), 0.15, 3.0)
             radii = radii * r_mult
-        colors = [elem_c[s] for s in symbols]
-        outline_colors = [elem_out[s] for s in symbols]
-        highlight_colors = [elem_hi[s] for s in symbols]
+        outline_colors = [_shade_hex(c, 0.62) for c in colors]
+        highlight_colors = [_shade_hex(c, 1.0, mix_white=0.42) for c in colors]
 
         bond_cfg = dict(style.get("bonds", {}))
         if bonds_mode and bonds_mode != "style":
             bond_cfg["mode"] = bonds_mode
             bond_cfg["enabled"] = bonds_mode != "none"
-        bond_i, bond_j = _find_bonds(symbols, positions, bond_cfg)
+        ghost_start = structure.get("ghost_start_index")
+        bond_i, bond_j = _find_bonds(
+            symbols,
+            positions,
+            bond_cfg,
+            ghost_start_index=int(ghost_start) if ghost_start is not None else None,
+        )
+        raw_dashed = structure.get("dashed_bonds", [])
+        dashed_pairs = [
+            (int(pair[0]), int(pair[1]))
+            for pair in raw_dashed
+            if isinstance(pair, (list, tuple))
+            and len(pair) == 2
+            and 0 <= int(pair[0]) < len(symbols)
+            and 0 <= int(pair[1]) < len(symbols)
+        ]
 
         b_color_mode = (
             bond_color if bond_color and bond_color != "style" else str(bond_cfg.get("color_mode", "single"))
@@ -719,6 +755,10 @@ class ViewportScene:
             show_scale_bar=show_scale_bar,
             show_measure_overlay=show_measure_overlay,
             selection_order=list(selection_order or ()),
+            dashed_pairs=dashed_pairs,
+            dashed_color=str(structure.get("dashed_color", "#38BDF8")),
+            colormap_info=colormap_info,
+            _sprite_keys=sprite_keys,
         )
 
     def _get_sprite(
@@ -981,6 +1021,41 @@ class ViewportScene:
                             ("bond", sx0, sy0, sx1, sy1, bond_w, b_hex, b_alpha),
                         ))
 
+            if len(self.dashed_pairs) > 0:
+                db_w = max(2, min(10, int(round(1.5 * self.bond_radius * px_per_a))))
+                dr, dg, db, _ = _shade_rgba_tuple(self.dashed_color, 1.0)
+                for i_idx, j_idx in self.dashed_pairs:
+                    if not (0 <= i_idx < len(self.positions) and 0 <= j_idx < len(self.positions)):
+                        continue
+                    pi3 = self.positions[i_idx]
+                    pj3 = self.positions[j_idx]
+                    dv = pj3 - pi3
+                    dist3 = float(np.linalg.norm(dv))
+                    if dist3 < 1e-6:
+                        continue
+                    d_hat = dv / dist3
+                    trim_i = min(0.55 * float(self.radii[i_idx]), dist3 * 0.42)
+                    trim_j = min(0.55 * float(self.radii[j_idx]), dist3 * 0.42)
+                    if dist3 - trim_i - trim_j <= 0.02:
+                        continue
+                    r0 = (pi3 + d_hat * trim_i) - self.target
+                    r1 = (pj3 - d_hat * trim_j) - self.target
+                    sx0 = float(cx0 + np.dot(r0, right) * px_per_a)
+                    sy0 = float(cy0 - np.dot(r0, up) * px_per_a)
+                    sz0 = float(np.dot(r0, back))
+                    sx1 = float(cx0 + np.dot(r1, right) * px_per_a)
+                    sy1 = float(cy0 - np.dot(r1, up) * px_per_a)
+                    sz1 = float(np.dot(r1, back))
+                    a_db = min(
+                        float(self.atom_alphas[i_idx]) if i_idx < len(self.atom_alphas) else 1.0,
+                        float(self.atom_alphas[j_idx]) if j_idx < len(self.atom_alphas) else 1.0,
+                    )
+                    draw_items.append((
+                        0.5 * (sz0 + sz1),
+                        1,
+                        ("dashed_bond", sx0, sy0, sx1, sy1, db_w, (dr, dg, db, max(75, int(round(230 * a_db))))),
+                    ))
+
             for idx in range(len(self.positions)):
                 diam_px = max(2, int(round(2.0 * float(self.radii[idx]) * px_per_a)))
                 z_norm = (float(az[idx]) - z_min) / z_span
@@ -1014,9 +1089,13 @@ class ViewportScene:
                         fill=hi_col,
                         width=max(1, int(round(bw * 0.28))),
                     )
+            elif tag == "dashed_bond":
+                _, px0, py0, px1, py1, bw, d_rgba = payload
+                _draw_dashed_segment(draw, (px0, py0), (px1, py1), fill=d_rgba, width=bw, dash_px=7.0, gap_px=5.0)
             else:
                 _, sx, sy, diam_px, idx, bucket = payload
-                sprite = self._get_sprite(self.symbols[idx], diam_px, bucket, interactive=interactive)
+                s_key = self._sprite_keys[idx] if idx < len(self._sprite_keys) else self.symbols[idx]
+                sprite = self._get_sprite(s_key, diam_px, bucket, interactive=interactive)
                 if sprite is not None:
                     a_scale = float(self.atom_alphas[idx]) if idx < len(self.atom_alphas) else 1.0
                     _blit_rgba(
@@ -1070,6 +1149,16 @@ class ViewportScene:
                 self.ortho_scale,
                 res_w,
                 res_h,
+                dark_backdrop=self.dark_backdrop,
+            )
+
+        if self.colormap_info is not None:
+            cmap_name, z_lo, z_hi = self.colormap_info
+            render_colorbar_overlay(
+                frame,
+                cmap_name,
+                z_lo,
+                z_hi,
                 dark_backdrop=self.dark_backdrop,
             )
 
@@ -1406,3 +1495,219 @@ def compose_dual_view_panel(
             ty = margin + (header_h - (tb[3] - tb[1])) * 0.5 - tb[1]
             draw.text((tx, ty), title, font=font, fill=fg)
     return canvas
+
+
+_COLORMAP_STOPS: dict[str, list[tuple[int, int, int]]] = {
+    "viridis": [
+        (68, 1, 84),
+        (59, 82, 139),
+        (33, 145, 140),
+        (94, 201, 98),
+        (253, 231, 37),
+    ],
+    "coolwarm": [
+        (59, 76, 192),
+        (124, 159, 249),
+        (221, 221, 221),
+        (244, 154, 123),
+        (180, 4, 38),
+    ],
+    "plasma": [
+        (13, 8, 135),
+        (126, 3, 168),
+        (204, 71, 120),
+        (248, 149, 64),
+        (240, 249, 33),
+    ],
+}
+
+
+def sample_colormap_hex(cmap_name: str, t: float) -> str:
+    """Sample a 5-stop scientific colormap at normalized ``t`` in ``[0, 1]`` as ``#RRGGBB``."""
+    stops = _COLORMAP_STOPS.get(str(cmap_name).lower(), _COLORMAP_STOPS["viridis"])
+    tt = max(0.0, min(1.0, float(t)))
+    scaled = tt * (len(stops) - 1)
+    idx = min(len(stops) - 2, int(math.floor(scaled)))
+    frac = scaled - idx
+    c0, c1 = stops[idx], stops[idx + 1]
+    r = int(round(c0[0] + (c1[0] - c0[0]) * frac))
+    g = int(round(c0[1] + (c1[1] - c0[1]) * frac))
+    b = int(round(c0[2] + (c1[2] - c0[2]) * frac))
+    return f"#{r:02X}{g:02X}{b:02X}"
+
+
+def compute_z_colormap_colors(
+    positions: Any,
+    cmap_name: str,
+    n_bins: int = 24,
+) -> tuple[list[str], float, float]:
+    """Map Z coordinates into quantized colormap hex strings and return ``(colors, z_min, z_max)``."""
+    pos = np.asarray(positions, dtype=np.float64).reshape(-1, 3)
+    if len(pos) == 0:
+        return [], 0.0, 0.0
+    zs = pos[:, 2]
+    z_min, z_max = float(np.min(zs)), float(np.max(zs))
+    span = z_max - z_min
+    bins = max(2, int(n_bins))
+    out: list[str] = []
+    for z in zs:
+        t = 0.5 if span < 1e-6 else max(0.0, min(1.0, (float(z) - z_min) / span))
+        qt = round(t * (bins - 1)) / (bins - 1)
+        out.append(sample_colormap_hex(cmap_name, qt))
+    return out, z_min, z_max
+
+
+def render_colorbar_overlay(
+    target_img: Any,
+    cmap_name: str,
+    z_min: float,
+    z_max: float,
+    title: str = "Z (Å)",
+    dark_backdrop: bool = True,
+) -> None:
+    """Draw a compact vertical publication colorbar legend onto ``target_img``."""
+    if not _HAS_PIL or target_img is None:
+        return
+    fw, fh = target_img.size
+    draw = ImageDraw.Draw(target_img, "RGBA")
+    bar_h = max(90, min(240, int(round(fh * 0.34))))
+    bar_w = max(12, min(20, int(round(fw * 0.024))))
+    font_px = max(10, min(15, int(round(min(fw, fh) * 0.022))))
+    font = _load_overlay_font(font_px)
+
+    ticks = [f"{z_max:.1f}", f"{0.5 * (z_min + z_max):.1f}", f"{z_min:.1f}"]
+    max_tw = font_px * 3.0
+    title_h = font_px + 6
+    if font is not None:
+        max_tw = max(draw.textbbox((0, 0), t, font=font)[2] for t in ticks + [title])
+        tb_title = draw.textbbox((0, 0), title, font=font)
+        title_h = (tb_title[3] - tb_title[1]) + 8
+
+    pad = 8
+    box_w = bar_w + max_tw + pad * 3
+    box_h = title_h + bar_h + pad * 2
+    bx1 = fw - max(12, int(round(fw * 0.025)))
+    bx0 = bx1 - box_w
+    by0 = max(12, int(round((fh - box_h) * 0.45)))
+    by1 = by0 + box_h
+
+    bg_col = (15, 23, 42, 195) if dark_backdrop else (248, 250, 252, 215)
+    fg_col = (248, 250, 252, 245) if dark_backdrop else (15, 23, 42, 245)
+    border_col = (51, 65, 85, 210) if dark_backdrop else (148, 163, 184, 210)
+    draw.rounded_rectangle((bx0, by0, bx1, by1), radius=6, fill=bg_col, outline=border_col, width=1)
+
+    gx0 = bx0 + pad
+    gx1 = gx0 + bar_w
+    gy0 = by0 + title_h + pad - 2
+    n_steps = 32
+    for s in range(n_steps):
+        frac_top = 1.0 - (s + 0.5) / n_steps
+        hx = sample_colormap_hex(cmap_name, frac_top)
+        r, g, b = _hex_to_rgb(hx)
+        sy0 = gy0 + (bar_h * s) / n_steps
+        sy1 = gy0 + (bar_h * (s + 1)) / n_steps
+        draw.rectangle((gx0, sy0, gx1, sy1 + 0.5), fill=(r, g, b, 245))
+    draw.rectangle((gx0, gy0, gx1, gy0 + bar_h), outline=border_col, width=1)
+
+    if font is not None:
+        tb_t = draw.textbbox((0, 0), title, font=font)
+        draw.text((bx0 + pad - tb_t[0], by0 + 5 - tb_t[1]), title, font=font, fill=fg_col)
+        tx = gx1 + pad
+        for label, frac_y in ((ticks[0], 0.0), (ticks[1], 0.5), (ticks[2], 1.0)):
+            tb = draw.textbbox((0, 0), label, font=font)
+            th = tb[3] - tb[1]
+            ty = gy0 + frac_y * bar_h - th * 0.5 - tb[1]
+            draw.text((tx - tb[0], ty), label, font=font, fill=fg_col)
+
+
+def find_dashed_contacts(
+    symbols: list[str],
+    positions: Any,
+    bond_i: Any = None,
+    bond_j: Any = None,
+    mode: str = "hbond",
+    d_min: float = 1.55,
+    d_max: float = 2.55,
+    focal_indices: set[int] | None = None,
+    ghost_start_index: int | None = None,
+) -> list[tuple[int, int]]:
+    """Detect H-bonds, interface contacts, or distance-ranged non-covalent pairs."""
+    pos = np.asarray(positions, dtype=np.float64).reshape(-1, 3)
+    n = min(len(symbols), len(pos))
+    if n < 2:
+        return []
+    lo = max(0.2, min(float(d_min), float(d_max)))
+    hi = max(lo, max(float(d_min), float(d_max)))
+    cov_set: set[tuple[int, int]] = set()
+    if bond_i is not None and bond_j is not None:
+        for a, b in zip(bond_i, bond_j):
+            ia, ib = int(a), int(b)
+            cov_set.add((min(ia, ib), max(ia, ib)))
+
+    acceptors = {"O", "N", "F", "Cl", "S"}
+    focal = set(focal_indices or ())
+    pairs: list[tuple[int, int]] = []
+    for i in range(n):
+        pi = pos[i]
+        si = symbols[i]
+        for j in range(i + 1, n):
+            if (i, j) in cov_set:
+                continue
+            if ghost_start_index is not None and 0 < ghost_start_index < n:
+                if (i < ghost_start_index) != (j < ghost_start_index):
+                    continue
+            if mode == "hbond":
+                sj = symbols[j]
+                if not ((si == "H" and sj in acceptors) or (sj == "H" and si in acceptors)):
+                    continue
+            elif mode == "interface":
+                if not focal or ((i in focal) == (j in focal)):
+                    continue
+            dist = float(np.linalg.norm(pos[j] - pi))
+            if lo - 1e-6 <= dist <= hi + 1e-6:
+                pairs.append((i, j))
+    return pairs
+
+
+def merge_ghost_structure(
+    main_struct: dict[str, Any],
+    ghost_struct: dict[str, Any],
+    ghost_alpha: float = 0.24,
+    ghost_scale: float = 0.72,
+    ghost_tint: str = "#38BDF8",
+    disp_threshold_a: float = 0.20,
+) -> dict[str, Any]:
+    """Overlay a ghost reference structure onto ``main_struct`` with displacement vectors."""
+    main_syms = list(main_struct["symbols"])
+    ghost_syms = list(ghost_struct["symbols"])
+    main_pos = [list(map(float, p)) for p in main_struct["positions"]]
+    ghost_pos = [list(map(float, p)) for p in ghost_struct["positions"]]
+    n_main = len(main_syms)
+    n_ghost = len(ghost_syms)
+
+    raw_a = main_struct.get("alphas")
+    main_alphas = [float(a) for a in raw_a] if isinstance(raw_a, list) and len(raw_a) == n_main else [1.0] * n_main
+    raw_rs = main_struct.get("radius_scales")
+    main_rs = [float(s) for s in raw_rs] if isinstance(raw_rs, list) and len(raw_rs) == n_main else [1.0] * n_main
+
+    merged = dict(main_struct)
+    merged["symbols"] = main_syms + ghost_syms
+    merged["positions"] = main_pos + ghost_pos
+    merged["alphas"] = main_alphas + [float(ghost_alpha)] * n_ghost
+    merged["radius_scales"] = main_rs + [float(ghost_scale)] * n_ghost
+    merged["ghost_start_index"] = n_main
+    merged["ghost_tint"] = ghost_tint
+
+    raw_cols = main_struct.get("colors")
+    if isinstance(raw_cols, list) and len(raw_cols) == n_main:
+        merged["colors"] = list(raw_cols) + [ghost_tint] * n_ghost
+
+    disp_pairs: list[list[int]] = []
+    if n_main == n_ghost and n_main > 0:
+        mp = np.asarray(main_pos, dtype=np.float64)
+        gp = np.asarray(ghost_pos, dtype=np.float64)
+        for i in range(n_main):
+            if float(np.linalg.norm(mp[i] - gp[i])) >= float(disp_threshold_a):
+                disp_pairs.append([i, n_main + i])
+    merged["dashed_bonds"] = disp_pairs
+    return merged

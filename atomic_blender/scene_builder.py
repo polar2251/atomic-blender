@@ -284,6 +284,7 @@ def _find_bonds_spatial(
     symbols: list[str],
     positions: list[Vector],
     bond_cfg: dict[str, Any],
+    ghost_start_index: int | None = None,
 ) -> list[tuple[int, int]]:
     """Find bonded atom index pairs using an O(N) spatial hash grid."""
     mode = bond_cfg.get("mode", "table")
@@ -338,6 +339,12 @@ def _find_bonds_spatial(
                         pi = positions[i]
                         for j in nbr_bucket:
                             if j <= i:
+                                continue
+                            if (
+                                ghost_start_index is not None
+                                and 0 < ghost_start_index < len(symbols)
+                                and (i < ghost_start_index) != (j < ghost_start_index)
+                            ):
                                 continue
                             cut = pair_cutoffs.get((ei, symbols[j]))
                             if cut is None:
@@ -743,31 +750,41 @@ def build_scene(
     origin = Vector(structure.get("origin", [0.0, 0.0, 0.0]))
     cell_vecs = [Vector(v) for v in structure.get("cell", [[0, 0, 0], [0, 0, 0], [0, 0, 0]])]
 
-    # Atom meshes instanced per (element, alpha, radius_scale) for per-atom transparency & hybrid sizing
+    # Atom meshes instanced per (element, alpha, radius_scale, color) for per-atom transparency & sizing/colormaps
     eff_radius_scale = float(style.get("elements", {}).get("radius_scale", 1.0)) * float(radius_scale)
     mesh_cfg = style.get("atom_mesh", {})
     segments = int(mesh_cfg.get("segments", 24))
     ring_count = int(mesh_cfg.get("ring_count", 12))
     smooth = bool(mesh_cfg.get("smooth", True))
 
-    proto_meshes: dict[tuple[str, float, float], bpy.types.Mesh] = {}
+    raw_colors = structure.get("colors")
+    if isinstance(raw_colors, list) and len(raw_colors) == len(symbols):
+        atom_colors = [str(c) for c in raw_colors]
+    else:
+        atom_colors = [resolve_element_color(s, style) for s in symbols]
+
+    proto_meshes: dict[tuple[str, float, float, str], bpy.types.Mesh] = {}
     elem_radii_cache: dict[str, float] = {}
-    elem_materials: dict[tuple[str, float], bpy.types.Material] = {}
-    for elem, a_val in sorted({(sym, round(a, 3)) for sym, a in zip(symbols, alphas)}):
+    elem_materials: dict[tuple[str, float, str], bpy.types.Material] = {}
+    for elem, a_val, col_hex in sorted({(sym, round(a, 3), col_h) for sym, a, col_h in zip(symbols, alphas, atom_colors)}):
         mat_kwargs = _element_material_kwargs(elem, style)
-        elem_materials[(elem, a_val)] = make_material(
-            f"mat_{elem}_{int(round(a_val * 1000))}",
-            resolve_element_color(elem, style),
+        safe_col = col_hex.lstrip("#")
+        elem_materials[(elem, a_val, col_hex)] = make_material(
+            f"mat_{elem}_{safe_col}_{int(round(a_val * 1000))}",
+            col_hex,
             alpha=a_val,
             **mat_kwargs,
         )
-    for elem, a_val, r_val in sorted({(sym, round(a, 3), round(rs, 3)) for sym, a, rs in zip(symbols, alphas, r_scales)}):
+    for elem, a_val, r_val, col_hex in sorted(
+        {(sym, round(a, 3), round(rs, 3), col_h) for sym, a, rs, col_h in zip(symbols, alphas, r_scales, atom_colors)}
+    ):
         if elem not in elem_radii_cache:
             elem_radii_cache[elem] = resolve_element_radius(elem, style) * eff_radius_scale
         rad = elem_radii_cache[elem] * r_val
-        mat = elem_materials[(elem, a_val)]
-        proto_meshes[(elem, a_val, r_val)] = _create_uv_sphere_mesh(
-            name=f"proto_{elem}_{int(round(a_val * 1000))}_{int(round(r_val * 1000))}",
+        mat = elem_materials[(elem, a_val, col_hex)]
+        safe_col = col_hex.lstrip("#")
+        proto_meshes[(elem, a_val, r_val, col_hex)] = _create_uv_sphere_mesh(
+            name=f"proto_{elem}_{safe_col}_{int(round(a_val * 1000))}_{int(round(r_val * 1000))}",
             radius=rad,
             segments=segments,
             ring_count=ring_count,
@@ -775,9 +792,9 @@ def build_scene(
             mat=mat,
         )
 
-    for idx, (elem, pos, a_val, r_val) in enumerate(zip(symbols, positions, alphas, r_scales)):
+    for idx, (elem, pos, a_val, r_val, col_hex) in enumerate(zip(symbols, positions, alphas, r_scales, atom_colors)):
         obj = bpy.data.objects.new(
-            f"atom_{idx}_{elem}", proto_meshes[(elem, round(a_val, 3), round(r_val, 3))]
+            f"atom_{idx}_{elem}", proto_meshes[(elem, round(a_val, 3), round(r_val, 3), col_hex)]
         )
         obj.location = pos
         col.objects.link(obj)
@@ -787,16 +804,22 @@ def build_scene(
     if bonds_mode_override is not None and bonds_mode_override != "style":
         bond_cfg["mode"] = bonds_mode_override
         bond_cfg["enabled"] = bonds_mode_override != "none"
-    bond_pairs = _find_bonds_spatial(symbols, positions, bond_cfg)
+    ghost_start = structure.get("ghost_start_index")
+    bond_pairs = _find_bonds_spatial(
+        symbols,
+        positions,
+        bond_cfg,
+        ghost_start_index=int(ghost_start) if ghost_start is not None else None,
+    )
+    b_rad = float(bond_cfg.get("radius", 0.12))
+    b_seg = int(bond_cfg.get("segments", 14))
+    b_smooth = bool(bond_cfg.get("smooth", True))
     if bond_pairs:
         color_mode = (
             bond_color_override
             if bond_color_override and bond_color_override != "style"
             else str(bond_cfg.get("color_mode", "single"))
         )
-        b_rad = float(bond_cfg.get("radius", 0.12))
-        b_seg = int(bond_cfg.get("segments", 14))
-        b_smooth = bool(bond_cfg.get("smooth", True))
         if color_mode == "bicolor":
             for i, j in bond_pairs:
                 pi, pj = positions[i], positions[j]
@@ -805,7 +828,7 @@ def build_scene(
                     pi,
                     pm,
                     b_rad,
-                    elem_materials[(symbols[i], round(alphas[i], 3))],
+                    elem_materials[(symbols[i], round(alphas[i], 3), atom_colors[i])],
                     f"bond_{i}_{j}_a",
                     col,
                     segments=b_seg,
@@ -815,7 +838,7 @@ def build_scene(
                     pm,
                     pj,
                     b_rad,
-                    elem_materials[(symbols[j], round(alphas[j], 3))],
+                    elem_materials[(symbols[j], round(alphas[j], 3), atom_colors[j])],
                     f"bond_{i}_{j}_b",
                     col,
                     segments=b_seg,
@@ -844,6 +867,36 @@ def build_scene(
                     col,
                     segments=b_seg,
                     smooth=b_smooth,
+                )
+
+    raw_dashed = structure.get("dashed_bonds", [])
+    if isinstance(raw_dashed, list) and raw_dashed:
+        dashed_hex = str(structure.get("dashed_color", "#38BDF8"))
+        dashed_mat = make_material("mat_dashed_contact", dashed_hex, roughness=0.35, specular=0.2, alpha=0.9)
+        d_rad = max(0.03, b_rad * 0.52)
+        n_dashes = 4
+        for pair in raw_dashed:
+            if not (isinstance(pair, (list, tuple)) and len(pair) == 2):
+                continue
+            i_idx, j_idx = int(pair[0]), int(pair[1])
+            if not (0 <= i_idx < len(positions) and 0 <= j_idx < len(positions)):
+                continue
+            p0, p1 = positions[i_idx], positions[j_idx]
+            dv = p1 - p0
+            if dv.length < 1e-4:
+                continue
+            for seg_i in range(n_dashes):
+                t0 = (seg_i + 0.12) / n_dashes
+                t1 = (seg_i + 0.65) / n_dashes
+                _create_cylinder_mesh(
+                    p0 + dv * t0,
+                    p0 + dv * t1,
+                    d_rad,
+                    dashed_mat,
+                    f"dashed_{i_idx}_{j_idx}_{seg_i}",
+                    col,
+                    segments=10,
+                    smooth=True,
                 )
 
     # Periodic cell wireframe (supports general triclinic vectors)
