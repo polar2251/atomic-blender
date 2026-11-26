@@ -22,7 +22,12 @@ import numpy as np
 from atomic_blender.cli import _collect_style_files, find_blender_executable, resolve_style_path
 from atomic_blender.convert import atoms_to_neutral_dict, read_structure
 from atomic_blender.elements import VIEW_PRESETS, classify_dropped_file
-from atomic_blender.viewport3d import ViewportScene, preset_to_quat, quat_to_axes
+from atomic_blender.viewport3d import (
+    ViewportScene,
+    preset_to_quat,
+    quat_to_axes,
+    render_reference_axes_overlay,
+)
 
 try:
     from PIL import Image, ImageTk  # type: ignore
@@ -392,6 +397,9 @@ class AtomicBlenderApp(tk.Tk):
         self._dragging = False
         self._drag_mode: str | None = None
         self._drag_last: tuple[int, int] = (0, 0)
+        self._axes_pos: tuple[float, float] = (0.12, 0.86)
+        self._show_atoms = True
+        self._display_checks: dict[str, tuple[tk.Canvas, tk.BooleanVar]] = {}
         self._temp_view_files: list[Path] = []
         self._preview_tmp_dir = tempfile.TemporaryDirectory(prefix="atomic_blender_prev_")
         self._preview_seq = 0
@@ -407,17 +415,155 @@ class AtomicBlenderApp(tk.Tk):
         self._wndproc_ref: Any = None
         self._orig_wndproc: Any = None
         self.update_idletasks()
+        self._enable_dark_titlebar()
         self._enable_file_drop()
         self._poll_after_id = self.after(100, self._poll_queue)
         if initial_input:
             self._schedule_inspect()
 
+    def _enable_dark_titlebar(self) -> None:
+        """Enable dark window chrome on Windows 10/11."""
+        if sys.platform.startswith("win") or os.name == "nt":
+            try:
+                import ctypes
+
+                hwnd = ctypes.windll.user32.GetParent(self.winfo_id()) or self.winfo_id()
+                value = ctypes.c_int(1)
+                for attr in (20, 19):
+                    ctypes.windll.dwmapi.DwmSetWindowAttribute(
+                        hwnd, attr, ctypes.byref(value), ctypes.sizeof(value)
+                    )
+            except Exception:
+                pass
+
     def _configure_theme(self) -> None:
         style = ttk.Style(self)
-        for theme in ("vista", "clam", "alt", "default"):
-            if theme in style.theme_names():
-                style.theme_use(theme)
-                break
+        if "clam" in style.theme_names():
+            style.theme_use("clam")
+        else:
+            for theme in ("alt", "default"):
+                if theme in style.theme_names():
+                    style.theme_use(theme)
+                    break
+
+        bg = "#14161B"
+        panel = "#1E2128"
+        recessed = "#121418"
+        ctrl = "#2B303B"
+        ctrl_hover = "#363C49"
+        border = "#323844"
+        fg = "#E5E7EB"
+        muted = "#94A3B8"
+        accent = "#0D9488"
+        accent_hover = "#14B8A6"
+
+        self.configure(bg=bg)
+        self.option_add("*TCombobox*Listbox.background", panel)
+        self.option_add("*TCombobox*Listbox.foreground", fg)
+        self.option_add("*TCombobox*Listbox.selectBackground", accent)
+        self.option_add("*TCombobox*Listbox.selectForeground", "#FFFFFF")
+
+        style.configure(".", background=panel, foreground=fg, bordercolor=border, troughcolor=recessed)
+        style.configure("Outer.TFrame", background=bg)
+        style.configure("TFrame", background=panel)
+        style.configure("TPanedwindow", background=bg)
+        style.configure("TLabelframe", background=panel, bordercolor=border, relief="solid", borderwidth=1)
+        style.configure("TLabelframe.Label", background=panel, foreground="#CBD5E1", font=("Segoe UI", 9, "bold"))
+        style.configure("TLabel", background=panel, foreground=fg, font=("Segoe UI", 9))
+        style.configure("Banner.TLabel", background=bg, foreground=fg, font=("Segoe UI", 9))
+        style.configure("Muted.TLabel", background=panel, foreground=muted, font=("Segoe UI", 8))
+
+        style.configure(
+            "TButton",
+            background=ctrl,
+            foreground=fg,
+            bordercolor=border,
+            lightcolor=ctrl,
+            darkcolor=ctrl,
+            padding=(8, 4),
+            font=("Segoe UI", 9),
+        )
+        style.map(
+            "TButton",
+            background=[("active", ctrl_hover), ("pressed", "#242832"), ("disabled", "#1A1D24")],
+            foreground=[("disabled", "#64748B")],
+        )
+
+        style.configure(
+            "Accent.TButton",
+            background=accent,
+            foreground="#FFFFFF",
+            bordercolor="#0F766E",
+            lightcolor=accent,
+            darkcolor=accent,
+            padding=(10, 6),
+            font=("Segoe UI", 9, "bold"),
+        )
+        style.map(
+            "Accent.TButton",
+            background=[("active", accent_hover), ("pressed", "#0F766E"), ("disabled", "#1F2937")],
+            foreground=[("disabled", "#64748B")],
+        )
+
+        style.configure(
+            "Dots.TButton",
+            background=panel,
+            foreground=muted,
+            bordercolor=panel,
+            padding=(4, 1),
+            font=("Segoe UI", 9, "bold"),
+        )
+        style.map("Dots.TButton", background=[("active", ctrl)], foreground=[("active", fg)])
+
+        style.configure(
+            "TEntry",
+            fieldbackground=recessed,
+            foreground=fg,
+            insertcolor=fg,
+            bordercolor=border,
+            lightcolor=border,
+            darkcolor=border,
+            padding=(4, 3),
+        )
+        style.map(
+            "TEntry",
+            fieldbackground=[("disabled", "#181B21")],
+            foreground=[("disabled", "#64748B")],
+        )
+
+        style.configure(
+            "TCombobox",
+            fieldbackground=recessed,
+            background=ctrl,
+            foreground=fg,
+            arrowcolor=fg,
+            bordercolor=border,
+            padding=(4, 3),
+        )
+        style.map(
+            "TCombobox",
+            fieldbackground=[("readonly", recessed), ("disabled", "#181B21")],
+            foreground=[("readonly", fg), ("disabled", "#64748B")],
+            background=[("active", ctrl_hover)],
+        )
+
+        style.configure(
+            "TSpinbox",
+            fieldbackground=recessed,
+            background=ctrl,
+            foreground=fg,
+            arrowcolor=fg,
+            bordercolor=border,
+            padding=(4, 2),
+        )
+
+        style.configure("TCheckbutton", background=panel, foreground=fg, font=("Segoe UI", 9))
+        style.map("TCheckbutton", background=[("active", panel)], indicatorcolor=[("selected", accent)])
+        style.configure("TRadiobutton", background=panel, foreground=fg, font=("Segoe UI", 9))
+        style.map("TRadiobutton", background=[("active", panel)], indicatorcolor=[("selected", accent)])
+
+        style.configure("Horizontal.TScale", background=panel, troughcolor=recessed, bordercolor=border)
+        style.configure("Vertical.TScrollbar", background=ctrl, troughcolor=recessed, arrowcolor=muted, bordercolor=border)
 
     def _init_variables(self, initial_input: str | None) -> None:
         detected_blender = ""
@@ -453,6 +599,14 @@ class AtomicBlenderApp(tk.Tk):
         self.var_radius_scale = tk.DoubleVar(value=1.0)
         self.var_radius_label = tk.StringVar(value="1.00×")
         self.var_show_cell = tk.BooleanVar(value=True)
+        self.var_disp_ball_stick = tk.BooleanVar(value=True)
+        self.var_disp_licorice = tk.BooleanVar(value=False)
+        self.var_disp_vdw = tk.BooleanVar(value=False)
+        self.var_show_labels = tk.BooleanVar(value=False)
+        self.var_show_axes = tk.BooleanVar(value=True)
+        self.var_axes_labels = tk.BooleanVar(value=True)
+        self.var_axes_fixed = tk.BooleanVar(value=True)
+        self.var_dark_backdrop = tk.BooleanVar(value=True)
 
         self.var_res_w = tk.IntVar(value=1400)
         self.var_res_h = tk.IntVar(value=1400)
@@ -462,27 +616,51 @@ class AtomicBlenderApp(tk.Tk):
         self.var_status = tk.StringVar(value="Ready")
 
     def _build_layout(self) -> None:
-        banner = ttk.Frame(self, padding=(10, 6, 10, 2))
+        banner = ttk.Frame(self, padding=(10, 6, 10, 4), style="Outer.TFrame")
         banner.pack(fill=tk.X)
-        ttk.Label(banner, text="Structure:", font=("TkDefaultFont", 9, "bold")).pack(side=tk.LEFT)
-        ttk.Label(banner, textvariable=self.var_inspector, foreground="#1E40AF").pack(side=tk.LEFT, padx=(6, 0))
+        ttk.Label(banner, text="Structure:", font=("Segoe UI", 9, "bold"), style="Banner.TLabel").pack(side=tk.LEFT)
+        ttk.Label(banner, textvariable=self.var_inspector, foreground="#2DD4BF", style="Banner.TLabel").pack(
+            side=tk.LEFT, padx=(6, 0)
+        )
 
         paned = ttk.PanedWindow(self, orient=tk.HORIZONTAL)
         paned.pack(fill=tk.BOTH, expand=True, padx=8, pady=(2, 4))
 
-        left = ttk.Frame(paned, padding=6)
-        right = ttk.Frame(paned, padding=6)
-        paned.add(left, weight=0)
+        left_host = ttk.Frame(paned, padding=0, style="Outer.TFrame")
+        left_canvas = tk.Canvas(left_host, bg="#14161B", highlightthickness=0, width=410)
+        left_scroll = ttk.Scrollbar(left_host, orient=tk.VERTICAL, command=left_canvas.yview)
+        left = ttk.Frame(left_canvas, padding=6, style="Outer.TFrame")
+        left_win = left_canvas.create_window((0, 0), window=left, anchor=tk.NW)
+        left_canvas.configure(yscrollcommand=left_scroll.set)
+        left_canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        left_scroll.pack(side=tk.RIGHT, fill=tk.Y)
+
+        left.bind("<Configure>", lambda _e: left_canvas.configure(scrollregion=left_canvas.bbox("all")))
+        left_canvas.bind("<Configure>", lambda e: left_canvas.itemconfigure(left_win, width=e.width))
+        left_canvas.bind(
+            "<MouseWheel>",
+            lambda e: left_canvas.yview_scroll(int(-1 * (e.delta / 120)), "units")
+            if e.widget is left_canvas or str(e.widget).startswith(str(left))
+            else None,
+        )
+
+        right = ttk.Frame(paned, padding=6, style="Outer.TFrame")
+        paned.add(left_host, weight=0)
         paned.add(right, weight=1)
 
         self._build_controls(left)
         self._build_preview_and_log(right)
 
-        status_bar = ttk.Frame(self, padding=(8, 2, 8, 6))
+        status_bar = ttk.Frame(self, padding=(10, 2, 10, 6), style="Outer.TFrame")
         status_bar.pack(fill=tk.X)
-        ttk.Label(status_bar, textvariable=self.var_status).pack(side=tk.LEFT)
+        ttk.Label(status_bar, textvariable=self.var_status, style="Banner.TLabel", foreground="#94A3B8").pack(
+            side=tk.LEFT
+        )
 
     def _build_controls(self, parent: ttk.Frame) -> None:
+        # 0. Avogadro-Style Display Types
+        self._build_display_types_panel(parent)
+
         # 1. Input & Output
         f_io = ttk.LabelFrame(parent, text="Structure & Output", padding=8)
         f_io.pack(fill=tk.X, pady=(0, 6))
@@ -514,8 +692,9 @@ class AtomicBlenderApp(tk.Tk):
         )
 
         # 2. Style & Representation
-        f_rep = ttk.LabelFrame(parent, text="Style & Representation", padding=8)
-        f_rep.pack(fill=tk.X, pady=(0, 6))
+        self.f_rep = ttk.LabelFrame(parent, text="Style & Representation", padding=8)
+        self.f_rep.pack(fill=tk.X, pady=(0, 6))
+        f_rep = self.f_rep
         f_rep.columnconfigure(1, weight=1)
 
         ttk.Label(f_rep, text="Style").grid(row=0, column=0, sticky=tk.W, pady=2)
@@ -606,8 +785,9 @@ class AtomicBlenderApp(tk.Tk):
         self._sync_view_mode()
 
         # 4. Supercell & Crop Z
-        f_geom = ttk.LabelFrame(parent, text="Supercell & Framing", padding=8)
-        f_geom.pack(fill=tk.X, pady=(0, 6))
+        self.f_geom = ttk.LabelFrame(parent, text="Supercell & Framing", padding=8)
+        self.f_geom.pack(fill=tk.X, pady=(0, 6))
+        f_geom = self.f_geom
         f_geom.columnconfigure(1, weight=1)
 
         ttk.Label(f_geom, text="Replicate").grid(row=0, column=0, sticky=tk.W, pady=2)
@@ -656,17 +836,179 @@ class AtomicBlenderApp(tk.Tk):
         ttk.Button(f_ren, text="Browse...", command=self._browse_blender).grid(row=2, column=2, pady=2)
 
         # 6. Actions
-        f_act = ttk.Frame(parent)
-        f_act.pack(fill=tk.X)
-        self.btn_render = ttk.Button(f_act, text="Render High-Res Output", command=self._on_render)
+        f_act = ttk.Frame(parent, style="Outer.TFrame")
+        f_act.pack(fill=tk.X, pady=(0, 4))
+        self.btn_render = ttk.Button(
+            f_act, text="Render High-Res Output", style="Accent.TButton", command=self._on_render
+        )
         self.btn_render.pack(fill=tk.X, pady=(0, 4))
 
-        row_sub = ttk.Frame(f_act)
+        row_sub = ttk.Frame(f_act, style="Outer.TFrame")
         row_sub.pack(fill=tk.X)
         self.btn_blender = ttk.Button(row_sub, text="Open in Blender", command=self._on_open_in_blender)
         self.btn_blender.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 4))
         self.btn_folder = ttk.Button(row_sub, text="Open Output Folder", command=self._on_open_folder)
         self.btn_folder.pack(side=tk.LEFT, fill=tk.X, expand=True)
+
+    def _build_display_types_panel(self, parent: ttk.Frame) -> None:
+        """Build an Avogadro-inspired Display Types check list with custom rounded checkboxes."""
+        f_disp = ttk.LabelFrame(parent, text="Display Types", padding=(6, 4))
+        f_disp.pack(fill=tk.X, pady=(0, 6))
+
+        rows = (
+            ("ball_stick", "Ball and Stick", self.var_disp_ball_stick, lambda: self._toggle_section(self.f_rep)),
+            ("licorice", "Licorice", self.var_disp_licorice, lambda: self._toggle_section(self.f_rep)),
+            ("vdw", "Van der Waals", self.var_disp_vdw, lambda: self._toggle_section(self.f_rep)),
+            ("crystal_lattice", "Crystal Lattice", self.var_show_cell, lambda: self._toggle_section(self.f_geom)),
+            ("atom_labels", "Atom Labels", self.var_show_labels, None),
+            ("reference_axes", "Reference Axes", self.var_show_axes, self._toggle_axes_options),
+        )
+        for idx, (key, label_txt, var, dots_cb) in enumerate(rows):
+            row_bg = "#1E2128" if idx % 2 == 0 else "#232730"
+            row = tk.Frame(f_disp, bg=row_bg, padx=4, pady=2)
+            row.pack(fill=tk.X)
+
+            chk_canvas = tk.Canvas(row, width=22, height=22, bg=row_bg, highlightthickness=0, cursor="hand2")
+            chk_canvas.pack(side=tk.LEFT, padx=(0, 6))
+            self._display_checks[key] = (chk_canvas, var)
+
+            lbl = tk.Label(
+                row,
+                text=label_txt,
+                bg=row_bg,
+                fg="#E5E7EB",
+                font=("Segoe UI", 9),
+                anchor=tk.W,
+                cursor="hand2",
+            )
+            lbl.pack(side=tk.LEFT, fill=tk.X, expand=True)
+
+            chk_canvas.bind("<Button-1>", lambda _e, k=key: self._on_display_type_clicked(k))
+            lbl.bind("<Button-1>", lambda _e, k=key: self._on_display_type_clicked(k))
+
+            if dots_cb is not None:
+                btn = ttk.Button(row, text="•••", style="Dots.TButton", width=3, command=dots_cb)
+                btn.pack(side=tk.RIGHT)
+
+        self._refresh_display_checks()
+
+        self.f_axes_opts = tk.Frame(f_disp, bg="#181A20", padx=6, pady=4, highlightbackground="#2E3440", highlightthickness=1)
+        self.f_axes_opts.pack(fill=tk.X, pady=(4, 0))
+        tk.Label(self.f_axes_opts, text="Axes:", bg="#181A20", fg="#94A3B8", font=("Segoe UI", 8, "bold")).pack(
+            side=tk.LEFT, padx=(0, 6)
+        )
+        ttk.Checkbutton(
+            self.f_axes_opts,
+            text="x, y, z Labels",
+            variable=self.var_axes_labels,
+            command=self._on_axes_option_changed,
+        ).pack(side=tk.LEFT, padx=(0, 8))
+        ttk.Checkbutton(
+            self.f_axes_opts,
+            text="Fix (Default)",
+            variable=self.var_axes_fixed,
+            command=self._on_axes_fix_toggled,
+        ).pack(side=tk.LEFT)
+        self._axes_opts_visible = True
+
+    def _toggle_section(self, frame: ttk.LabelFrame) -> None:
+        if frame.winfo_manager():
+            frame.pack_forget()
+        else:
+            frame.pack(fill=tk.X, pady=(0, 6))
+
+    def _toggle_axes_options(self) -> None:
+        if self._axes_opts_visible:
+            self.f_axes_opts.pack_forget()
+            self._axes_opts_visible = False
+        else:
+            self.f_axes_opts.pack(fill=tk.X, pady=(4, 0))
+            self._axes_opts_visible = True
+
+    def _draw_rounded_checkbox(self, canvas: tk.Canvas, checked: bool) -> None:
+        canvas.delete("all")
+        fill = "#0F6B75" if checked else "#14161A"
+        outline = "#14B8A6" if checked else "#64748B"
+        x0, y0, x1, y1, r = 2, 2, 19, 19, 4
+        pts = [
+            x0 + r, y0, x1 - r, y0, x1, y0, x1, y0 + r,
+            x1, y1 - r, x1, y1, x1 - r, y1, x0 + r, y1,
+            x0, y1, x0, y1 - r, x0, y0 + r, x0, y0,
+        ]
+        canvas.create_polygon(pts, smooth=True, fill=fill, outline=outline, width=1.4)
+        if checked:
+            canvas.create_line(6, 11, 9.5, 14.5, 15.5, 7, fill="#F8FAFC", width=2.0, capstyle=tk.ROUND, joinstyle=tk.ROUND)
+
+    def _refresh_display_checks(self) -> None:
+        for canvas, var in self._display_checks.values():
+            self._draw_rounded_checkbox(canvas, bool(var.get()))
+
+    def _on_display_type_clicked(self, key: str) -> None:
+        if key in ("ball_stick", "licorice", "vdw"):
+            var_map = {
+                "ball_stick": self.var_disp_ball_stick,
+                "licorice": self.var_disp_licorice,
+                "vdw": self.var_disp_vdw,
+            }
+            new_state = not bool(var_map[key].get())
+            if new_state:
+                for k_item, v_item in var_map.items():
+                    v_item.set(k_item == key)
+                self._show_atoms = True
+                if key == "ball_stick":
+                    self._set_representation(0.78, "auto", "bicolor")
+                elif key == "licorice":
+                    self._set_representation(0.42, "auto", "bicolor")
+                else:
+                    self._set_representation(1.35, "none", "style")
+            else:
+                var_map[key].set(False)
+                self._show_atoms = False
+                self._refresh_display_checks()
+                if self._vp_scene is not None:
+                    self._vp_scene.show_atoms = False
+                    self.var_canvas_mode.set("3d")
+                    self._redraw_canvas()
+            return
+
+        if key == "crystal_lattice":
+            self.var_show_cell.set(not bool(self.var_show_cell.get()))
+            self._refresh_display_checks()
+            self._on_repr_changed()
+            return
+
+        if key == "atom_labels":
+            self.var_show_labels.set(not bool(self.var_show_labels.get()))
+            self._refresh_display_checks()
+            if self._vp_scene is not None:
+                self._vp_scene.show_labels = bool(self.var_show_labels.get())
+                self.var_canvas_mode.set("3d")
+                self._redraw_canvas()
+            return
+
+        if key == "reference_axes":
+            self.var_show_axes.set(not bool(self.var_show_axes.get()))
+            self._refresh_display_checks()
+            if self._vp_scene is not None:
+                self._vp_scene.show_axes = bool(self.var_show_axes.get())
+            self._redraw_canvas()
+
+    def _on_axes_option_changed(self) -> None:
+        if self._vp_scene is not None:
+            self._vp_scene.axes_labels = bool(self.var_axes_labels.get())
+        self._redraw_canvas()
+
+    def _on_axes_fix_toggled(self) -> None:
+        if self.var_axes_fixed.get():
+            self._axes_pos = (0.12, 0.86)
+            if self._vp_scene is not None:
+                self._vp_scene.axes_pos = self._axes_pos
+            self._redraw_canvas()
+
+    def _on_backdrop_toggled(self) -> None:
+        if self._vp_scene is not None:
+            self._vp_scene.dark_backdrop = bool(self.var_dark_backdrop.get())
+        self._redraw_canvas()
 
     def _build_preview_and_log(self, parent: ttk.Frame) -> None:
         v_pane = ttk.PanedWindow(parent, orient=tk.VERTICAL)
@@ -682,12 +1024,15 @@ class AtomicBlenderApp(tk.Tk):
             tb, text="Rendered PNG", variable=self.var_canvas_mode, value="png", command=self._redraw_canvas
         ).pack(side=tk.LEFT, padx=(8, 12))
         ttk.Button(tb, text="Reset / Fit View", command=self._on_reset_view).pack(side=tk.LEFT, padx=(0, 4))
-        ttk.Button(tb, text="Save view.json...", command=self._on_save_view_json).pack(side=tk.LEFT)
+        ttk.Button(tb, text="Save view.json...", command=self._on_save_view_json).pack(side=tk.LEFT, padx=(0, 8))
+        ttk.Checkbutton(
+            tb, text="Dark Backdrop", variable=self.var_dark_backdrop, command=self._on_backdrop_toggled
+        ).pack(side=tk.LEFT)
         ttk.Label(
-            tb, text="Left-drag: Rotate  |  Right/Shift-drag: Pan  |  Scroll: Zoom", foreground="#555555"
+            tb, text="Left-drag: Rotate / Drag Axes  |  Right-drag: Pan  |  Scroll: Zoom", style="Muted.TLabel"
         ).pack(side=tk.RIGHT)
 
-        self.canvas = tk.Canvas(f_prev, bg="#E8E8E8", highlightthickness=0)
+        self.canvas = tk.Canvas(f_prev, bg="#15171C", highlightthickness=0)
         self.canvas.pack(fill=tk.BOTH, expand=True)
         self.canvas.bind("<Configure>", lambda _e: self._redraw_canvas())
         self.canvas.bind("<ButtonPress-1>", self._on_canvas_lbutton_down)
@@ -703,8 +1048,18 @@ class AtomicBlenderApp(tk.Tk):
         self.canvas.bind("<Button-4>", lambda _e: self._zoom_3d(0.9))
         self.canvas.bind("<Button-5>", lambda _e: self._zoom_3d(1.111))
 
-        f_log = ttk.LabelFrame(v_pane, text="Log", padding=4)
-        self.log_text = scrolledtext.ScrolledText(f_log, height=8, state=tk.DISABLED, wrap=tk.WORD)
+        f_log = ttk.LabelFrame(v_pane, text="Console Log", padding=4)
+        self.log_text = scrolledtext.ScrolledText(
+            f_log,
+            height=8,
+            state=tk.DISABLED,
+            wrap=tk.WORD,
+            bg="#121418",
+            fg="#CBD5E1",
+            insertbackground="#E5E7EB",
+            relief=tk.FLAT,
+            font=("Consolas", 9),
+        )
         self.log_text.pack(fill=tk.BOTH, expand=True)
 
         v_pane.add(f_prev, weight=4)
@@ -721,6 +1076,11 @@ class AtomicBlenderApp(tk.Tk):
         self.var_radius_label.set(f"{radius_scale:.2f}×")
         self.var_bonds.set(bonds)
         self.var_bond_color.set(bond_color)
+        self._show_atoms = True
+        self.var_disp_ball_stick.set(bonds != "none" and radius_scale >= 0.6)
+        self.var_disp_licorice.set(bonds != "none" and radius_scale < 0.6)
+        self.var_disp_vdw.set(bonds == "none" and radius_scale > 1.1)
+        self._refresh_display_checks()
         self._rebuild_viewport(reset_camera=False, trigger_preview=True)
 
     def _apply_slab_preset(self) -> None:
@@ -1079,7 +1439,14 @@ class AtomicBlenderApp(tk.Tk):
             bonds_mode=self.var_bonds.get(),
             bond_color=self.var_bond_color.get(),
             show_cell=bool(self.var_show_cell.get()),
+            show_atoms=bool(self._show_atoms),
+            show_labels=bool(self.var_show_labels.get()),
+            show_axes=bool(self.var_show_axes.get()),
+            axes_labels=bool(self.var_axes_labels.get()),
+            axes_pos=self._axes_pos,
+            dark_backdrop=bool(self.var_dark_backdrop.get()),
         )
+        self._refresh_display_checks()
         if prev_cam is not None:
             vp.quat, vp.target, vp.ortho_scale = prev_cam
         else:
@@ -1200,7 +1567,49 @@ class AtomicBlenderApp(tk.Tk):
         self._sync_view_mode()
         self.var_status.set(f"Saved view -> {Path(path).name}")
 
+    def _frame_rect(self) -> tuple[float, float, float, float] | None:
+        """Return ``(x0, y0, width, height)`` of the active camera frame or PNG inside ``self.canvas``."""
+        cw = max(1, self.canvas.winfo_width())
+        ch = max(1, self.canvas.winfo_height())
+        if self.var_canvas_mode.get() == "png" and self._pil_image is not None and _HAS_PIL:
+            iw, ih = self._pil_image.size
+            scale = min((cw - 16) / max(1, iw), (ch - 16) / max(1, ih))
+            fw = max(1.0, iw * scale)
+            fh = max(1.0, ih * scale)
+            return ((cw - fw) * 0.5, (ch - fh) * 0.5, fw, fh)
+        if self._vp_scene is None:
+            return None
+        res_w = max(16, int(self.var_res_w.get()))
+        res_h = max(16, int(self.var_res_h.get()))
+        pad = min(24.0, min(cw, ch) * 0.2)
+        scale = max(1e-4, min((cw - pad) / res_w, (ch - pad) / res_h))
+        fw = res_w * scale
+        fh = res_h * scale
+        return ((cw - fw) * 0.5, (ch - fh) * 0.5, fw, fh)
+
+    def _axes_canvas_center(self) -> tuple[float, float, float] | None:
+        """Return ``(cx, cy, hit_radius_px)`` of the Reference Axes gizmo in canvas coords."""
+        if not self.var_show_axes.get():
+            return None
+        rect = self._frame_rect()
+        if rect is None:
+            return None
+        x0, y0, fw, fh = rect
+        cx = x0 + self._axes_pos[0] * fw
+        cy = y0 + self._axes_pos[1] * fh
+        hit_r = max(36.0, min(46.0, min(fw, fh) * 0.09))
+        return (cx, cy, hit_r)
+
     def _on_canvas_lbutton_down(self, event: tk.Event) -> None:
+        hit = self._axes_canvas_center()
+        if hit is not None:
+            ax_cx, ax_cy, hit_r = hit
+            if (event.x - ax_cx) ** 2 + (event.y - ax_cy) ** 2 <= hit_r ** 2:
+                self._dragging = True
+                self._drag_mode = "axes"
+                self._drag_last = (event.x, event.y)
+                self.var_axes_fixed.set(False)
+                return
         if self._vp_scene is None:
             return
         self._dragging = True
@@ -1215,7 +1624,21 @@ class AtomicBlenderApp(tk.Tk):
         self._drag_last = (event.x, event.y)
 
     def _on_canvas_motion(self, event: tk.Event) -> None:
-        if not self._dragging or self._vp_scene is None:
+        if not self._dragging:
+            return
+        if self._drag_mode == "axes":
+            rect = self._frame_rect()
+            if rect is not None:
+                x0, y0, fw, fh = rect
+                u = max(0.06, min(0.94, (event.x - x0) / max(1.0, fw)))
+                v = max(0.06, min(0.94, (event.y - y0) / max(1.0, fh)))
+                self._axes_pos = (u, v)
+                self.var_axes_fixed.set(False)
+                if self._vp_scene is not None:
+                    self._vp_scene.axes_pos = self._axes_pos
+                self._redraw_canvas()
+            return
+        if self._vp_scene is None:
             return
         dx = event.x - self._drag_last[0]
         dy = event.y - self._drag_last[1]
@@ -1236,8 +1659,12 @@ class AtomicBlenderApp(tk.Tk):
 
     def _on_canvas_mouse_up(self, _event: tk.Event) -> None:
         if self._dragging:
+            was_axes = self._drag_mode == "axes"
             self._dragging = False
             self._drag_mode = None
+            if was_axes:
+                self._redraw_canvas()
+                return
             if self.var_canvas_mode.get() == "3d":
                 self._draw_3d_viewport(interactive=False)
                 self._request_blender_preview()
@@ -1292,7 +1719,7 @@ class AtomicBlenderApp(tk.Tk):
                 ch // 2,
                 text="Drag & drop a structure file (or view.json / style.json) anywhere on this window\nor click 'Browse...' to preview in interactive 3D",
                 justify=tk.CENTER,
-                fill="#555555",
+                fill="#94A3B8" if self.var_dark_backdrop.get() else "#555555",
             )
             return
 
@@ -1418,10 +1845,13 @@ class AtomicBlenderApp(tk.Tk):
         cw = max(1, self.canvas.winfo_width())
         ch = max(1, self.canvas.winfo_height())
 
+        dark_bg = bool(self.var_dark_backdrop.get())
         tile = 20
+        c_even = "#242830" if dark_bg else "#F3F3F3"
+        c_odd = "#1C1F26" if dark_bg else "#E2E2E2"
         for y in range(0, ch, tile):
             for x in range(0, cw, tile):
-                color = "#F3F3F3" if ((x // tile + y // tile) % 2 == 0) else "#E2E2E2"
+                color = c_even if ((x // tile + y // tile) % 2 == 0) else c_odd
                 self.canvas.create_rectangle(x, y, x + tile, y + tile, fill=color, outline="")
 
         if self._pil_image is None:
@@ -1430,7 +1860,7 @@ class AtomicBlenderApp(tk.Tk):
                 ch // 2,
                 text="Drag & drop a structure file (or view.json / style.json) anywhere on this window\nor click 'Browse...' and 'Render High-Res Output'",
                 justify=tk.CENTER,
-                fill="#555555",
+                fill="#94A3B8" if dark_bg else "#555555",
             )
             return
 
@@ -1439,7 +1869,16 @@ class AtomicBlenderApp(tk.Tk):
             scale = min((cw - 16) / max(1, iw), (ch - 16) / max(1, ih))
             nw = max(1, int(iw * scale))
             nh = max(1, int(ih * scale))
-            resized = self._pil_image.resize((nw, nh), Image.Resampling.LANCZOS)
+            resized = self._pil_image.resize((nw, nh), Image.Resampling.LANCZOS).copy()
+            if self.var_show_axes.get():
+                quat = self._vp_scene.quat if self._vp_scene is not None else (1.0, 0.0, 0.0, 0.0)
+                render_reference_axes_overlay(
+                    resized,
+                    quat,
+                    axes_pos=self._axes_pos,
+                    show_labels=bool(self.var_axes_labels.get()),
+                    dark_backdrop=dark_bg,
+                )
             self._photo_ref = ImageTk.PhotoImage(resized)
         else:
             iw = self._pil_image.width()
@@ -1517,6 +1956,20 @@ class AtomicBlenderApp(tk.Tk):
                     self._preview_seq += 1
                     self._set_busy(False, f"Rendered {target_path.name} in {elapsed:.1f}s")
                     self._load_preview(target_path)
+                    if self.var_show_axes.get() and _HAS_PIL and target_path.is_file():
+                        try:
+                            out_img = Image.open(target_path).convert("RGBA")
+                            quat = self._vp_scene.quat if self._vp_scene is not None else (1.0, 0.0, 0.0, 0.0)
+                            render_reference_axes_overlay(
+                                out_img,
+                                quat,
+                                axes_pos=self._axes_pos,
+                                show_labels=bool(self.var_axes_labels.get()),
+                                dark_backdrop=bool(self.var_dark_backdrop.get()),
+                            )
+                            out_img.save(target_path)
+                        except Exception as exc:
+                            self._append_log(f"Axes overlay warning: {exc}")
                 elif mode == "open_blender":
                     self._set_busy(False, f"Opening {target_path.name} in Blender...")
                     subprocess.Popen([self._pending_blender_exe, str(target_path)])

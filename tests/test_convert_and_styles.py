@@ -406,6 +406,103 @@ class TestAtomicBlender(unittest.TestCase):
             finally:
                 app.destroy()
 
+    def test_display_types_draggable_axes_and_dark_theme(self) -> None:
+        from PIL import Image
+        import numpy as np
+        from atomic_blender.cli import resolve_style_path
+        from atomic_blender.gui import AtomicBlenderApp
+        from atomic_blender.viewport3d import render_reference_axes_overlay
+
+        img_with_lbl = Image.new("RGBA", (400, 400), (24, 26, 32, 255))
+        cx, cy, hit_r = render_reference_axes_overlay(
+            img_with_lbl,
+            (1.0, 0.0, 0.0, 0.0),
+            axes_pos=(0.25, 0.75),
+            show_labels=True,
+            dark_backdrop=True,
+        )
+        self.assertAlmostEqual(cx, 100.0, delta=1.0)
+        self.assertAlmostEqual(cy, 300.0, delta=1.0)
+        self.assertGreater(hit_r, 30.0)
+
+        img_no_lbl = Image.new("RGBA", (400, 400), (24, 26, 32, 255))
+        render_reference_axes_overlay(
+            img_no_lbl,
+            (1.0, 0.0, 0.0, 0.0),
+            axes_pos=(0.25, 0.75),
+            show_labels=False,
+            dark_backdrop=True,
+        )
+        # x, y, z tip labels should produce distinct rendered pixels vs labels disabled
+        self.assertNotEqual(img_with_lbl.tobytes(), img_no_lbl.tobytes())
+        # Axes patch around (100, 300) must differ from pure background
+        patch = np.asarray(img_with_lbl)[260:340, 60:140, :3]
+        self.assertGreater(float(patch.std()), 5.0)
+
+        style = json.loads(resolve_style_path("studio").read_text(encoding="utf-8"))
+        structure = {
+            "symbols": ["O", "H", "H"],
+            "positions": [[0.0, 0.0, 0.0], [0.96, 0.0, 0.0], [-0.24, 0.93, 0.0]],
+            "cell": [[10.0, 0.0, 0.0], [0.0, 10.0, 0.0], [0.0, 0.0, 10.0]],
+            "pbc": [True, True, True],
+            "has_cell": True,
+            "origin": [0.0, 0.0, 0.0],
+        }
+        app = AtomicBlenderApp()
+        app.withdraw()
+        try:
+            app.var_blender.set("")
+            app.canvas.configure(width=600, height=600)
+            app.update_idletasks()
+            app._structure_cache = structure
+            app._structure_version = 1
+            app._rebuild_viewport(reset_camera=True, trigger_preview=False)
+            assert app._vp_scene is not None
+
+            # Verify default Display Types states
+            self.assertTrue(app.var_disp_ball_stick.get())
+            self.assertTrue(app.var_show_cell.get())
+            self.assertTrue(app.var_show_axes.get())
+            self.assertTrue(app.var_axes_labels.get())
+            self.assertTrue(app.var_axes_fixed.get())
+            self.assertEqual(app._axes_pos, (0.12, 0.86))
+
+            # Switch to Licorice and toggle Atom Labels
+            app._on_display_type_clicked("licorice")
+            self.assertFalse(app.var_disp_ball_stick.get())
+            self.assertTrue(app.var_disp_licorice.get())
+            self.assertAlmostEqual(app.var_radius_scale.get(), 0.42, places=2)
+
+            app._on_display_type_clicked("atom_labels")
+            self.assertTrue(app.var_show_labels.get())
+            self.assertTrue(app._vp_scene.show_labels)
+
+            # Drag the Reference Axes center directly and verify unfixed position
+            center = app._axes_canvas_center()
+            self.assertIsNotNone(center)
+            ax_x, ax_y, _ = center  # type: ignore[misc]
+            ev_down = type("E", (), {"x": int(round(ax_x)), "y": int(round(ax_y)), "state": 0})()
+            app._on_canvas_lbutton_down(ev_down)  # type: ignore[arg-type]
+            self.assertEqual(app._drag_mode, "axes")
+            self.assertFalse(app.var_axes_fixed.get())
+
+            ev_move = type("E", (), {"x": 450, "y": 150, "state": 0})()
+            app._on_canvas_motion(ev_move)  # type: ignore[arg-type]
+            self.assertGreater(app._axes_pos[0], 0.5)
+            self.assertLess(app._axes_pos[1], 0.5)
+
+            ev_up = type("E", (), {"x": 450, "y": 150, "state": 0})()
+            app._on_canvas_mouse_up(ev_up)  # type: ignore[arg-type]
+            self.assertFalse(app._dragging)
+
+            # Checking Fix (Default) snaps axes back to default (0.12, 0.86)
+            app.var_axes_fixed.set(True)
+            app._on_axes_fix_toggled()
+            self.assertEqual(app._axes_pos, (0.12, 0.86))
+            self.assertEqual(app._vp_scene.axes_pos, (0.12, 0.86))
+        finally:
+            app.destroy()
+
 
 if __name__ == "__main__":
     unittest.main()

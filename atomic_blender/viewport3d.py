@@ -21,7 +21,7 @@ from atomic_blender.elements import (
 )
 
 try:
-    from PIL import Image, ImageDraw
+    from PIL import Image, ImageDraw, ImageFont
 
     _HAS_PIL = True
 except Exception:
@@ -260,6 +260,139 @@ def _needs_light_outline(symbol: str, hex_color: str) -> bool:
     return symbol == "H" or luminance > 215.0
 
 
+def _needs_dark_rim_outline(hex_color: str) -> bool:
+    r, g, b = _hex_to_rgb(hex_color)
+    luminance = 0.299 * r + 0.587 * g + 0.114 * b
+    return luminance < 75.0
+
+
+def _load_overlay_font(px_size: int) -> Any:
+    """Load a crisp sans-serif bold font for axes and atom labels."""
+    if not _HAS_PIL:
+        return None
+    for candidate in ("segoeuib.ttf", "arialbd.ttf", "DejaVuSans-Bold.ttf", "segoeui.ttf", "arial.ttf"):
+        try:
+            return ImageFont.truetype(candidate, max(8, int(px_size)))
+        except Exception:
+            continue
+    return ImageFont.load_default()
+
+
+def render_reference_axes_overlay(
+    target_img: Any,
+    quat: Quat,
+    axes_pos: tuple[float, float] = (0.12, 0.86),
+    show_labels: bool = True,
+    dark_backdrop: bool = True,
+    arm_px: float | None = None,
+) -> tuple[float, float, float]:
+    """Draw a 3D depth-sorted Reference Axes (x, y, z) gizmo onto ``target_img``."""
+    tw, th = target_img.size
+    u = max(0.05, min(0.95, float(axes_pos[0])))
+    v = max(0.05, min(0.95, float(axes_pos[1])))
+    cx = u * tw
+    cy = v * th
+
+    arm_len = float(arm_px) if arm_px is not None else max(24.0, min(58.0, min(tw, th) * 0.068))
+    if not _HAS_PIL:
+        return cx, cy, max(34.0, arm_len * 1.15)
+
+    ss = 2
+    box_half = int(math.ceil(arm_len * 1.55))
+    size_ss = box_half * 2 * ss
+    badge = Image.new("RGBA", (size_ss, size_ss), (0, 0, 0, 0))
+    draw = ImageDraw.Draw(badge, "RGBA")
+    oc = box_half * ss
+
+    disc_r = arm_len * 1.30 * ss
+    if dark_backdrop:
+        disc_fill = (18, 22, 28, 155)
+        disc_edge = (94, 108, 128, 165)
+        hub_fill = (226, 232, 240, 245)
+        stroke_col = (15, 18, 24, 235)
+    else:
+        disc_fill = (244, 246, 250, 175)
+        disc_edge = (148, 163, 184, 185)
+        hub_fill = (71, 85, 105, 245)
+        stroke_col = (15, 23, 42, 220)
+
+    draw.ellipse((oc - disc_r, oc - disc_r, oc + disc_r, oc + disc_r), fill=disc_fill, outline=disc_edge, width=2)
+
+    right, up, back = quat_to_axes(quat)
+    basis_defs = (
+        ("x", np.array([1.0, 0.0, 0.0]), (239, 68, 68), (252, 165, 165)),
+        ("y", np.array([0.0, 1.0, 0.0]), (34, 197, 94), (134, 239, 172)),
+        ("z", np.array([0.0, 0.0, 1.0]), (59, 130, 246), (147, 197, 253)),
+    )
+    projected = []
+    for lbl, vec, rgb, text_rgb in basis_defs:
+        dx = float(np.dot(vec, right))
+        dy = -float(np.dot(vec, up))
+        dz = float(np.dot(vec, back))
+        projected.append((dz, lbl, dx, dy, rgb, text_rgb))
+    projected.sort(key=lambda item: item[0])
+
+    len_ss = arm_len * ss
+    shaft_w = max(4, int(round(arm_len * 0.125 * ss)))
+    head_half_w = max(5.5, arm_len * 0.145 * ss)
+    label_font = _load_overlay_font(max(18, int(round(arm_len * 0.36 * ss)))) if show_labels else None
+
+    for dz, lbl, dx, dy, rgb, text_rgb in projected:
+        depth_bright = 0.72 + 0.28 * ((dz + 1.0) * 0.5)
+        col = tuple(max(0, min(255, int(round(c * depth_bright)))) for c in rgb) + (245,)
+        plen = math.hypot(dx, dy)
+        tip_x = oc + dx * len_ss
+        tip_y = oc + dy * len_ss
+
+        if plen > 0.08:
+            ux, uy = dx / plen, dy / plen
+            px, py = -uy, ux
+            shaft_frac = 0.74
+            sx = oc + dx * len_ss * shaft_frac
+            sy = oc + dy * len_ss * shaft_frac
+            draw.line((oc, oc, sx, sy), fill=col, width=shaft_w)
+
+            base_x = oc + dx * len_ss * 0.70
+            base_y = oc + dy * len_ss * 0.70
+            draw.polygon(
+                [
+                    (tip_x, tip_y),
+                    (base_x + px * head_half_w, base_y + py * head_half_w),
+                    (base_x - px * head_half_w, base_y - py * head_half_w),
+                ],
+                fill=col,
+            )
+            lbl_x = oc + dx * (len_ss + arm_len * 0.24 * ss)
+            lbl_y = oc + dy * (len_ss + arm_len * 0.24 * ss)
+        else:
+            r_end = shaft_w * 0.85
+            draw.ellipse((tip_x - r_end, tip_y - r_end, tip_x + r_end, tip_y + r_end), fill=col)
+            lbl_x = oc + (arm_len * 0.24 * ss)
+            lbl_y = oc - (arm_len * 0.24 * ss)
+
+        if show_labels and label_font is not None:
+            bbox = draw.textbbox((0, 0), lbl, font=label_font)
+            tw_txt = bbox[2] - bbox[0]
+            th_txt = bbox[3] - bbox[1]
+            tx = lbl_x - tw_txt * 0.5 - bbox[0]
+            ty = lbl_y - th_txt * 0.5 - bbox[1]
+            draw.text(
+                (tx, ty),
+                lbl,
+                font=label_font,
+                fill=text_rgb + (255,),
+                stroke_width=max(2, ss),
+                stroke_fill=stroke_col,
+            )
+
+    hub_r = max(3.5, arm_len * 0.11 * ss)
+    draw.ellipse((oc - hub_r, oc - hub_r, oc + hub_r, oc + hub_r), fill=hub_fill, outline=stroke_col, width=1)
+
+    badge_small = badge.resize((box_half * 2, box_half * 2), Image.Resampling.LANCZOS)
+    _blit_rgba(target_img, badge_small, int(round(cx - box_half)), int(round(cy - box_half)))
+    return cx, cy, max(36.0, arm_len * 1.25)
+
+
 def _apply_thin_outline(
     sprite: Any,
     outline_rgb: tuple[int, int, int] = (115, 120, 130),
@@ -402,8 +535,15 @@ class ViewportScene:
     ortho_scale: float = 20.0
     margin: float = 1.08
     _base_sprites: dict[tuple[str, int], Any] = field(default_factory=dict)
-    _resized_sprites: dict[tuple[str, int, int], Any] = field(default_factory=dict)
+    _resized_sprites: dict[tuple[str, int, int, bool], Any] = field(default_factory=dict)
     _outline_symbols: set[str] = field(default_factory=set)
+    _dark_outline_symbols: set[str] = field(default_factory=set)
+    show_atoms: bool = True
+    show_labels: bool = False
+    show_axes: bool = True
+    axes_labels: bool = True
+    axes_pos: tuple[float, float] = (0.12, 0.86)
+    dark_backdrop: bool = True
 
     def __post_init__(self) -> None:
         if self.target is None:
@@ -418,6 +558,12 @@ class ViewportScene:
         bonds_mode: str | None = None,
         bond_color: str | None = None,
         show_cell: bool = True,
+        show_atoms: bool = True,
+        show_labels: bool = False,
+        show_axes: bool = True,
+        axes_labels: bool = True,
+        axes_pos: tuple[float, float] = (0.12, 0.86),
+        dark_backdrop: bool = True,
     ) -> ViewportScene:
         symbols = list(structure["symbols"])
         positions = np.asarray(structure["positions"], dtype=np.float64).reshape(-1, 3)
@@ -435,6 +581,7 @@ class ViewportScene:
         elem_hi: dict[str, str] = {}
         base_sprites: dict[tuple[str, int], Any] = {}
         outline_syms: set[str] = set()
+        dark_outline_syms: set[str] = set()
 
         for sym in set(symbols):
             c = resolve_element_color(sym, style)
@@ -444,6 +591,8 @@ class ViewportScene:
             elem_r[sym] = resolve_element_radius(sym, style) * eff_scale
             if _needs_light_outline(sym, c):
                 outline_syms.add(sym)
+            elif _needs_dark_rim_outline(c):
+                dark_outline_syms.add(sym)
 
             if _HAS_PIL:
                 profile = mat_cfg.get("metal" if sym in METAL_ELEMENTS else "nonmetal", {})
@@ -526,10 +675,17 @@ class ViewportScene:
             margin=float(cam_cfg.get("margin", 1.08)),
             _base_sprites=base_sprites,
             _outline_symbols=outline_syms,
+            _dark_outline_symbols=dark_outline_syms,
+            show_atoms=show_atoms,
+            show_labels=show_labels,
+            show_axes=show_axes,
+            axes_labels=axes_labels,
+            axes_pos=axes_pos,
+            dark_backdrop=dark_backdrop,
         )
 
     def _get_sprite(self, symbol: str, diameter_px: int, bucket: int) -> Any:
-        key = (symbol, diameter_px, bucket)
+        key = (symbol, diameter_px, bucket, self.dark_backdrop)
         cached = self._resized_sprites.get(key)
         if cached is not None:
             return cached
@@ -541,6 +697,8 @@ class ViewportScene:
         resized = base.resize((diameter_px, diameter_px), Image.Resampling.LANCZOS)
         if symbol in self._outline_symbols:
             resized = _apply_thin_outline(resized)
+        elif self.dark_backdrop and symbol in self._dark_outline_symbols:
+            resized = _apply_thin_outline(resized, outline_rgb=(156, 163, 175), strength=0.45)
         self._resized_sprites[key] = resized
         return resized
 
@@ -636,14 +794,18 @@ class ViewportScene:
         rh = max(16, int(round(ch * ss)))
 
         # Background canvas + clipped camera output frame
-        img = Image.new("RGBA", (rw, rh), (232, 234, 237, 255))
+        outer_bg = (21, 23, 28, 255) if self.dark_backdrop else (232, 234, 237, 255)
+        frame_bg = (36, 40, 48, 255) if self.dark_backdrop else (250, 251, 252, 255)
+        border_col = (71, 85, 105, 255) if self.dark_backdrop else (148, 163, 184, 255)
+
+        img = Image.new("RGBA", (rw, rh), outer_bg)
         pad = min(24.0 * ss, min(rw, rh) * 0.2)
         scale = max(1e-4, min((rw - pad) / max(1, res_w), (rh - pad) / max(1, res_h)))
         fw = res_w * scale
         fh = res_h * scale
         fw_i = max(4, int(round(fw)))
         fh_i = max(4, int(round(fh)))
-        frame = Image.new("RGBA", (fw_i, fh_i), (250, 251, 252, 255))
+        frame = Image.new("RGBA", (fw_i, fh_i), frame_bg)
         draw = ImageDraw.Draw(frame, "RGBA")
         cx0 = fw_i * 0.5
         cy0 = fh_i * 0.5
@@ -660,7 +822,10 @@ class ViewportScene:
             ce_y = cy0 - (ce_rel @ up) * px_per_a
             ce_z = ce_rel @ back
             cell_w = max(1, min(4, int(round(0.11 * px_per_a))))
-            c_rgba = _shade_rgba_tuple(self.cell_color, 1.0)
+            cr, cg, cb = _hex_to_rgb(self.cell_color)
+            cell_lum = 0.299 * cr + 0.587 * cg + 0.114 * cb
+            eff_cell_hex = "#CBD5E1" if (self.dark_backdrop and cell_lum < 60.0) else self.cell_color
+            c_rgba = _shade_rgba_tuple(eff_cell_hex, 1.0)
             for idx in range(len(self.cell_edges)):
                 z_mid = float(0.5 * (ce_z[idx, 0] + ce_z[idx, 1]))
                 draw_items.append((
@@ -670,7 +835,7 @@ class ViewportScene:
                 ))
 
         # 2. Atoms & surface-trimmed, depth-subdivided shaded bonds
-        if len(self.positions) > 0:
+        if self.show_atoms and len(self.positions) > 0:
             rel = self.positions - self.target
             ax = cx0 + (rel @ right) * px_per_a
             ay = cy0 - (rel @ up) * px_per_a
@@ -756,6 +921,34 @@ class ViewportScene:
                 sprite = self._get_sprite(self.symbols[idx], diam_px, bucket)
                 if sprite is not None:
                     _blit_rgba(frame, sprite, int(round(sx - diam_px * 0.5)), int(round(sy - diam_px * 0.5)))
+                    if self.show_labels and diam_px >= 12:
+                        lbl = self.symbols[idx]
+                        lfont = _load_overlay_font(max(9, min(22, int(round(diam_px * 0.42)))))
+                        if lfont is not None:
+                            bbox = draw.textbbox((0, 0), lbl, font=lfont)
+                            tw_l = bbox[2] - bbox[0]
+                            th_l = bbox[3] - bbox[1]
+                            ar, ag, ab = _hex_to_rgb(self.colors[idx])
+                            alum = 0.299 * ar + 0.587 * ag + 0.114 * ab
+                            tfill = (15, 23, 42, 245) if alum > 155.0 else (248, 250, 252, 245)
+                            tstroke = (248, 250, 252, 200) if alum > 155.0 else (15, 23, 42, 220)
+                            draw.text(
+                                (sx - tw_l * 0.5 - bbox[0], sy - th_l * 0.5 - bbox[1]),
+                                lbl,
+                                font=lfont,
+                                fill=tfill,
+                                stroke_width=1,
+                                stroke_fill=tstroke,
+                            )
+
+        if self.show_axes:
+            render_reference_axes_overlay(
+                frame,
+                self.quat,
+                axes_pos=self.axes_pos,
+                show_labels=self.axes_labels,
+                dark_backdrop=self.dark_backdrop,
+            )
 
         # Composite clipped camera frame onto canvas and draw crisp border
         fx0 = int(round((rw - fw_i) * 0.5))
@@ -764,7 +957,7 @@ class ViewportScene:
         outer_draw = ImageDraw.Draw(img, "RGBA")
         outer_draw.rectangle(
             (fx0, fy0, fx0 + fw_i - 1, fy0 + fh_i - 1),
-            outline=(148, 163, 184, 255),
+            outline=border_col,
             width=max(1, int(ss)),
         )
 
