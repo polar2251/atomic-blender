@@ -74,8 +74,8 @@ atomic-blender-gui [optional_structure_file]
 ```
 
 Inside the desktop client you can:
-- Browse and load any ASE-supported structure (`POSCAR`, `.cif`, `.xyz`, `.data`, `.json`) and optionally supply a LAMMPS `--type-map`.
-- Choose a style (`default` or a custom `.json`), switch between view presets (`iso`, `side-oblique`, `a`, `b`, `c`) or a saved `view.json` (`--fit-view`), and configure supercell replication, `wrap`, `--crop-z`, bond mode, resolution, and Cycles samples.
+- Browse and load any ASE-supported structure (`POSCAR`, `.cif`, `.xyz`, `.data`, `.json`) with an instant live structure inspector banner (formula, atom count, lattice parameters, PBC) and one-click **Smart Slab Preset** / **Cube / Bulk Preset**.
+- Choose a style (`studio`, `matte`, `ball_and_stick`, `default`, or a custom `.json`), tune **Atom Scale** (`0.4`–`1.6`), toggle **Show Cell**, set **Bond Color** (`bicolor` or `single`), switch view presets (`Iso`, `Side`, `a`, `b`, `c`) or a saved `view.json` (`--fit-view`), and configure supercell replication, `wrap`, `--crop-z`, resolution, and Cycles samples.
 - Click **Render & Preview** to run Cycles asynchronously with live log streaming and inspect the rendered RGBA PNG directly on a transparent checkerboard canvas.
 - Click **Open in Blender** to generate a `.blend` scene with the active settings and launch the Blender GUI so you can orbit interactively and save `view.json` via the **Atomic Studio** sidebar.
 
@@ -113,6 +113,9 @@ atomic-blender render structure.data --type-map "1:Al,2:C,3:H" --view side-obliq
 ### Additional CLI options
 
 - `--bonds table|auto|none`: Override bond drawing mode (`table` uses style cutoffs; `auto` uses covalent radii; `none` disables bonds).
+- `--bond-color style|single|bicolor`: Override bond coloring (`bicolor` splits each bond into two half-cylinders matching endpoint atom colors).
+- `--radius-scale FLOAT`: Scale atomic sphere radii continuously (e.g., `0.78` for compact ball-and-stick).
+- `--no-cell`: Hide the 12-edge periodic cell wireframe box.
 - `--fit-view`: Keep the camera orientation from `view.json` while re-fitting `target` and `ortho_scale` to a new or replicated structure.
 - `--samples N`: Override Cycles sample count.
 - `--no-wrap`: Keep coordinates unwrapped.
@@ -149,16 +152,22 @@ atomic-blender render other_slab.vasp --style default --view view.json --fit-vie
 
 ## Customizing & Adding Styles
 
-Styles are stored in `styles/*.json` and passed via `--style <name>` or `--style path/to/custom.json`.
+Built-in styles live in `styles/*.json` and are passed via `--style <name>` or `--style path/to/custom.json`:
 
-Key sections in [`styles/default.json`](styles/default.json):
+| Style | Visual Characteristics |
+|---|---|
+| `default` | Flat Principled BSDF (`Roughness = 0.35`, `Specular = 0.4`), gray bonds, Sun + Area fill |
+| `studio` | Ambient occlusion contact shadows, subtle subsurface scattering on non-metals, metallic slabs, 3-point rim light, bicolor split bonds |
+| `matte` | Soft clay / illustrative finish with strong AO shading (`0.55`), bright ambient world, bicolor bonds |
+| `ball_and_stick` | Compact sphere scaling (`0.78×`), auto covalent bonds, bicolor split cylinders, studio shader |
 
-- `elements.colors`: Hex sRGB overrides per element. Any element not listed automatically falls back to the Jmol/CPK palette.
-- `elements.radii`: Sphere radius overrides (Å) and `radius_fallback` (`transition_metal`, `covalent_scale`, `default`).
-- `material`: Principled BSDF `roughness` (`0.35`) and `specular` (`0.4`).
-- `bonds`: `mode` (`table`, `auto`, `none`), `color`, `radius`, `cutoffs` (`"C-H"`, `"O-H"`, `"C-C"`, etc.), and `skip_pbc`.
+Key sections in [`styles/default.json`](styles/default.json) and [`styles/studio.json`](styles/studio.json):
+
+- `elements.colors` / `elements.radii` / `elements.radius_scale`: Element overrides with Jmol/CPK color fallback and transition-metal/covalent radius fallback.
+- `material`: Base Principled BSDF settings (`roughness`, `specular`, `ao_factor`, `ao_distance`) plus optional `metal` and `nonmetal` shader profiles (`metallic`, `subsurface_weight`, `coat_weight`).
+- `bonds`: `mode` (`table`, `auto`, `none`), `color_mode` (`single`, `bicolor`), `radius`, `cutoffs`, and `skip_pbc`.
 - `cell`: Toggle and styling (`color`, `radius`) for the 12-edge periodic cell wireframe.
-- `camera`, `lighting`, `world`, `render`: Orthographic framing margin (`1.08`), Sun + Area fill lights, neutral ambient world, Cycles device priority (`OPTIX`, `CUDA`, `CPU`), sample count (`64`), denoising, and RGBA transparency.
+- `camera`, `lighting`, `world`, `render`: Orthographic framing margin (`1.08`), Sun + Fill + optional Rim lights, world background, Cycles device priority (`OPTIX`, `CUDA`, `CPU`), sample count (`64`), denoising, and RGBA transparency.
 
 To create a new style, copy `styles/default.json` to `styles/my_style.json`, adjust any fields, and pass `--style my_style`.
 

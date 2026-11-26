@@ -20,6 +20,7 @@ from mathutils import Matrix, Quaternion, Vector
 try:
     from atomic_blender.elements import (
         COVALENT_RADII,
+        METAL_ELEMENTS,
         VIEW_PRESETS,
         resolve_element_color,
         resolve_element_radius,
@@ -28,6 +29,7 @@ except ImportError:
     if __package__:
         from .elements import (  # type: ignore[no-redef]
             COVALENT_RADII,
+            METAL_ELEMENTS,
             VIEW_PRESETS,
             resolve_element_color,
             resolve_element_radius,
@@ -38,6 +40,7 @@ except ImportError:
             sys.path.insert(0, _here)
         from elements import (  # type: ignore[import-not-found,no-redef]
             COVALENT_RADII,
+            METAL_ELEMENTS,
             VIEW_PRESETS,
             resolve_element_color,
             resolve_element_radius,
@@ -62,19 +65,108 @@ def make_material(
     hex_color: str,
     roughness: float = 0.35,
     specular: float = 0.4,
+    metallic: float = 0.0,
+    subsurface_weight: float = 0.0,
+    subsurface_scale: float = 0.1,
+    coat_weight: float = 0.0,
+    coat_roughness: float = 0.1,
+    ao_factor: float = 0.0,
+    ao_distance: float = 2.5,
 ) -> bpy.types.Material:
-    """Create a Principled BSDF material compatible with Blender 3.x–5.x."""
+    """Create a Principled BSDF material with optional metallic, SSS, clearcoat, and AO shading."""
     mat = bpy.data.materials.new(name)
     if mat.node_tree is None and hasattr(mat, "use_nodes"):
         mat.use_nodes = True
-    bsdf = mat.node_tree.nodes.get("Principled BSDF")
-    bsdf.inputs["Base Color"].default_value = srgb_hex_to_linear_rgba(hex_color)
+    nt = mat.node_tree
+    bsdf = nt.nodes.get("Principled BSDF")
+    if bsdf is None:
+        bsdf = nt.nodes.new("ShaderNodeBsdfPrincipled")
+        out = nt.nodes.get("Material Output") or nt.nodes.new("ShaderNodeOutputMaterial")
+        nt.links.new(bsdf.outputs["BSDF"], out.inputs["Surface"])
+    rgba = srgb_hex_to_linear_rgba(hex_color)
+
+    if ao_factor > 0.0:
+        ao_node = nt.nodes.new("ShaderNodeAmbientOcclusion")
+        ao_node.samples = 8
+        ao_node.inputs["Distance"].default_value = float(ao_distance)
+        ao_node.inputs["Color"].default_value = rgba
+        try:
+            mix = nt.nodes.new("ShaderNodeMix")
+            mix.data_type = "RGBA"
+            mix.blend_type = "MULTIPLY"
+            mix.inputs[0].default_value = float(ao_factor)
+            mix.inputs[6].default_value = rgba
+            nt.links.new(ao_node.outputs["Color"], mix.inputs[7])
+            nt.links.new(mix.outputs[2], bsdf.inputs["Base Color"])
+        except Exception:
+            mix_rgb = nt.nodes.new("ShaderNodeMixRGB")
+            mix_rgb.blend_type = "MULTIPLY"
+            mix_rgb.inputs["Fac"].default_value = float(ao_factor)
+            mix_rgb.inputs["Color1"].default_value = rgba
+            nt.links.new(ao_node.outputs["Color"], mix_rgb.inputs["Color2"])
+            nt.links.new(mix_rgb.outputs["Color"], bsdf.inputs["Base Color"])
+    else:
+        bsdf.inputs["Base Color"].default_value = rgba
+
     bsdf.inputs["Roughness"].default_value = float(roughness)
+    if "Metallic" in bsdf.inputs:
+        bsdf.inputs["Metallic"].default_value = float(metallic)
     if "Specular IOR Level" in bsdf.inputs:
         bsdf.inputs["Specular IOR Level"].default_value = float(specular)
     elif "Specular" in bsdf.inputs:
         bsdf.inputs["Specular"].default_value = float(specular)
+    if subsurface_weight > 0.0:
+        if "Subsurface Weight" in bsdf.inputs:
+            bsdf.inputs["Subsurface Weight"].default_value = float(subsurface_weight)
+        elif "Subsurface" in bsdf.inputs:
+            bsdf.inputs["Subsurface"].default_value = float(subsurface_weight)
+        if "Subsurface Scale" in bsdf.inputs:
+            bsdf.inputs["Subsurface Scale"].default_value = float(subsurface_scale)
+    if coat_weight > 0.0:
+        if "Coat Weight" in bsdf.inputs:
+            bsdf.inputs["Coat Weight"].default_value = float(coat_weight)
+        elif "Clearcoat" in bsdf.inputs:
+            bsdf.inputs["Clearcoat"].default_value = float(coat_weight)
+        if "Coat Roughness" in bsdf.inputs:
+            bsdf.inputs["Coat Roughness"].default_value = float(coat_roughness)
+        elif "Clearcoat Roughness" in bsdf.inputs:
+            bsdf.inputs["Clearcoat Roughness"].default_value = float(coat_roughness)
     return mat
+
+
+def _element_material_kwargs(elem: str, style: dict[str, Any]) -> dict[str, float]:
+    """Resolve material shader parameters for an element (supporting metal/nonmetal profiles)."""
+    mat_cfg = style.get("material", {})
+    keys = (
+        "roughness",
+        "specular",
+        "metallic",
+        "subsurface_weight",
+        "subsurface_scale",
+        "coat_weight",
+        "coat_roughness",
+        "ao_factor",
+        "ao_distance",
+    )
+    defaults = {
+        "roughness": 0.35,
+        "specular": 0.4,
+        "metallic": 0.0,
+        "subsurface_weight": 0.0,
+        "subsurface_scale": 0.1,
+        "coat_weight": 0.0,
+        "coat_roughness": 0.1,
+        "ao_factor": 0.0,
+        "ao_distance": 2.5,
+    }
+    merged = {k: float(mat_cfg.get(k, defaults[k])) for k in keys}
+    profile_key = "metal" if elem in METAL_ELEMENTS else "nonmetal"
+    profile = mat_cfg.get(profile_key)
+    if isinstance(profile, dict):
+        for k in keys:
+            if k in profile:
+                merged[k] = float(profile[k])
+    return merged
 
 
 def _ensure_collection(scene: bpy.types.Scene, clear_existing: bool) -> bpy.types.Collection:
@@ -522,10 +614,42 @@ def configure_render_and_world(scene: bpy.types.Scene, style: dict[str, Any]) ->
     if world.node_tree is None and hasattr(world, "use_nodes"):
         world.use_nodes = True
     bg = world.node_tree.nodes.get("Background")
+    if bg is None:
+        bg = world.node_tree.nodes.new("ShaderNodeBackground")
+        wout = world.node_tree.nodes.get("World Output") or world.node_tree.nodes.new("ShaderNodeOutputWorld")
+        world.node_tree.links.new(bg.outputs["Background"], wout.inputs["Surface"])
     if bg is not None:
         wcol = world_cfg.get("color", [0.85, 0.85, 0.85, 1.0])
         bg.inputs["Color"].default_value = tuple(float(c) for c in wcol)
         bg.inputs["Strength"].default_value = float(world_cfg.get("strength", 0.6))
+
+
+def _create_directional_area_light(
+    col: bpy.types.Collection,
+    name: str,
+    target: Vector,
+    cfg: dict[str, Any],
+    default_energy: float,
+    default_size: float,
+    default_az: float,
+    default_el: float,
+    default_dist: float,
+) -> None:
+    """Create an AREA (or other typed) fill/rim light aimed at ``target``."""
+    ltype = str(cfg.get("type", "AREA"))
+    ldata = bpy.data.lights.new(name, type=ltype)
+    ldata.energy = float(cfg.get("energy", default_energy))
+    if ltype == "AREA":
+        ldata.size = float(cfg.get("size", default_size))
+    lobj = bpy.data.objects.new(name, ldata)
+    az = math.radians(float(cfg.get("azimuth_deg", default_az)))
+    el = math.radians(float(cfg.get("elevation_deg", default_el)))
+    dist = float(cfg.get("distance", default_dist))
+    ldir = Vector((math.cos(el) * math.cos(az), math.cos(el) * math.sin(az), math.sin(el))).normalized()
+    lobj.location = target + ldir * dist
+    lobj.rotation_mode = "QUATERNION"
+    lobj.rotation_quaternion = (-ldir).to_track_quat("-Z", "Y")
+    col.objects.link(lobj)
 
 
 def setup_lighting(
@@ -533,7 +657,7 @@ def setup_lighting(
     target: Vector,
     style: dict[str, Any],
 ) -> None:
-    """Create Sun key light and Area fill light aimed at ``target``."""
+    """Create Sun key light, Area fill light, and optional Rim light aimed at ``target``."""
     light_cfg = style.get("lighting", {})
     sun_cfg = light_cfg.get("sun", {})
     sun_data = bpy.data.lights.new("AtomicSun", type="SUN")
@@ -543,21 +667,29 @@ def setup_lighting(
     sun_obj.rotation_euler = tuple(math.radians(float(a)) for a in rot_deg)
     col.objects.link(sun_obj)
 
-    fill_cfg = light_cfg.get("fill", {})
-    fill_type = str(fill_cfg.get("type", "AREA"))
-    area_data = bpy.data.lights.new("AtomicFill", type=fill_type)
-    area_data.energy = float(fill_cfg.get("energy", 4000.0))
-    if fill_type == "AREA":
-        area_data.size = float(fill_cfg.get("size", 40.0))
-    area_obj = bpy.data.objects.new("AtomicFill", area_data)
-    az = math.radians(float(fill_cfg.get("azimuth_deg", -40.0)))
-    el = math.radians(float(fill_cfg.get("elevation_deg", 25.0)))
-    fill_dist = float(fill_cfg.get("distance", 45.0))
-    fill_dir = Vector((math.cos(el) * math.cos(az), math.cos(el) * math.sin(az), math.sin(el))).normalized()
-    area_obj.location = target + fill_dir * fill_dist
-    area_obj.rotation_mode = "QUATERNION"
-    area_obj.rotation_quaternion = (-fill_dir).to_track_quat("-Z", "Y")
-    col.objects.link(area_obj)
+    _create_directional_area_light(
+        col=col,
+        name="AtomicFill",
+        target=target,
+        cfg=light_cfg.get("fill", {}),
+        default_energy=4000.0,
+        default_size=40.0,
+        default_az=-40.0,
+        default_el=25.0,
+        default_dist=45.0,
+    )
+    if isinstance(light_cfg.get("rim"), dict):
+        _create_directional_area_light(
+            col=col,
+            name="AtomicRim",
+            target=target,
+            cfg=light_cfg["rim"],
+            default_energy=2500.0,
+            default_size=30.0,
+            default_az=150.0,
+            default_el=35.0,
+            default_dist=42.0,
+        )
 
 
 def build_scene(
@@ -569,6 +701,9 @@ def build_scene(
     bonds_mode_override: str | None = None,
     reset_factory: bool = True,
     fit_override: bool = False,
+    radius_scale: float = 1.0,
+    bond_color_override: str | None = None,
+    show_cell_override: bool | None = None,
 ) -> dict[str, Any]:
     """Build atoms, bonds, cell wireframe, lighting, and camera from neutral structure JSON."""
     if reset_factory:
@@ -591,9 +726,7 @@ def build_scene(
     cell_vecs = [Vector(v) for v in structure.get("cell", [[0, 0, 0], [0, 0, 0], [0, 0, 0]])]
 
     # Atom meshes instanced per element
-    mat_cfg = style.get("material", {})
-    roughness = float(mat_cfg.get("roughness", 0.35))
-    specular = float(mat_cfg.get("specular", 0.4))
+    eff_radius_scale = float(style.get("elements", {}).get("radius_scale", 1.0)) * float(radius_scale)
     mesh_cfg = style.get("atom_mesh", {})
     segments = int(mesh_cfg.get("segments", 24))
     ring_count = int(mesh_cfg.get("ring_count", 12))
@@ -601,15 +734,17 @@ def build_scene(
 
     proto_meshes: dict[str, bpy.types.Mesh] = {}
     elem_radii_cache: dict[str, float] = {}
+    elem_materials: dict[str, bpy.types.Material] = {}
     for elem in sorted(set(symbols)):
-        rad = resolve_element_radius(elem, style)
+        rad = resolve_element_radius(elem, style) * eff_radius_scale
         elem_radii_cache[elem] = rad
+        mat_kwargs = _element_material_kwargs(elem, style)
         mat = make_material(
             f"mat_{elem}",
             resolve_element_color(elem, style),
-            roughness=roughness,
-            specular=specular,
+            **mat_kwargs,
         )
+        elem_materials[elem] = mat
         proto_meshes[elem] = _create_uv_sphere_mesh(
             name=f"proto_{elem}",
             radius=rad,
@@ -624,37 +759,54 @@ def build_scene(
         obj.location = pos
         col.objects.link(obj)
 
-    # Bonds
+    # Bonds (single-color or MolecularNodes-style bicolor split cylinders)
     bond_cfg = dict(style.get("bonds", {}))
-    if bonds_mode_override is not None:
+    if bonds_mode_override is not None and bonds_mode_override != "style":
         bond_cfg["mode"] = bonds_mode_override
         bond_cfg["enabled"] = bonds_mode_override != "none"
     bond_pairs = _find_bonds_spatial(symbols, positions, bond_cfg)
     if bond_pairs:
-        bond_mat = make_material(
-            "mat_bond",
-            str(bond_cfg.get("color", "#9CA3AF")),
-            roughness=float(bond_cfg.get("roughness", 0.45)),
-            specular=float(bond_cfg.get("specular", 0.25)),
+        color_mode = (
+            bond_color_override
+            if bond_color_override and bond_color_override != "style"
+            else str(bond_cfg.get("color_mode", "single"))
         )
         b_rad = float(bond_cfg.get("radius", 0.12))
         b_seg = int(bond_cfg.get("segments", 14))
         b_smooth = bool(bond_cfg.get("smooth", True))
-        for i, j in bond_pairs:
-            _create_cylinder_mesh(
-                positions[i],
-                positions[j],
-                b_rad,
-                bond_mat,
-                f"bond_{i}_{j}",
-                col,
-                segments=b_seg,
-                smooth=b_smooth,
+        if color_mode == "bicolor":
+            for i, j in bond_pairs:
+                pi, pj = positions[i], positions[j]
+                pm = (pi + pj) * 0.5
+                _create_cylinder_mesh(
+                    pi, pm, b_rad, elem_materials[symbols[i]], f"bond_{i}_{j}_a", col, segments=b_seg, smooth=b_smooth
+                )
+                _create_cylinder_mesh(
+                    pm, pj, b_rad, elem_materials[symbols[j]], f"bond_{i}_{j}_b", col, segments=b_seg, smooth=b_smooth
+                )
+        else:
+            bond_mat = make_material(
+                "mat_bond",
+                str(bond_cfg.get("color", "#9CA3AF")),
+                roughness=float(bond_cfg.get("roughness", 0.45)),
+                specular=float(bond_cfg.get("specular", 0.25)),
             )
+            for i, j in bond_pairs:
+                _create_cylinder_mesh(
+                    positions[i],
+                    positions[j],
+                    b_rad,
+                    bond_mat,
+                    f"bond_{i}_{j}",
+                    col,
+                    segments=b_seg,
+                    smooth=b_smooth,
+                )
 
     # Periodic cell wireframe (supports general triclinic vectors)
     cell_cfg = style.get("cell", {})
-    if has_cell and cell_cfg.get("enabled", True):
+    cell_enabled = cell_cfg.get("enabled", True) if show_cell_override is None else bool(show_cell_override)
+    if has_cell and cell_enabled:
         box_mat = make_material(
             "mat_cell",
             str(cell_cfg.get("color", "#111111")),
@@ -692,6 +844,8 @@ def build_scene(
         "target": target,
         "pts_frame": pts_frame,
         "cell_vecs": cell_vecs if has_cell else None,
+        "n_atoms": len(symbols),
+        "n_bonds": len(bond_pairs),
     }
 
     cam_data = bpy.data.cameras.new("OrthoCam")
@@ -741,6 +895,9 @@ def main() -> None:
     parser.add_argument("--resolution", nargs=2, type=int, default=None, metavar=("W", "H"))
     parser.add_argument("--samples", type=int, default=None, help="Override Cycles sample count")
     parser.add_argument("--bonds", choices=["table", "auto", "none"], default=None)
+    parser.add_argument("--bond-color", choices=["style", "single", "bicolor"], default=None)
+    parser.add_argument("--radius-scale", type=float, default=1.0, help="Scale factor for atom sphere radii")
+    parser.add_argument("--no-cell", action="store_true", help="Hide periodic cell wireframe")
     parser.add_argument("--fit-view", action="store_true", help="Re-fit view.json orientation to structure")
     args = parser.parse_args(args_list)
 
@@ -767,6 +924,9 @@ def main() -> None:
         bonds_mode_override=args.bonds,
         reset_factory=True,
         fit_override=args.fit_view,
+        radius_scale=float(args.radius_scale),
+        bond_color_override=args.bond_color,
+        show_cell_override=False if args.no_cell else None,
     )
 
     if args.save_blend is not None:

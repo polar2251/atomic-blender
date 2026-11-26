@@ -1,0 +1,138 @@
+{
+  "name": "studio",
+  "description": "MolecularNodes-inspired studio shader: AO contact shadows, subtle SSS on non-metals, metallic slabs, 3-point rim lighting, and bicolor bonds.",
+  "elements": {
+    "colors": {
+      "Al": "#A9C8E6",
+      "C": "#3F3F46",
+      "H": "#F5F5F5",
+      "O": "#D7382E",
+      "Cr": "#6E7FA8",
+      "Mn": "#9B5FB5",
+      "Fe": "#D9A441",
+      "Co": "#3C8DBC",
+      "Ni": "#4DAF7C"
+    },
+    "color_fallback": "jmol",
+    "radii": {
+      "H": 0.30,
+      "C": 0.55,
+      "O": 0.55,
+      "Al": 1.10,
+      "Cr": 1.05,
+      "Mn": 1.05,
+      "Fe": 1.05,
+      "Co": 1.05,
+      "Ni": 1.05
+    },
+    "radius_scale": 1.0,
+    "radius_fallback": {
+      "transition_metal": 1.05,
+      "covalent_scale": 0.75,
+      "default": 0.80
+    }
+  },
+  "material": {
+    "roughness": 0.28,
+    "specular": 0.5,
+    "ao_factor": 0.35,
+    "ao_distance": 2.5,
+    "nonmetal": {
+      "metallic": 0.0,
+      "roughness": 0.28,
+      "specular": 0.5,
+      "subsurface_weight": 0.15,
+      "subsurface_scale": 0.15,
+      "coat_weight": 0.15,
+      "coat_roughness": 0.12
+    },
+    "metal": {
+      "metallic": 0.35,
+      "roughness": 0.25,
+      "specular": 0.55,
+      "subsurface_weight": 0.0,
+      "coat_weight": 0.10,
+      "coat_roughness": 0.15
+    }
+  },
+  "atom_mesh": {
+    "segments": 32,
+    "ring_count": 16,
+    "smooth": true
+  },
+  "bonds": {
+    "enabled": true,
+    "mode": "table",
+    "color_mode": "bicolor",
+    "color": "#9CA3AF",
+    "radius": 0.14,
+    "roughness": 0.32,
+    "specular": 0.4,
+    "segments": 16,
+    "smooth": true,
+    "skip_pbc": true,
+    "covalent_tolerance": 1.2,
+    "cutoffs": {
+      "C-H": 1.25,
+      "O-H": 1.20,
+      "C-C": 1.75,
+      "C-O": 1.50,
+      "N-H": 1.20,
+      "C-N": 1.60
+    }
+  },
+  "cell": {
+    "enabled": true,
+    "color": "#1A1A1A",
+    "radius": 0.055,
+    "roughness": 0.45,
+    "specular": 0.15,
+    "segments": 14,
+    "smooth": true
+  },
+  "camera": {
+    "type": "ORTHO",
+    "distance": 200.0,
+    "clip_start": 1.0,
+    "clip_end": 1000.0,
+    "margin": 1.08,
+    "default_preset": "iso",
+    "default_resolution": [1400, 1400]
+  },
+  "lighting": {
+    "sun": {
+      "energy": 2.8,
+      "rotation_deg": [35.0, -20.0, 30.0]
+    },
+    "fill": {
+      "type": "AREA",
+      "energy": 3800.0,
+      "size": 42.0,
+      "azimuth_deg": -45.0,
+      "elevation_deg": 25.0,
+      "distance": 45.0
+    },
+    "rim": {
+      "type": "AREA",
+      "energy": 2600.0,
+      "size": 30.0,
+      "azimuth_deg": 150.0,
+      "elevation_deg": 35.0,
+      "distance": 42.0
+    }
+  },
+  "world": {
+    "color": [0.88, 0.89, 0.91, 1.0],
+    "strength": 0.65
+  },
+  "render": {
+    "engine": "CYCLES",
+    "device_priority": ["OPTIX", "CUDA", "CPU"],
+    "samples": 64,
+    "use_denoising": true,
+    "film_transparent": true,
+    "file_format": "PNG",
+    "color_mode": "RGBA",
+    "color_depth": "8"
+  }
+}
