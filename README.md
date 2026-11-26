@@ -63,6 +63,24 @@ atomic-blender install-addon --zip atomic_blender_studio.zip
 
 ---
 
+## Desktop GUI Client (`atomic-blender gui`)
+
+Launch the standalone desktop window (built on Python's standard `tkinter`, with no extra GUI packages required):
+
+```bash
+atomic-blender gui
+# or directly:
+atomic-blender-gui [optional_structure_file]
+```
+
+Inside the desktop client you can:
+- Browse and load any ASE-supported structure (`POSCAR`, `.cif`, `.xyz`, `.data`, `.json`) and optionally supply a LAMMPS `--type-map`.
+- Choose a style (`default` or a custom `.json`), switch between view presets (`iso`, `side-oblique`, `a`, `b`, `c`) or a saved `view.json` (`--fit-view`), and configure supercell replication, `wrap`, `--crop-z`, bond mode, resolution, and Cycles samples.
+- Click **Render & Preview** to run Cycles asynchronously with live log streaming and inspect the rendered RGBA PNG directly on a transparent checkerboard canvas.
+- Click **Open in Blender** to generate a `.blend` scene with the active settings and launch the Blender GUI so you can orbit interactively and save `view.json` via the **Atomic Studio** sidebar.
+
+---
+
 ## Headless CLI Usage
 
 ### Render a structure

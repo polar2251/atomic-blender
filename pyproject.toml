@@ -16,6 +16,7 @@ dependencies = [
 
 [project.scripts]
 atomic-blender = "atomic_blender.cli:main"
+atomic-blender-gui = "atomic_blender.gui:main"
 
 [tool.setuptools.packages.find]
 include = ["atomic_blender*"]
