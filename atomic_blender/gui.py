@@ -57,11 +57,18 @@ from atomic_blender.viewport3d import (
 )
 
 try:
-    from PIL import Image, ImageFilter, ImageTk  # type: ignore
+    from PIL import Image, ImageDraw, ImageFilter, ImageTk  # type: ignore
 
     _HAS_PIL = True
 except Exception:
     _HAS_PIL = False
+
+WELCOME_STYLE_PHASES: tuple[tuple[str, str], ...] = (
+    ("Studio · Ball & Stick", "#2DD4BF"),
+    ("Matte / Chalk · Low Glare", "#38BDF8"),
+    ("Licorice · Bond Network", "#A78BFA"),
+    ("Van der Waals · Space-Filling", "#F59E0B"),
+)
 
 
 @dataclass
@@ -1127,6 +1134,11 @@ class AtomicBlenderApp(tk.Tk):
         self._preview_seq = 0
         self._destroyed = False
         self._poll_after_id: str | None = None
+        self._welcome_pil_frames: list[Any] = []
+        self._welcome_photo_refs: list[Any] = []
+        self._welcome_frame_idx: int = 0
+        self._welcome_after_id: str | None = None
+        self._load_welcome_animation()
         self._preview_worker = BlenderPreviewWorker(
             on_done=lambda seq, p: self._queue.put(("preview_done", (seq, p))),
             on_error=lambda seq, msg: self._queue.put(("preview_err", (seq, msg))),
@@ -1145,6 +1157,8 @@ class AtomicBlenderApp(tk.Tk):
         self._poll_after_id = self.after(100, self._poll_queue)
         if initial_input:
             self._schedule_inspect()
+        else:
+            self.after(30, self._redraw_canvas)
         if self._prompt_missing_blender and not self.var_blender.get().strip():
             self.after(250, self._check_blender_on_startup)
 
@@ -4755,20 +4769,194 @@ class AtomicBlenderApp(tk.Tk):
         ortho = self._vp_scene.ortho_scale if self._vp_scene is not None else 20.0
         return (fw / max(1e-3, ortho)) if res_w >= res_h else (fh / max(1e-3, ortho))
 
+    def _load_welcome_animation(self) -> None:
+        """Load pre-rendered Blender welcome frames (or synthesize lightweight fallback frames)."""
+        if not _HAS_PIL:
+            return
+        frames: list[Any] = []
+        gif_path = package_dir() / "assets" / "welcome_loop.gif"
+        if gif_path.is_file():
+            try:
+                with Image.open(gif_path) as im:
+                    n_frames = max(1, int(getattr(im, "n_frames", 1)))
+                    for i in range(n_frames):
+                        im.seek(i)
+                        frames.append(im.convert("RGBA").copy())
+            except Exception:
+                frames = []
+        if not frames:
+            n_fb = 16
+            for i in range(n_fb):
+                ang = 2.0 * math.pi * (i / n_fb)
+                fr = Image.new("RGBA", (220, 220), (15, 17, 21, 255))
+                dr = ImageDraw.Draw(fr, "RGBA")
+                cx0, cy0 = 110.0, 110.0
+                for k, (col, r_orb, rad) in enumerate((
+                    ("#FB923C", 54.0, 16.0),
+                    ("#38BDF8", 54.0, 16.0),
+                    ("#F1F5F9", 54.0, 16.0),
+                )):
+                    a = ang + k * (2.0 * math.pi / 3.0)
+                    px, py = cx0 + r_orb * math.cos(a), cy0 + r_orb * math.sin(a) * 0.65
+                    dr.line((cx0, cy0, px, py), fill=(148, 163, 184, 220), width=6)
+                    dr.ellipse((px - rad, py - rad, px + rad, py + rad), fill=col)
+                dr.ellipse((cx0 - 20, cy0 - 20, cx0 + 20, cy0 + 20), fill="#14B8A6")
+                frames.append(fr)
+        self._welcome_pil_frames = frames
+        self._welcome_photo_refs = [ImageTk.PhotoImage(f) for f in frames]
+        self._welcome_frame_idx = 0
+
+    def _welcome_style_phase_for_frame(self, idx: int) -> tuple[int, str, str]:
+        total = max(1, len(self._welcome_photo_refs) or len(self._welcome_pil_frames) or 36)
+        seg = max(1, total // len(WELCOME_STYLE_PHASES))
+        phase_idx = min(len(WELCOME_STYLE_PHASES) - 1, (idx % total) // seg)
+        name, color = WELCOME_STYLE_PHASES[phase_idx]
+        return phase_idx, name, color
+
+    def _stop_welcome_animation(self) -> None:
+        if self._welcome_after_id is not None:
+            try:
+                self.after_cancel(self._welcome_after_id)
+            except Exception:
+                pass
+            self._welcome_after_id = None
+
+    def _draw_welcome_screen(self, cw: int, ch: int) -> None:
+        """Render the startup Welcome heading, rotating style-switching atoms, and drag prompt."""
+        self.canvas.delete("welcome")
+        dark_bg = bool(self.var_dark_backdrop.get())
+        cx = cw // 2
+        cy = ch // 2
+
+        if ch >= 460:
+            y_atom = cy + 4
+            y_title = max(42, y_atom - 196)
+            y_sub = y_title + 34
+            y_badge = y_atom + 136
+            y_dots = y_badge + 22
+            y_drag = y_dots + 28
+        else:
+            y_atom = cy
+            y_title = max(24, y_atom - 156)
+            y_sub = y_title + 26
+            y_badge = y_atom + 124
+            y_dots = y_badge + 18
+            y_drag = y_dots + 22
+
+        title_fg = "#F8FAFC" if dark_bg else "#0F172A"
+        sub_fg = "#2DD4BF" if dark_bg else "#0D9488"
+        drag_fg = "#94A3B8" if dark_bg else "#475569"
+        dots_fg = "#64748B" if dark_bg else "#94A3B8"
+
+        self.canvas.create_text(
+            cx,
+            y_title,
+            text="Welcome",
+            font=("Segoe UI", 28, "bold"),
+            fill=title_fg,
+            tags=("welcome", "welcome_title"),
+        )
+        self.canvas.create_text(
+            cx,
+            y_sub,
+            text="Atomic Blender Studio",
+            font=("Segoe UI", 10, "bold"),
+            fill=sub_fg,
+            tags=("welcome", "welcome_subtitle"),
+        )
+
+        if self._welcome_photo_refs:
+            idx = self._welcome_frame_idx % len(self._welcome_photo_refs)
+            self.canvas.create_image(
+                cx,
+                y_atom,
+                image=self._welcome_photo_refs[idx],
+                anchor=tk.CENTER,
+                tags=("welcome", "welcome_atom"),
+            )
+        else:
+            r = 56
+            self.canvas.create_oval(
+                cx - r,
+                y_atom - r,
+                cx + r,
+                y_atom + r,
+                fill="#14B8A6",
+                outline="#2DD4BF",
+                width=2,
+                tags=("welcome", "welcome_atom"),
+            )
+
+        phase_idx, phase_name, phase_col = self._welcome_style_phase_for_frame(self._welcome_frame_idx)
+        dots_text = "  ".join("●" if i == phase_idx else "○" for i in range(len(WELCOME_STYLE_PHASES)))
+        self.canvas.create_text(
+            cx,
+            y_badge,
+            text=f"●  {phase_name}",
+            font=("Segoe UI", 10, "bold"),
+            fill=phase_col,
+            tags=("welcome", "welcome_style"),
+        )
+        self.canvas.create_text(
+            cx,
+            y_dots,
+            text=dots_text,
+            font=("Segoe UI", 9),
+            fill=dots_fg,
+            tags=("welcome", "welcome_dots"),
+        )
+        self.canvas.create_text(
+            cx,
+            y_drag,
+            text="Drag & drop a structure file (or view.json / style.json / recipe.json) anywhere on this window\nor click 'Open' to preview in interactive 3D",
+            justify=tk.CENTER,
+            font=("Segoe UI", 10),
+            fill=drag_fg,
+            tags=("welcome", "welcome_drag"),
+        )
+
+        if len(self._welcome_photo_refs) > 1 and self._welcome_after_id is None and not getattr(self, "_destroyed", False):
+            self._welcome_after_id = self.after(85, self._tick_welcome_animation)
+
+    def _tick_welcome_animation(self) -> None:
+        self._welcome_after_id = None
+        if getattr(self, "_destroyed", False):
+            return
+        in_empty_3d = self.var_canvas_mode.get() == "3d" and self._vp_scene is None
+        in_empty_png = self.var_canvas_mode.get() != "3d" and self._pil_image is None
+        if not (in_empty_3d or in_empty_png):
+            return
+        if not self._welcome_photo_refs:
+            return
+        self._welcome_frame_idx = (self._welcome_frame_idx + 1) % len(self._welcome_photo_refs)
+        phase_idx, phase_name, phase_col = self._welcome_style_phase_for_frame(self._welcome_frame_idx)
+        dots_text = "  ".join("●" if i == phase_idx else "○" for i in range(len(WELCOME_STYLE_PHASES)))
+        try:
+            atom_items = self.canvas.find_withtag("welcome_atom")
+            if atom_items and self.canvas.type(atom_items[0]) == "image":
+                self.canvas.itemconfigure(atom_items[0], image=self._welcome_photo_refs[self._welcome_frame_idx])
+                style_items = self.canvas.find_withtag("welcome_style")
+                if style_items:
+                    self.canvas.itemconfigure(style_items[0], text=f"●  {phase_name}", fill=phase_col)
+                dots_items = self.canvas.find_withtag("welcome_dots")
+                if dots_items:
+                    self.canvas.itemconfigure(dots_items[0], text=dots_text)
+            else:
+                self._draw_welcome_screen(max(1, self.canvas.winfo_width()), max(1, self.canvas.winfo_height()))
+        except Exception:
+            return
+        if len(self._welcome_photo_refs) > 1 and not getattr(self, "_destroyed", False):
+            self._welcome_after_id = self.after(85, self._tick_welcome_animation)
+
     def _draw_3d_viewport(self, interactive: bool | None = None) -> None:
         self.canvas.delete("all")
         cw = max(1, self.canvas.winfo_width())
         ch = max(1, self.canvas.winfo_height())
 
         if self._vp_scene is None:
-            self.canvas.create_text(
-                cw // 2,
-                ch // 2,
-                text="Drag & drop a structure file (or view.json / style.json) anywhere on this window\nor click 'Browse...' to preview in interactive 3D",
-                justify=tk.CENTER,
-                fill="#94A3B8" if self.var_dark_backdrop.get() else "#555555",
-            )
+            self._draw_welcome_screen(cw, ch)
             return
+        self._stop_welcome_animation()
 
         vp = self._vp_scene
         res_w = max(16, int(self.var_res_w.get()))
@@ -4929,14 +5117,9 @@ class AtomicBlenderApp(tk.Tk):
                 self.canvas.create_rectangle(x, y, x + tile, y + tile, fill=color, outline="")
 
         if self._pil_image is None:
-            self.canvas.create_text(
-                cw // 2,
-                ch // 2,
-                text="Drag & drop a structure file (or view.json / style.json) anywhere on this window\nor click 'Browse...' and 'Render High-Res Output'",
-                justify=tk.CENTER,
-                fill="#94A3B8" if dark_bg else "#555555",
-            )
+            self._draw_welcome_screen(cw, ch)
             return
+        self._stop_welcome_animation()
 
         if _HAS_PIL:
             iw, ih = self._pil_image.size
@@ -5011,7 +5194,7 @@ class AtomicBlenderApp(tk.Tk):
 
     def destroy(self) -> None:
         self._destroyed = True
-        for aid_attr in ("_poll_after_id", "_inspect_after_id", "_hq_after_id"):
+        for aid_attr in ("_poll_after_id", "_inspect_after_id", "_hq_after_id", "_welcome_after_id"):
             aid = getattr(self, aid_attr, None)
             if aid is not None:
                 try:
