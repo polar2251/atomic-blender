@@ -110,15 +110,15 @@ def _blend_hex_color(bg_hex: str, fg_hex: str, alpha: float) -> str:
 
 
 def _welcome_header_fade_alpha(step: int) -> float:
-    """One-shot header opacity: starts dim (0.15), brightens to 1.0, fades to 0.32 and holds."""
+    """One-shot header opacity: starts dim (0.08), brightens to 0.76, fades to 0.16 and holds."""
     s = max(0, int(step))
     if s <= 0:
-        return 0.15
+        return 0.08
     if s <= 16:
-        return 0.15 + 0.85 * (0.5 - 0.5 * math.cos(math.pi * s / 16.0))
+        return 0.08 + 0.68 * (0.5 - 0.5 * math.cos(math.pi * s / 16.0))
     if s < 36:
-        return 1.0 - 0.68 * (0.5 - 0.5 * math.cos(math.pi * (s - 16) / 20.0))
-    return 0.32
+        return 0.76 - 0.60 * (0.5 - 0.5 * math.cos(math.pi * (s - 16) / 20.0))
+    return 0.16
 
 
 _welcome_title_fade_alpha = _welcome_header_fade_alpha
@@ -1141,8 +1141,16 @@ class AtomicBlenderApp(tk.Tk):
         _enable_hidpi()
         super().__init__()
         self.title("Atomic Blender Studio — Desktop Client")
-        self.geometry("1340x860")
-        self.minsize(1100, 680)
+        sw = max(800, int(self.winfo_screenwidth()))
+        sh = max(600, int(self.winfo_screenheight()))
+        min_w = min(1360, max(1160, sw - 80))
+        min_h = min(900, max(780, sh - 90))
+        init_w = min(1520, max(min_w, int(sw * 0.84)))
+        init_h = min(980, max(min_h, int(sh * 0.88)))
+        pos_x = max(0, (sw - init_w) // 2)
+        pos_y = max(8, (sh - init_h) // 2 - 12)
+        self.geometry(f"{init_w}x{init_h}+{pos_x}+{pos_y}")
+        self.minsize(min_w, min_h)
         try:
             self.iconbitmap(default=str(ensure_app_icon()))
         except Exception:
@@ -2776,20 +2784,20 @@ class AtomicBlenderApp(tk.Tk):
         ).pack(side=tk.LEFT)
         DarkRadiobutton(
             tb, text="Render", variable=self.var_canvas_mode, value="png", command=self._redraw_canvas
-        ).pack(side=tk.LEFT, padx=(6, 8))
+        ).pack(side=tk.LEFT, padx=(4, 6))
         DarkCheckbutton(
             tb, text="Frame", variable=self.var_show_output_mask, command=self._on_output_mask_toggled
-        ).pack(side=tk.LEFT, padx=(0, 8))
-        ttk.Button(tb, text="Fit", width=5, command=self._on_reset_view).pack(side=tk.LEFT, padx=(0, 4))
-        ttk.Button(tb, text="Save View", command=self._on_save_view_json).pack(side=tk.LEFT, padx=(0, 4))
-        ttk.Button(tb, text="Copy", width=6, command=self._on_copy_image).pack(side=tk.LEFT, padx=(0, 8))
+        ).pack(side=tk.LEFT, padx=(0, 6))
+        ttk.Button(tb, text="Fit", width=4, command=self._on_reset_view).pack(side=tk.LEFT, padx=(0, 3))
+        ttk.Button(tb, text="Save View", command=self._on_save_view_json).pack(side=tk.LEFT, padx=(0, 3))
+        ttk.Button(tb, text="Copy", width=5, command=self._on_copy_image).pack(side=tk.LEFT, padx=(0, 6))
         DarkCheckbutton(
             tb, text="Dark", variable=self.var_dark_backdrop, command=self._on_backdrop_toggled
-        ).pack(side=tk.LEFT)
+        ).pack(side=tk.LEFT, padx=(0, 6))
         self._btn_log_toggle = ttk.Button(tb, text="Log", width=5, command=self._toggle_log_panel)
         self._btn_log_toggle.pack(side=tk.RIGHT)
         self.btn_settings = ttk.Button(tb, text="⚙ Settings", command=self._toggle_settings_panel)
-        self.btn_settings.pack(side=tk.RIGHT, padx=(0, 6))
+        self.btn_settings.pack(side=tk.RIGHT, padx=(0, 4))
 
         self.canvas = tk.Canvas(f_prev, bg="#0F1115", highlightthickness=0)
         self.canvas.pack(fill=tk.BOTH, expand=True)
@@ -4920,8 +4928,9 @@ class AtomicBlenderApp(tk.Tk):
         self.canvas.delete(tmp_title)
         sub_h = (sb[3] - sb[1]) if sb else 22
         title_h = (tb[3] - tb[1]) if tb else 88
+        leading_trim = int(round(title_h * 0.20))
 
-        total_h = sub_h + 2 + title_h + 4 + atom_h + 10 + 20 + 6 + 18
+        total_h = sub_h + max(48, title_h - leading_trim) + atom_h + 28
         y_sub_top = max(14, (eff_ch - total_h) // 2)
 
         self.canvas.create_text(
@@ -4934,7 +4943,7 @@ class AtomicBlenderApp(tk.Tk):
             tags=("welcome", "welcome_subtitle"),
         )
         sub_bbox = self.canvas.bbox("welcome_subtitle")
-        y_title_top = (sub_bbox[3] + 2) if sub_bbox else (y_sub_top + sub_h + 2)
+        y_title_top = ((sub_bbox[3] - leading_trim) if sub_bbox else (y_sub_top + sub_h - leading_trim))
         self.canvas.create_text(
             cx,
             y_title_top,
@@ -4945,7 +4954,7 @@ class AtomicBlenderApp(tk.Tk):
             tags=("welcome", "welcome_title"),
         )
         title_bbox = self.canvas.bbox("welcome_title")
-        y_atom_top = (title_bbox[3] + 4) if title_bbox else (y_title_top + title_h + 4)
+        y_atom_top = ((title_bbox[3] - 12) if title_bbox else (y_title_top + title_h - 12))
 
         if self._welcome_photo_refs:
             idx = self._welcome_frame_idx % len(self._welcome_photo_refs)
