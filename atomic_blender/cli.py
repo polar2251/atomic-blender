@@ -474,7 +474,7 @@ def render_app_logo_with_blender(
 def render_welcome_loop_with_blender(
     gif_out: Path | None = None,
     blender_exe: Path | None = None,
-    n_frames: int = 36,
+    n_frames: int = 48,
 ) -> Path:
     """Pre-render a seamlessly looping 360° style-switching 3D welcome animation via Blender Cycles."""
     import copy
@@ -628,8 +628,10 @@ for s_idx, style in enumerate(styles):
     start_k = s_idx * seg_len
     for k in range(start_k, start_k + seg_len):
         render_angle(scene, cam_obj, k, out_dir / f'main_{k:02d}.png')
-    prev_end_k = (start_k - 1) % n_frames
-    render_angle(scene, cam_obj, prev_end_k, out_dir / f'blend_{prev_end_k:02d}.png')
+    prev_2_k = (start_k - 2) % n_frames
+    prev_1_k = (start_k - 1) % n_frames
+    render_angle(scene, cam_obj, prev_2_k, out_dir / f'blend2_{prev_2_k:02d}.png')
+    render_angle(scene, cam_obj, prev_1_k, out_dir / f'blend1_{prev_1_k:02d}.png')
 """
 
     with tempfile.TemporaryDirectory(prefix="atomic_welcome_") as tmpdir:
@@ -678,10 +680,14 @@ for s_idx, style in enumerate(styles):
         composited: list[Image.Image] = []
         for k in range(n_frames):
             fg = Image.open(frames_dir / f"main_{k:02d}.png").convert("RGBA")
-            blend_p = frames_dir / f"blend_{k:02d}.png"
-            if blend_p.is_file():
-                fg_next = Image.open(blend_p).convert("RGBA")
-                fg = Image.blend(fg, fg_next, 0.5)
+            blend2_p = frames_dir / f"blend2_{k:02d}.png"
+            blend1_p = frames_dir / f"blend1_{k:02d}.png"
+            if blend2_p.is_file():
+                fg_next = Image.open(blend2_p).convert("RGBA")
+                fg = Image.blend(fg, fg_next, 0.33)
+            elif blend1_p.is_file():
+                fg_next = Image.open(blend1_p).convert("RGBA")
+                fg = Image.blend(fg, fg_next, 0.67)
             frame = backdrop.copy()
             frame.alpha_composite(fg)
             composited.append(frame.convert("P", palette=Image.Palette.ADAPTIVE, colors=255))
@@ -691,7 +697,7 @@ for s_idx, style in enumerate(styles):
             gif_target,
             save_all=True,
             append_images=composited[1:],
-            duration=85,
+            duration=150,
             loop=0,
             optimize=True,
         )

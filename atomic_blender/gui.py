@@ -63,12 +63,45 @@ try:
 except Exception:
     _HAS_PIL = False
 
-WELCOME_STYLE_PHASES: tuple[tuple[str, str], ...] = (
-    ("Studio · Ball & Stick", "#2DD4BF"),
-    ("Matte / Chalk · Low Glare", "#38BDF8"),
-    ("Licorice · Bond Network", "#A78BFA"),
-    ("Van der Waals · Space-Filling", "#F59E0B"),
+WELCOME_FRAME_INTERVAL_MS = 150
+
+WELCOME_STYLE_PHASES: tuple[tuple[str, str, str], ...] = (
+    ("Studio  ·  Ball & Stick", "Balanced specular lighting with dual-color covalent bonds", "#2DD4BF"),
+    ("Matte Chalk  ·  Low Glare", "Reflection-free diffuse shading for high-contrast figures", "#38BDF8"),
+    ("Licorice  ·  Bond Network", "Uniform cylinder framework highlighting coordination topology", "#A78BFA"),
+    ("Van der Waals  ·  Space-Filling", "Volumetric atomic radii for packing and surface inspection", "#F59E0B"),
 )
+
+
+def _blend_hex_color(bg_hex: str, fg_hex: str, alpha: float) -> str:
+    """Blend two ``#RRGGBB`` hex colors by ``alpha`` in ``[0, 1]`` for canvas text fades."""
+    a = max(0.0, min(1.0, float(alpha)))
+    b = bg_hex.lstrip("#")
+    f = fg_hex.lstrip("#")
+    if len(b) != 6 or len(f) != 6:
+        return fg_hex
+    r = int(round((1.0 - a) * int(b[0:2], 16) + a * int(f[0:2], 16)))
+    g = int(round((1.0 - a) * int(b[2:4], 16) + a * int(f[2:4], 16)))
+    bl = int(round((1.0 - a) * int(b[4:6], 16) + a * int(f[4:6], 16)))
+    return f"#{r:02X}{g:02X}{bl:02X}"
+
+
+def _welcome_text_fade_alpha(frame_idx: int, total_frames: int, n_phases: int = 4) -> float:
+    """Return text opacity in ``[0.14, 1.0]`` that smoothly fades out and in at style transitions."""
+    total = max(1, int(total_frames))
+    seg = max(1, total // max(1, int(n_phases)))
+    if seg < 4:
+        return 1.0
+    pos = (int(frame_idx) % total) % seg
+    if pos == seg - 2:
+        return 0.48
+    if pos == seg - 1:
+        return 0.14
+    if pos == 0:
+        return 0.35
+    if pos == 1:
+        return 0.72
+    return 1.0
 
 
 @dataclass
@@ -1137,6 +1170,7 @@ class AtomicBlenderApp(tk.Tk):
         self._welcome_pil_frames: list[Any] = []
         self._welcome_photo_refs: list[Any] = []
         self._welcome_frame_idx: int = 0
+        self._welcome_hover_paused: bool = False
         self._welcome_after_id: str | None = None
         self._load_welcome_animation()
         self._preview_worker = BlenderPreviewWorker(
@@ -2775,6 +2809,8 @@ class AtomicBlenderApp(tk.Tk):
         self.canvas.bind("<Button-4>", lambda _e: self._zoom_3d(0.9))
         self.canvas.bind("<Button-5>", lambda _e: self._zoom_3d(1.111))
         self.canvas.bind("<Double-Button-1>", self._on_canvas_double_click)
+        self.canvas.bind("<Motion>", self._on_canvas_hover_motion)
+        self.canvas.bind("<Leave>", self._on_canvas_hover_leave)
 
         self._f_log = ttk.LabelFrame(v_pane, text="LOG", padding=(6, 4))
         self.log_text = scrolledtext.ScrolledText(
@@ -4806,14 +4842,47 @@ class AtomicBlenderApp(tk.Tk):
         self._welcome_photo_refs = [ImageTk.PhotoImage(f) for f in frames]
         self._welcome_frame_idx = 0
 
-    def _welcome_style_phase_for_frame(self, idx: int) -> tuple[int, str, str]:
-        total = max(1, len(self._welcome_photo_refs) or len(self._welcome_pil_frames) or 36)
+    def _welcome_style_phase_for_frame(self, idx: int) -> tuple[int, str, str, str]:
+        total = max(1, len(self._welcome_photo_refs) or len(self._welcome_pil_frames) or 48)
         seg = max(1, total // len(WELCOME_STYLE_PHASES))
         phase_idx = min(len(WELCOME_STYLE_PHASES) - 1, (idx % total) // seg)
-        name, color = WELCOME_STYLE_PHASES[phase_idx]
-        return phase_idx, name, color
+        name, desc, color = WELCOME_STYLE_PHASES[phase_idx]
+        return phase_idx, name, desc, color
+
+    def _is_point_over_welcome_atom(self, x: int, y: int) -> bool:
+        if self._vp_scene is not None or self._pil_image is not None:
+            return False
+        bbox = self.canvas.bbox("welcome_atom")
+        if bbox is None:
+            return False
+        cx = 0.5 * (bbox[0] + bbox[2])
+        cy = 0.5 * (bbox[1] + bbox[3])
+        r = max(84.0, min(116.0, 0.46 * max(bbox[2] - bbox[0], bbox[3] - bbox[1])))
+        return ((x - cx) ** 2 + (y - cy) ** 2) <= (r ** 2)
+
+    def _refresh_welcome_hover_badge(self) -> None:
+        dots_items = self.canvas.find_withtag("welcome_dots")
+        if not dots_items:
+            return
+        phase_idx, _, _, _ = self._welcome_style_phase_for_frame(self._welcome_frame_idx)
+        dots_text = "  ".join("●" if i == phase_idx else "○" for i in range(len(WELCOME_STYLE_PHASES)))
+        if self._welcome_hover_paused:
+            dots_text = f"{dots_text}   ·   Paused"
+        self.canvas.itemconfigure(dots_items[0], text=dots_text)
+
+    def _on_canvas_hover_motion(self, event: tk.Event) -> None:
+        paused = self._is_point_over_welcome_atom(int(event.x), int(event.y))
+        if paused != self._welcome_hover_paused:
+            self._welcome_hover_paused = paused
+            self._refresh_welcome_hover_badge()
+
+    def _on_canvas_hover_leave(self, _event: tk.Event) -> None:
+        if self._welcome_hover_paused:
+            self._welcome_hover_paused = False
+            self._refresh_welcome_hover_badge()
 
     def _stop_welcome_animation(self) -> None:
+        self._welcome_hover_paused = False
         if self._welcome_after_id is not None:
             try:
                 self.after_cancel(self._welcome_after_id)
@@ -4822,45 +4891,54 @@ class AtomicBlenderApp(tk.Tk):
             self._welcome_after_id = None
 
     def _draw_welcome_screen(self, cw: int, ch: int) -> None:
-        """Render the startup Welcome heading, rotating style-switching atoms, and drag prompt."""
+        """Render the startup Welcome heading, hover-pausable rotating atoms, and scannable guide."""
         self.canvas.delete("welcome")
         dark_bg = bool(self.var_dark_backdrop.get())
         cx = cw // 2
         cy = ch // 2
 
-        if ch >= 460:
-            y_atom = cy + 4
-            y_title = max(42, y_atom - 196)
-            y_sub = y_title + 34
-            y_badge = y_atom + 136
-            y_dots = y_badge + 22
-            y_drag = y_dots + 28
+        if ch >= 540:
+            y_atom = cy - 4
+            y_title = max(48, y_atom - 196)
+            y_sub = y_title + 48
+            y_badge = y_atom + 132
+            y_desc = y_badge + 22
+            y_dots = y_desc + 22
+            y_drag = y_dots + 34
+            y_formats = y_drag + 22
+            title_pt = 56
         else:
             y_atom = cy
-            y_title = max(24, y_atom - 156)
-            y_sub = y_title + 26
-            y_badge = y_atom + 124
-            y_dots = y_badge + 18
-            y_drag = y_dots + 22
+            y_title = max(34, y_atom - 166)
+            y_sub = y_title + 38
+            y_badge = y_atom + 122
+            y_desc = y_badge + 20
+            y_dots = y_desc + 18
+            y_drag = y_dots + 26
+            y_formats = y_drag + 18
+            title_pt = 46
 
+        bg_hex = "#0F1115" if dark_bg else "#ECECEC"
         title_fg = "#F8FAFC" if dark_bg else "#0F172A"
         sub_fg = "#2DD4BF" if dark_bg else "#0D9488"
-        drag_fg = "#94A3B8" if dark_bg else "#475569"
+        desc_fg = "#94A3B8" if dark_bg else "#475569"
+        drag_fg = "#E2E8F0" if dark_bg else "#1E293B"
+        formats_fg = "#64748B" if dark_bg else "#64748B"
         dots_fg = "#64748B" if dark_bg else "#94A3B8"
 
         self.canvas.create_text(
             cx,
             y_title,
             text="Welcome",
-            font=("Segoe UI", 28, "bold"),
+            font=("Segoe UI Light", title_pt),
             fill=title_fg,
             tags=("welcome", "welcome_title"),
         )
         self.canvas.create_text(
             cx,
             y_sub,
-            text="Atomic Blender Studio",
-            font=("Segoe UI", 10, "bold"),
+            text="ATOMIC BLENDER STUDIO",
+            font=("Segoe UI Semibold", 9),
             fill=sub_fg,
             tags=("welcome", "welcome_subtitle"),
         )
@@ -4887,15 +4965,28 @@ class AtomicBlenderApp(tk.Tk):
                 tags=("welcome", "welcome_atom"),
             )
 
-        phase_idx, phase_name, phase_col = self._welcome_style_phase_for_frame(self._welcome_frame_idx)
+        total_frames = max(1, len(self._welcome_photo_refs) or len(self._welcome_pil_frames) or 48)
+        phase_idx, phase_name, phase_desc, phase_col = self._welcome_style_phase_for_frame(self._welcome_frame_idx)
+        fade_alpha = _welcome_text_fade_alpha(self._welcome_frame_idx, total_frames, len(WELCOME_STYLE_PHASES))
         dots_text = "  ".join("●" if i == phase_idx else "○" for i in range(len(WELCOME_STYLE_PHASES)))
+        if self._welcome_hover_paused:
+            dots_text = f"{dots_text}   ·   Paused"
+
         self.canvas.create_text(
             cx,
             y_badge,
-            text=f"●  {phase_name}",
-            font=("Segoe UI", 10, "bold"),
-            fill=phase_col,
+            text=phase_name,
+            font=("Segoe UI Semibold", 11),
+            fill=_blend_hex_color(bg_hex, phase_col, fade_alpha),
             tags=("welcome", "welcome_style"),
+        )
+        self.canvas.create_text(
+            cx,
+            y_desc,
+            text=phase_desc,
+            font=("Segoe UI", 9),
+            fill=_blend_hex_color(bg_hex, desc_fg, fade_alpha),
+            tags=("welcome", "welcome_style_desc"),
         )
         self.canvas.create_text(
             cx,
@@ -4908,15 +4999,24 @@ class AtomicBlenderApp(tk.Tk):
         self.canvas.create_text(
             cx,
             y_drag,
-            text="Drag & drop a structure file (or view.json / style.json / recipe.json) anywhere on this window\nor click 'Open' to preview in interactive 3D",
+            text="Drag & drop a structure file anywhere  ·  or click Open",
             justify=tk.CENTER,
-            font=("Segoe UI", 10),
+            font=("Segoe UI Semibold", 11),
             fill=drag_fg,
             tags=("welcome", "welcome_drag"),
         )
+        self.canvas.create_text(
+            cx,
+            y_formats,
+            text="CIF  ·  POSCAR  ·  XYZ  ·  LAMMPS  ·  XSF  ·  view / style / recipe JSON",
+            justify=tk.CENTER,
+            font=("Segoe UI", 9),
+            fill=formats_fg,
+            tags=("welcome", "welcome_formats"),
+        )
 
         if len(self._welcome_photo_refs) > 1 and self._welcome_after_id is None and not getattr(self, "_destroyed", False):
-            self._welcome_after_id = self.after(85, self._tick_welcome_animation)
+            self._welcome_after_id = self.after(WELCOME_FRAME_INTERVAL_MS, self._tick_welcome_animation)
 
     def _tick_welcome_animation(self) -> None:
         self._welcome_after_id = None
@@ -4928,8 +5028,18 @@ class AtomicBlenderApp(tk.Tk):
             return
         if not self._welcome_photo_refs:
             return
-        self._welcome_frame_idx = (self._welcome_frame_idx + 1) % len(self._welcome_photo_refs)
-        phase_idx, phase_name, phase_col = self._welcome_style_phase_for_frame(self._welcome_frame_idx)
+        if self._welcome_hover_paused:
+            self._refresh_welcome_hover_badge()
+            if len(self._welcome_photo_refs) > 1 and not getattr(self, "_destroyed", False):
+                self._welcome_after_id = self.after(WELCOME_FRAME_INTERVAL_MS, self._tick_welcome_animation)
+            return
+        total_frames = len(self._welcome_photo_refs)
+        self._welcome_frame_idx = (self._welcome_frame_idx + 1) % total_frames
+        phase_idx, phase_name, phase_desc, phase_col = self._welcome_style_phase_for_frame(self._welcome_frame_idx)
+        fade_alpha = _welcome_text_fade_alpha(self._welcome_frame_idx, total_frames, len(WELCOME_STYLE_PHASES))
+        dark_bg = bool(self.var_dark_backdrop.get())
+        bg_hex = "#0F1115" if dark_bg else "#ECECEC"
+        desc_fg = "#94A3B8" if dark_bg else "#475569"
         dots_text = "  ".join("●" if i == phase_idx else "○" for i in range(len(WELCOME_STYLE_PHASES)))
         try:
             atom_items = self.canvas.find_withtag("welcome_atom")
@@ -4937,7 +5047,18 @@ class AtomicBlenderApp(tk.Tk):
                 self.canvas.itemconfigure(atom_items[0], image=self._welcome_photo_refs[self._welcome_frame_idx])
                 style_items = self.canvas.find_withtag("welcome_style")
                 if style_items:
-                    self.canvas.itemconfigure(style_items[0], text=f"●  {phase_name}", fill=phase_col)
+                    self.canvas.itemconfigure(
+                        style_items[0],
+                        text=phase_name,
+                        fill=_blend_hex_color(bg_hex, phase_col, fade_alpha),
+                    )
+                desc_items = self.canvas.find_withtag("welcome_style_desc")
+                if desc_items:
+                    self.canvas.itemconfigure(
+                        desc_items[0],
+                        text=phase_desc,
+                        fill=_blend_hex_color(bg_hex, desc_fg, fade_alpha),
+                    )
                 dots_items = self.canvas.find_withtag("welcome_dots")
                 if dots_items:
                     self.canvas.itemconfigure(dots_items[0], text=dots_text)
@@ -4946,7 +5067,7 @@ class AtomicBlenderApp(tk.Tk):
         except Exception:
             return
         if len(self._welcome_photo_refs) > 1 and not getattr(self, "_destroyed", False):
-            self._welcome_after_id = self.after(85, self._tick_welcome_animation)
+            self._welcome_after_id = self.after(WELCOME_FRAME_INTERVAL_MS, self._tick_welcome_animation)
 
     def _draw_3d_viewport(self, interactive: bool | None = None) -> None:
         self.canvas.delete("all")

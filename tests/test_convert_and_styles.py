@@ -1394,12 +1394,24 @@ class TestAtomicBlender(unittest.TestCase):
     def test_welcome_screen_layout_and_animation_loop(self) -> None:
         from PIL import Image
         from atomic_blender.cli import package_dir
-        from atomic_blender.gui import AtomicBlenderApp, WELCOME_STYLE_PHASES
+        from atomic_blender.gui import (
+            AtomicBlenderApp,
+            WELCOME_FRAME_INTERVAL_MS,
+            WELCOME_STYLE_PHASES,
+            _blend_hex_color,
+            _welcome_text_fade_alpha,
+        )
+
+        self.assertGreaterEqual(WELCOME_FRAME_INTERVAL_MS, 140)
+        self.assertEqual(_welcome_text_fade_alpha(5, 48), 1.0)
+        self.assertLess(_welcome_text_fade_alpha(11, 48), 0.2)
+        self.assertEqual(_blend_hex_color("#000000", "#FFFFFF", 0.0), "#000000")
+        self.assertEqual(_blend_hex_color("#000000", "#FFFFFF", 1.0), "#FFFFFF")
 
         gif_path = package_dir() / "assets" / "welcome_loop.gif"
         self.assertTrue(gif_path.is_file(), f"Missing pre-rendered welcome GIF: {gif_path}")
         with Image.open(gif_path) as im:
-            self.assertGreaterEqual(getattr(im, "n_frames", 1), 24)
+            self.assertGreaterEqual(getattr(im, "n_frames", 1), 48)
 
         app = AtomicBlenderApp()
         app.withdraw()
@@ -1411,9 +1423,13 @@ class TestAtomicBlender(unittest.TestCase):
             title_ids = app.canvas.find_withtag("welcome_title")
             atom_ids = app.canvas.find_withtag("welcome_atom")
             style_ids = app.canvas.find_withtag("welcome_style")
+            desc_ids = app.canvas.find_withtag("welcome_style_desc")
             drag_ids = app.canvas.find_withtag("welcome_drag")
-            self.assertTrue(title_ids and atom_ids and style_ids and drag_ids)
+            self.assertTrue(title_ids and atom_ids and style_ids and desc_ids and drag_ids)
             self.assertEqual(app.canvas.itemcget(title_ids[0], "text"), "Welcome")
+            title_font = app.canvas.itemcget(title_ids[0], "font")
+            self.assertIn("56", title_font)
+            self.assertIn("Light", title_font)
             self.assertIn("Drag & drop", app.canvas.itemcget(drag_ids[0], "text"))
 
             y_title = app.canvas.coords(title_ids[0])[1]
@@ -1422,14 +1438,29 @@ class TestAtomicBlender(unittest.TestCase):
             self.assertLess(y_title, y_atom)
             self.assertLess(y_atom, y_drag)
 
+            # Hovering over the atom center pauses frame advancement; leaving resumes it
+            x_atom = int(round(app.canvas.coords(atom_ids[0])[0]))
+            y_atom_i = int(round(y_atom))
+            app._on_canvas_hover_motion(type("E", (), {"x": x_atom, "y": y_atom_i})())  # type: ignore[arg-type]
+            self.assertTrue(app._welcome_hover_paused)
+            paused_idx = app._welcome_frame_idx
+            app._tick_welcome_animation()
+            self.assertEqual(app._welcome_frame_idx, paused_idx)
+
+            app._on_canvas_hover_leave(type("E", (), {})())  # type: ignore[arg-type]
+            self.assertFalse(app._welcome_hover_paused)
+
             n_frames = len(app._welcome_photo_refs)
-            self.assertGreaterEqual(n_frames, 24)
+            self.assertGreaterEqual(n_frames, 48)
             seen_styles: set[str] = set()
+            seen_style_colors: set[str] = set()
             for _ in range(n_frames):
                 seen_styles.add(app.canvas.itemcget(style_ids[0], "text"))
+                seen_style_colors.add(app.canvas.itemcget(style_ids[0], "fill"))
                 app._tick_welcome_animation()
             self.assertEqual(app._welcome_frame_idx, 0)
-            for phase_name, _ in WELCOME_STYLE_PHASES:
+            self.assertGreater(len(seen_style_colors), len(WELCOME_STYLE_PHASES))
+            for phase_name, _, _ in WELCOME_STYLE_PHASES:
                 self.assertTrue(any(phase_name in s for s in seen_styles), f"Missing phase {phase_name} in {seen_styles}")
             self.assertIsNotNone(app._welcome_after_id)
         finally:
