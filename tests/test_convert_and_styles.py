@@ -1391,6 +1391,51 @@ class TestAtomicBlender(unittest.TestCase):
         finally:
             app.destroy()
 
+    def test_welcome_screen_layout_and_animation_loop(self) -> None:
+        from PIL import Image
+        from atomic_blender.cli import package_dir
+        from atomic_blender.gui import AtomicBlenderApp, WELCOME_STYLE_PHASES
+
+        gif_path = package_dir() / "assets" / "welcome_loop.gif"
+        self.assertTrue(gif_path.is_file(), f"Missing pre-rendered welcome GIF: {gif_path}")
+        with Image.open(gif_path) as im:
+            self.assertGreaterEqual(getattr(im, "n_frames", 1), 24)
+
+        app = AtomicBlenderApp()
+        app.withdraw()
+        try:
+            app.canvas.configure(width=800, height=620)
+            app.update_idletasks()
+            app._draw_3d_viewport()
+
+            title_ids = app.canvas.find_withtag("welcome_title")
+            atom_ids = app.canvas.find_withtag("welcome_atom")
+            style_ids = app.canvas.find_withtag("welcome_style")
+            drag_ids = app.canvas.find_withtag("welcome_drag")
+            self.assertTrue(title_ids and atom_ids and style_ids and drag_ids)
+            self.assertEqual(app.canvas.itemcget(title_ids[0], "text"), "Welcome")
+            self.assertIn("Drag & drop", app.canvas.itemcget(drag_ids[0], "text"))
+
+            y_title = app.canvas.coords(title_ids[0])[1]
+            y_atom = app.canvas.coords(atom_ids[0])[1]
+            y_drag = app.canvas.coords(drag_ids[0])[1]
+            self.assertLess(y_title, y_atom)
+            self.assertLess(y_atom, y_drag)
+
+            n_frames = len(app._welcome_photo_refs)
+            self.assertGreaterEqual(n_frames, 24)
+            seen_styles: set[str] = set()
+            for _ in range(n_frames):
+                seen_styles.add(app.canvas.itemcget(style_ids[0], "text"))
+                app._tick_welcome_animation()
+            self.assertEqual(app._welcome_frame_idx, 0)
+            for phase_name, _ in WELCOME_STYLE_PHASES:
+                self.assertTrue(any(phase_name in s for s in seen_styles), f"Missing phase {phase_name} in {seen_styles}")
+            self.assertIsNotNone(app._welcome_after_id)
+        finally:
+            app.destroy()
+        self.assertIsNone(app._welcome_after_id)
+
 
 if __name__ == "__main__":
     unittest.main()

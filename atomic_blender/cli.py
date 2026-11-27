@@ -471,6 +471,233 @@ def render_app_logo_with_blender(
     return png_target, ico_target
 
 
+def render_welcome_loop_with_blender(
+    gif_out: Path | None = None,
+    blender_exe: Path | None = None,
+    n_frames: int = 36,
+) -> Path:
+    """Pre-render a seamlessly looping 360° style-switching 3D welcome animation via Blender Cycles."""
+    import copy
+    from PIL import Image
+
+    if n_frames < 8 or n_frames % 4 != 0:
+        raise ValueError("n_frames must be a positive multiple of 4 (at least 8).")
+
+    assets_dir = Path(__file__).resolve().parent / "assets"
+    assets_dir.mkdir(parents=True, exist_ok=True)
+    gif_target = (gif_out or (assets_dir / "welcome_loop.gif")).resolve()
+    blender = find_blender_executable(str(blender_exe) if blender_exe else None)
+    scene_script = Path(__file__).resolve().parent / "scene_builder.py"
+
+    logo_structure = {
+        "schema_version": 1,
+        "source": "welcome_loop",
+        "symbols": ["Si", "O", "C", "N"],
+        "positions": [
+            [0.0, 0.0, 0.0],
+            [-0.59, -0.42, 2.02],
+            [1.35, -1.35, -0.92],
+            [-1.36, 1.75, -1.16],
+        ],
+        "cell": [[10.0, 0.0, 0.0], [0.0, 10.0, 0.0], [0.0, 0.0, 10.0]],
+        "pbc": [False, False, False],
+        "has_cell": False,
+        "origin": [0.0, 0.0, 0.0],
+    }
+
+    base_style: dict[str, Any] = {
+        "elements": {
+            "colors": {"Si": "#14B8A6", "O": "#FB923C", "C": "#38BDF8", "N": "#F1F5F9"},
+            "radii": {"Si": 0.72, "O": 0.58, "C": 0.58, "N": 0.58},
+            "radius_scale": 0.90,
+        },
+        "material": {
+            "roughness": 0.28,
+            "specular": 0.55,
+            "metallic": 0.05,
+            "coat_weight": 0.05,
+            "subsurface_weight": 0.02,
+            "ao_factor": 0.14,
+            "metal": {"roughness": 0.26, "specular": 0.65, "metallic": 0.15, "coat_weight": 0.05},
+            "nonmetal": {"roughness": 0.30, "specular": 0.50, "metallic": 0.0, "coat_weight": 0.05},
+        },
+        "atom_mesh": {"segments": 32, "ring_count": 16, "smooth": True},
+        "bonds": {
+            "enabled": True,
+            "mode": "table",
+            "color_mode": "bicolor",
+            "radius": 0.16,
+            "segments": 20,
+            "smooth": True,
+            "cutoffs": {"Si-O": 2.6, "Si-C": 2.6, "Si-N": 2.6},
+        },
+        "cell": {"enabled": False},
+        "lighting": {
+            "sun": {"energy": 2.4, "rotation_deg": [38.0, -22.0, 32.0]},
+            "fill": {"energy": 160.0, "size": 16.0, "distance": 11.0, "elevation_deg": 24.0, "azimuth_deg": -52.0},
+            "rim": {"energy": 85.0, "size": 12.0, "distance": 12.0, "elevation_deg": -12.0, "azimuth_deg": 195.0},
+            "background_strength": 0.55,
+            "background_color": [0.9, 0.92, 0.95],
+        },
+        "camera": {"margin": 1.06},
+        "render": {"resolution": [240, 240], "samples": 24, "transparent": True},
+    }
+
+    style_studio = copy.deepcopy(base_style)
+    style_studio["name"] = "welcome_studio"
+
+    style_matte = copy.deepcopy(base_style)
+    style_matte["name"] = "welcome_matte"
+    style_matte["material"] = {
+        "roughness": 0.92,
+        "specular": 0.05,
+        "metallic": 0.0,
+        "coat_weight": 0.0,
+        "subsurface_weight": 0.04,
+        "ao_factor": 0.16,
+        "metal": {"roughness": 0.92, "specular": 0.05, "metallic": 0.0, "coat_weight": 0.0},
+        "nonmetal": {"roughness": 0.92, "specular": 0.05, "metallic": 0.0, "coat_weight": 0.0},
+    }
+
+    style_licorice = copy.deepcopy(base_style)
+    style_licorice["name"] = "welcome_licorice"
+    style_licorice["elements"]["radius_scale"] = 0.36
+    style_licorice["bonds"]["radius"] = 0.24
+    style_licorice["material"]["roughness"] = 0.34
+
+    style_vdw = copy.deepcopy(base_style)
+    style_vdw["name"] = "welcome_vdw"
+    style_vdw["elements"]["radius_scale"] = 1.38
+    style_vdw["bonds"]["enabled"] = False
+    style_vdw["bonds"]["mode"] = "none"
+    style_vdw["material"] = {
+        "roughness": 0.24,
+        "specular": 0.72,
+        "metallic": 0.28,
+        "coat_weight": 0.12,
+        "subsurface_weight": 0.0,
+        "ao_factor": 0.16,
+        "metal": {"roughness": 0.22, "specular": 0.75, "metallic": 0.35, "coat_weight": 0.15},
+        "nonmetal": {"roughness": 0.28, "specular": 0.65, "metallic": 0.20, "coat_weight": 0.10},
+    }
+
+    styles_list = [style_studio, style_matte, style_licorice, style_vdw]
+
+    driver_code = """
+import json, math, sys
+from pathlib import Path
+import bpy
+from mathutils import Vector
+
+script_dir = str(Path(sys.argv[sys.argv.index('--') + 1]))
+if script_dir not in sys.path:
+    sys.path.insert(0, script_dir)
+import scene_builder
+
+cfg = json.loads(Path(sys.argv[sys.argv.index('--') + 2]).read_text(encoding='utf-8'))
+structure = cfg['structure']
+styles = cfg['styles']
+out_dir = Path(cfg['out_dir'])
+n_frames = int(cfg['n_frames'])
+seg_len = n_frames // 4
+target = Vector((-0.15, -0.005, -0.015))
+el = math.radians(20.0)
+
+def render_angle(scene, cam_obj, frame_idx, out_path):
+    az = math.radians(35.0 + frame_idx * (360.0 / n_frames))
+    view_dir = Vector((math.cos(el) * math.cos(az), math.cos(el) * math.sin(az), math.sin(el)))
+    rot_quat = (-view_dir).to_track_quat('-Z', 'Y')
+    cam_obj.location = target + view_dir * 200.0
+    cam_obj.rotation_mode = 'QUATERNION'
+    cam_obj.rotation_quaternion = rot_quat
+    cam_obj.data.ortho_scale = 6.6
+    scene.render.filepath = str(out_path.resolve())
+    bpy.ops.render.render(write_still=True)
+
+for s_idx, style in enumerate(styles):
+    scene_builder.build_scene(
+        structure=structure,
+        style=style,
+        view='iso',
+        resolution=(240, 240),
+        reset_factory=True,
+    )
+    scene = bpy.context.scene
+    scene_builder._apply_fast_preview_cycles_settings(scene)
+    cam_obj = scene.camera
+    start_k = s_idx * seg_len
+    for k in range(start_k, start_k + seg_len):
+        render_angle(scene, cam_obj, k, out_dir / f'main_{k:02d}.png')
+    prev_end_k = (start_k - 1) % n_frames
+    render_angle(scene, cam_obj, prev_end_k, out_dir / f'blend_{prev_end_k:02d}.png')
+"""
+
+    with tempfile.TemporaryDirectory(prefix="atomic_welcome_") as tmpdir:
+        tmp_path = Path(tmpdir)
+        frames_dir = tmp_path / "frames"
+        frames_dir.mkdir(parents=True, exist_ok=True)
+        cfg_json = tmp_path / "welcome_cfg.json"
+        driver_py = tmp_path / "render_welcome_driver.py"
+        cfg_json.write_text(
+            json.dumps(
+                {
+                    "structure": logo_structure,
+                    "styles": styles_list,
+                    "out_dir": str(frames_dir),
+                    "n_frames": n_frames,
+                }
+            ),
+            encoding="utf-8",
+        )
+        driver_py.write_text(driver_code, encoding="utf-8")
+
+        env = os.environ.copy()
+        root_str = str(Path(__file__).resolve().parent.parent)
+        existing_pp = env.get("PYTHONPATH", "")
+        env["PYTHONPATH"] = f"{root_str}{os.pathsep}{existing_pp}" if existing_pp else root_str
+
+        subprocess.run(
+            [
+                str(blender),
+                "--background",
+                "--factory-startup",
+                "--python",
+                str(driver_py),
+                "--",
+                str(scene_script.parent),
+                str(cfg_json),
+            ],
+            check=True,
+            env=env,
+            **_subprocess_no_window_kwargs(),
+        )
+
+        # Solid backdrop matching the GUI canvas (#0F1115) prevents 8-bit GIF glow banding
+        backdrop = Image.new("RGBA", (240, 240), (15, 17, 21, 255))
+
+        composited: list[Image.Image] = []
+        for k in range(n_frames):
+            fg = Image.open(frames_dir / f"main_{k:02d}.png").convert("RGBA")
+            blend_p = frames_dir / f"blend_{k:02d}.png"
+            if blend_p.is_file():
+                fg_next = Image.open(blend_p).convert("RGBA")
+                fg = Image.blend(fg, fg_next, 0.5)
+            frame = backdrop.copy()
+            frame.alpha_composite(fg)
+            composited.append(frame.convert("P", palette=Image.Palette.ADAPTIVE, colors=255))
+
+        gif_target.parent.mkdir(parents=True, exist_ok=True)
+        composited[0].save(
+            gif_target,
+            save_all=True,
+            append_images=composited[1:],
+            duration=85,
+            loop=0,
+            optimize=True,
+        )
+    return gif_target
+
+
 def ensure_app_icon(target_path: Path | None = None) -> Path:
     """Return the multi-size Windows ``.ico`` studio app icon (using bundled Blender-rendered asset)."""
     bundled_ico = package_dir() / "assets" / "logo.ico"
