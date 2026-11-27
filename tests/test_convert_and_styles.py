@@ -1241,6 +1241,156 @@ class TestAtomicBlender(unittest.TestCase):
                     self.assertTrue(lnk.is_file())
                     self.assertEqual(lnk.name, "Atomic Blender Studio.lnk")
 
+    def test_review_fixes_pbc_polyhedra_scalebar_batch_neb_and_spatial_contacts(self) -> None:
+        import time
+        import numpy as np
+        from PIL import Image
+        from ase import Atoms
+        from atomic_blender.convert import atoms_to_neutral_dict, read_structure
+        from atomic_blender.gui import (
+            AtomicBlenderApp,
+            compute_selection_measurement,
+            resolve_batch_output_paths,
+            select_path_strip_indices,
+        )
+        from atomic_blender.viewport3d import (
+            ViewportScene,
+            find_coordination_polyhedra,
+            find_dashed_contacts,
+            render_scale_bar_overlay,
+        )
+
+        # 1. Perovskite BaTiO3 (examples/04_perovskite_BaTiO3_2x2x2.cif): all 8 TiO6 octahedra recovered via PBC
+        bto_cif = Path(__file__).resolve().parent.parent / "examples" / "04_perovskite_BaTiO3_2x2x2.cif"
+        if bto_cif.is_file():
+            bto_dict = atoms_to_neutral_dict(read_structure(bto_cif))
+            polys_pbc = find_coordination_polyhedra(
+                bto_dict["symbols"],
+                bto_dict["positions"],
+                cell_vecs=bto_dict["cell"],
+                pbc=bto_dict["pbc"],
+            )
+            self.assertEqual(len(polys_pbc), 8)
+            self.assertTrue(all(len(p["vertices"]) == 6 for p in polys_pbc))
+
+        # 2. Non-periodic molecule inside a 10 A box preserves bond distance & selective slab PBC
+        mol = Atoms("HO", positions=[[-0.2, 0.0, 0.0], [0.8, 0.0, 0.0]], cell=[10.0, 10.0, 10.0], pbc=[False, False, False])
+        mol_d = atoms_to_neutral_dict(mol, wrap=True)
+        dist_ho = float(np.linalg.norm(np.array(mol_d["positions"][1]) - np.array(mol_d["positions"][0])))
+        self.assertAlmostEqual(dist_ho, 1.0, places=5)
+        self.assertAlmostEqual(mol_d["positions"][0][0], -0.2, places=5)
+
+        slab = Atoms("CuH", positions=[[10.5, 0.0, -0.5], [0.5, 0.0, 2.0]], cell=[10.0, 10.0, 10.0], pbc=[True, True, False])
+        slab.info["energy"] = -12.345
+        slab_d = atoms_to_neutral_dict(slab, wrap=True)
+        self.assertAlmostEqual(slab_d["positions"][0][0], 0.5, places=5)
+        self.assertAlmostEqual(slab_d["positions"][0][2], -0.5, places=5)
+        self.assertAlmostEqual(slab_d["energy_ev"], -12.345, places=5)
+
+        # 3. Portrait scale bar chooses 1.0 A (= 120 px) instead of clamping 2.0 A to 180 px
+        portrait = Image.new("RGBA", (400, 1200), (21, 23, 28, 255))
+        bar_a = render_scale_bar_overlay(portrait, ortho_scale=10.0, res_w=400, res_h=1200, dark_backdrop=True)
+        self.assertEqual(bar_a, 1.0)
+
+        # 4. Batch output paths resolve stem collisions cleanly
+        with tempfile.TemporaryDirectory() as tmp:
+            out_dir = Path(tmp)
+            out_paths = resolve_batch_output_paths(
+                [Path("sample.cif"), Path("sample.xyz"), Path("other.cif"), Path("other.cif")],
+                out_dir,
+            )
+            names = [p.name for p in out_paths]
+            self.assertEqual(len(set(names)), 4)
+            self.assertEqual(names[:2], ["sample_cif.png", "sample_xyz.png"])
+
+        # 5. Path strip always includes first (0) and final (11) frames in a 12-frame NEB path
+        indices_12 = select_path_strip_indices(12, max_panels=6, pinned_indices={3})
+        self.assertEqual(indices_12[0], 0)
+        self.assertEqual(indices_12[-1], 11)
+        self.assertIn(3, indices_12)
+        self.assertEqual(len(indices_12), 6)
+
+        # 6. Measurement displacement Δr from reference & spatial-grid dashed contacts benchmark
+        m_ref = compute_selection_measurement(["C"], [[1.0, 2.0, 3.0]], [0], reference_positions=[[1.0, 2.0, 2.0]])
+        self.assertIn("Δr 1.000 Å", m_ref)
+
+        # 2000-atom grid contact search finishes quickly
+        pts_big = np.column_stack([
+            np.linspace(0.0, 120.0, 2000),
+            np.zeros(2000),
+            np.zeros(2000),
+        ])
+        syms_big = ["H" if i % 2 == 0 else "O" for i in range(2000)]
+        t0 = time.perf_counter()
+        pairs_big = find_dashed_contacts(syms_big, pts_big, mode="hbond", d_min=1.5, d_max=2.5)
+        self.assertLess(time.perf_counter() - t0, 1.0)
+        self.assertGreater(len(pairs_big), 0)
+
+        # 7. GUI integration: Compare reference persists across trajectory frames, thumbnails keep atoms visible,
+        # Frame mask & Contact cache work cleanly
+        app = AtomicBlenderApp()
+        app.withdraw()
+        try:
+            app.var_blender.set("")
+            app.canvas.configure(width=800, height=500)
+            app.update_idletasks()
+            f0 = {
+                "symbols": ["Cu", "C", "O"],
+                "positions": [[0.0, 0.0, 0.0], [0.0, 0.0, 2.0], [0.0, 0.0, 3.15]],
+                "cell": [[10.0, 0.0, 0.0], [0.0, 10.0, 0.0], [0.0, 0.0, 10.0]],
+                "pbc": [True, True, False],
+                "has_cell": True,
+                "origin": [0.0, 0.0, 0.0],
+                "energy_ev": -10.0,
+            }
+            f1 = {
+                "symbols": ["Cu", "C", "O"],
+                "positions": [[0.0, 0.0, 0.0], [0.5, 0.0, 2.0], [0.5, 0.0, 3.15]],
+                "cell": [[10.0, 0.0, 0.0], [0.0, 10.0, 0.0], [0.0, 0.0, 10.0]],
+                "pbc": [True, True, False],
+                "has_cell": True,
+                "origin": [0.0, 0.0, 0.0],
+                "energy_ev": -9.5,
+            }
+            app._queue.put(("structure_frames", ("2 frames", [f0, f1])))
+            app._poll_queue()
+
+            app._pin_current_as_ghost()
+            self.assertIsNotNone(app._ghost_structure_cache)
+            app._step_trajectory_frame(1)
+            # Pinned reference survives trajectory frame change
+            self.assertIsNotNone(app._ghost_structure_cache)
+            self.assertEqual(app._structure_cache["ghost_start_index"], 3)
+
+            # Clicking active representation thumbnail never hides atoms
+            app._on_display_type_clicked("ball_stick")
+            app._on_display_type_clicked("ball_stick")
+            self.assertTrue(app._show_atoms)
+            self.assertTrue(app.var_show_atoms.get())
+
+            # Toggle output frame mask
+            app.var_show_output_mask.set(True)
+            app._on_output_mask_toggled()
+            self.assertTrue(app._vp_scene.show_output_mask)
+
+            # Side-by-side compare builds synchronized ghost scene
+            app.var_compare_mode.set("side_by_side")
+            app._on_ghost_options_changed(trigger_blender=False)
+            self.assertIsNotNone(app._ghost_vp_scene)
+            app._draw_3d_viewport(interactive=False)
+
+            # Contact cache hit when changing colormap without structure change
+            app.var_show_hbonds.set(True)
+            app.var_hbond_mode.set("range")
+            app._rebuild_viewport(reset_camera=False, trigger_preview=False)
+            key1 = app._contact_cache_key
+            self.assertIsNotNone(key1)
+            app.var_color_map.set("viridis")
+            app._on_colormap_changed()
+            self.assertEqual(app._contact_cache_key, key1)
+        finally:
+            app.destroy()
+
 
 if __name__ == "__main__":
     unittest.main()

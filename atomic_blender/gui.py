@@ -663,12 +663,65 @@ MATERIAL_FINISH_PRESETS: dict[str, dict[str, float]] = {
 }
 
 
+def resolve_batch_output_paths(input_paths: list[Path], out_dir: Path) -> list[Path]:
+    """Generate unique output PNG paths in ``out_dir`` even when inputs share identical stems."""
+    paths = [Path(p) for p in input_paths]
+    stem_counts: dict[str, int] = {}
+    for p in paths:
+        k = p.stem.lower()
+        stem_counts[k] = stem_counts.get(k, 0) + 1
+    used_lower: set[str] = set()
+    resolved: list[Path] = []
+    for p in paths:
+        ext_tag = p.suffix.lstrip(".").lower()
+        base_stem = f"{p.stem}_{ext_tag}" if stem_counts[p.stem.lower()] > 1 and ext_tag else p.stem
+        cand = out_dir / f"{base_stem}.png"
+        idx = 2
+        while cand.name.lower() in used_lower:
+            cand = out_dir / f"{base_stem}_{idx}.png"
+            idx += 1
+        used_lower.add(cand.name.lower())
+        resolved.append(cand)
+    return resolved
+
+
+def select_path_strip_indices(
+    total_frames: int,
+    max_panels: int = 6,
+    pinned_indices: set[int] | None = None,
+) -> list[int]:
+    """Select frame indices for a NEB/trajectory strip, always preserving first and final frames."""
+    n = int(total_frames)
+    limit = max(2, int(max_panels))
+    if n <= 0:
+        return []
+    if n <= limit:
+        return list(range(n))
+    chosen: set[int] = {0, n - 1}
+    if pinned_indices:
+        for idx in sorted(pinned_indices):
+            if 0 < idx < n - 1 and len(chosen) < limit:
+                chosen.add(idx)
+    if len(chosen) < limit:
+        for cand in [int(round(x)) for x in np.linspace(0, n - 1, limit)]:
+            if len(chosen) >= limit:
+                break
+            chosen.add(cand)
+    if len(chosen) < limit:
+        for cand in range(n):
+            if len(chosen) >= limit:
+                break
+            chosen.add(cand)
+    return sorted(chosen)[:limit]
+
+
 def compute_selection_measurement(
     symbols: list[str],
     positions: Any,
     selected_order: list[int],
+    reference_positions: Any = None,
 ) -> str:
-    """Compute live coordinates, bond distance, angle, or dihedral from 1-4 ordered atoms."""
+    """Compute live coordinates, bond distance, angle, dihedral, or Δr from reference."""
     n = min(len(symbols), len(positions))
     order: list[int] = []
     seen: set[int] = set()
@@ -686,7 +739,13 @@ def compute_selection_measurement(
 
     if count == 1:
         x, y, z = pos[order[0]]
-        return f"{labels[0]}: ({x:.3f}, {y:.3f}, {z:.3f}) Å"
+        txt = f"{labels[0]}: ({x:.3f}, {y:.3f}, {z:.3f}) Å"
+        if reference_positions is not None and order[0] < len(reference_positions):
+            ref_p = np.asarray(reference_positions[order[0]], dtype=np.float64)
+            delta = pos[order[0]] - ref_p
+            dr = float(np.linalg.norm(delta))
+            txt += f"  |  Δr {dr:.3f} Å (Δz {delta[2]:+.3f})"
+        return txt
 
     if count == 2:
         delta = pos[order[1]] - pos[order[0]]
@@ -1042,8 +1101,13 @@ class AtomicBlenderApp(tk.Tk):
         self._structure_cache: dict[str, Any] | None = None
         self._base_structure_cache: dict[str, Any] | None = None
         self._ghost_structure_cache: dict[str, Any] | None = None
+        self._ghost_label_name: str = ""
+        self._ghost_vp_scene: ViewportScene | None = None
         self._trajectory_frames: list[dict[str, Any]] = []
         self._trajectory_index: int = 0
+        self._strip_pinned_frames: set[int] = set()
+        self._contact_cache_key: Any = None
+        self._contact_cache_pairs: list[tuple[int, int]] = []
         self._structure_version = 0
         self._written_struct_version = -1
         self._vp_scene: ViewportScene | None = None
@@ -1311,9 +1375,14 @@ class AtomicBlenderApp(tk.Tk):
         self.var_radius_scale = tk.DoubleVar(value=1.0)
         self.var_radius_label = tk.StringVar(value="1.00×")
         self.var_show_cell = tk.BooleanVar(value=True)
+        self.var_show_atoms = tk.BooleanVar(value=True)
+        self.var_show_output_mask = tk.BooleanVar(value=False)
         self.var_disp_ball_stick = tk.BooleanVar(value=True)
         self.var_disp_licorice = tk.BooleanVar(value=False)
         self.var_disp_vdw = tk.BooleanVar(value=False)
+        self.var_ghost_alpha = tk.DoubleVar(value=0.24)
+        self.var_compare_mode = tk.StringVar(value="overlay")
+        self.var_frame_pinned = tk.BooleanVar(value=False)
         self.var_show_labels = tk.BooleanVar(value=False)
         self.var_show_measure_overlay = tk.BooleanVar(value=True)
         self.var_show_axes = tk.BooleanVar(value=True)
@@ -1694,11 +1763,38 @@ class AtomicBlenderApp(tk.Tk):
         f_ghost = ttk.LabelFrame(self.tab_tool, text="COMPARE (GHOST OVERLAY)", padding=(10, 8))
         f_ghost.pack(fill=tk.X, pady=(0, 8))
         f_ghost.columnconfigure(0, weight=1)
-        f_ghost.columnconfigure(1, weight=0)
-        ttk.Button(f_ghost, text="Load Ghost Reference...", command=self._on_load_ghost_structure).grid(
-            row=0, column=0, sticky=tk.EW, padx=(0, 4)
+        row_g0 = ttk.Frame(f_ghost)
+        row_g0.pack(fill=tk.X, pady=(0, 4))
+        ttk.Button(row_g0, text="Load Ref...", command=self._on_load_ghost_structure).pack(
+            side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 4)
         )
-        ttk.Button(f_ghost, text="Clear Ghost", command=self._clear_ghost_structure).grid(row=0, column=1)
+        ttk.Button(row_g0, text="Pin Current", command=self._pin_current_as_ghost).pack(side=tk.LEFT, padx=(0, 4))
+        ttk.Button(row_g0, text="Clear", width=6, command=self._clear_ghost_structure).pack(side=tk.LEFT)
+        row_g1 = ttk.Frame(f_ghost)
+        row_g1.pack(fill=tk.X)
+        DarkRadiobutton(
+            row_g1,
+            text="Overlay",
+            variable=self.var_compare_mode,
+            value="overlay",
+            command=lambda: self._on_ghost_options_changed(trigger_blender=True),
+        ).pack(side=tk.LEFT, padx=(0, 6))
+        DarkRadiobutton(
+            row_g1,
+            text="Side-by-Side",
+            variable=self.var_compare_mode,
+            value="side_by_side",
+            command=lambda: self._on_ghost_options_changed(trigger_blender=True),
+        ).pack(side=tk.LEFT, padx=(0, 8))
+        self.slider_ghost_alpha = DarkSlider(
+            row_g1,
+            from_=0.08,
+            to=0.85,
+            variable=self.var_ghost_alpha,
+            command=lambda _v: self._on_ghost_options_changed(trigger_blender=False),
+            release_command=lambda: self._on_ghost_options_changed(trigger_blender=True),
+        )
+        self.slider_ghost_alpha.pack(side=tk.LEFT, fill=tk.X, expand=True)
 
         f_slice = ttk.LabelFrame(self.tab_tool, text="CROSS-SECTION SLICE", padding=(10, 8))
         f_slice.pack(fill=tk.X, pady=(0, 8))
@@ -1737,13 +1833,16 @@ class AtomicBlenderApp(tk.Tk):
         row_tf = ttk.Frame(f_traj)
         row_tf.pack(fill=tk.X, pady=(0, 4))
         ttk.Button(row_tf, text="◀", width=3, command=lambda: self._step_trajectory_frame(-1)).pack(side=tk.LEFT)
-        ttk.Label(row_tf, textvariable=self.var_frame_label, width=14, anchor=tk.CENTER).pack(
-            side=tk.LEFT, padx=(6, 6)
+        ttk.Label(row_tf, textvariable=self.var_frame_label, width=12, anchor=tk.CENTER).pack(
+            side=tk.LEFT, padx=(4, 4)
         )
         ttk.Button(row_tf, text="▶", width=3, command=lambda: self._step_trajectory_frame(1)).pack(
-            side=tk.LEFT, padx=(0, 8)
+            side=tk.LEFT, padx=(0, 6)
         )
-        ttk.Button(row_tf, text="Render Path Strip", command=self._on_render_path_strip).pack(
+        DarkCheckbutton(
+            row_tf, text="Pin Strip", variable=self.var_frame_pinned, command=self._on_toggle_pin_frame
+        ).pack(side=tk.LEFT, padx=(0, 6))
+        ttk.Button(row_tf, text="Render Strip", command=self._on_render_path_strip).pack(
             side=tk.RIGHT, fill=tk.X, expand=True
         )
         self.slider_frame = DarkSlider(
@@ -1755,6 +1854,12 @@ class AtomicBlenderApp(tk.Tk):
             release_command=self._on_frame_slider_released,
         )
         self.slider_frame.pack(fill=tk.X)
+        self.energy_canvas = tk.Canvas(
+            f_traj, height=56, bg="#111318", highlightthickness=1, highlightbackground="#262B36", cursor="hand2"
+        )
+        self.energy_canvas.pack(fill=tk.X, pady=(5, 0))
+        self.energy_canvas.bind("<Button-1>", self._on_energy_canvas_click)
+        self.energy_canvas.bind("<Configure>", lambda _e: self._draw_energy_profile())
 
         # --- Select Tab (tab_selection) ---
         self._build_selection_tab(self.tab_selection)
@@ -1941,15 +2046,42 @@ class AtomicBlenderApp(tk.Tk):
         self.atom_listbox.bind("<ButtonRelease-1>", self._on_atom_list_click)
 
     def _build_display_types_panel(self, parent: ttk.Frame) -> None:
-        """Build minimal flat Display Types card with uniform hoverable rows and collapsible drawers."""
+        """Build minimal flat Display Types card with style thumbnails, dedicated Atoms toggle, and uniform rows."""
         f_disp = ttk.LabelFrame(parent, text="DISPLAY", padding=(8, 6))
         f_disp.pack(fill=tk.X, pady=(0, 8))
         self.f_rep = f_disp
 
+        row_rep_hdr = ttk.Frame(f_disp)
+        row_rep_hdr.pack(fill=tk.X, pady=(0, 4))
+        ttk.Label(row_rep_hdr, text="Style", style="Muted.TLabel").pack(side=tk.LEFT)
+        ttk.Button(
+            row_rep_hdr, text="•••", style="Dots.TButton", width=3, command=lambda: self._toggle_section(self.f_rep_body)
+        ).pack(side=tk.RIGHT)
+        DarkCheckbutton(
+            row_rep_hdr,
+            text="◎ Show Atoms",
+            variable=self.var_show_atoms,
+            command=self._on_atoms_visibility_toggled,
+        ).pack(side=tk.RIGHT, padx=(0, 6))
+
+        f_thumbs = ttk.Frame(f_disp)
+        f_thumbs.pack(fill=tk.X, pady=(0, 6))
+        self._repr_thumb_cards: dict[str, tuple[tk.Canvas, tk.BooleanVar]] = {}
+        thumb_specs = (
+            ("ball_stick", "Ball & Stick", self.var_disp_ball_stick),
+            ("licorice", "Licorice", self.var_disp_licorice),
+            ("vdw", "VdW", self.var_disp_vdw),
+        )
+        for idx_t, (key, title, var) in enumerate(thumb_specs):
+            f_thumbs.columnconfigure(idx_t, weight=1, uniform="repr_thumb")
+            cv = tk.Canvas(f_thumbs, height=48, bg="#111318", highlightthickness=0, cursor="hand2")
+            cv.grid(row=0, column=idx_t, sticky=tk.EW, padx=(0, 4 if idx_t < 2 else 0))
+            cv.bind("<Button-1>", lambda _e, k=key: self._on_display_type_clicked(k))
+            cv.bind("<Configure>", lambda e, c=cv: self._on_repr_thumb_configure(c, e.width, e.height))
+            self._repr_thumb_cards[key] = (cv, var)
+            self._display_checks[key] = (cv, var)
+
         rows = (
-            ("ball_stick", "Ball and Stick", self.var_disp_ball_stick, lambda: self._toggle_section(self.f_rep_body)),
-            ("licorice", "Licorice", self.var_disp_licorice, lambda: self._toggle_section(self.f_rep_body)),
-            ("vdw", "Van der Waals", self.var_disp_vdw, lambda: self._toggle_section(self.f_rep_body)),
             ("crystal_lattice", "Crystal Lattice", self.var_show_cell, lambda: self._switch_tab("tool")),
             ("cell_vectors", "Lattice Vectors (a, b, c)", self.var_show_cell_vectors, None),
             ("polyhedra", "Coordination Polyhedra", self.var_show_polyhedra, None),
@@ -2192,9 +2324,63 @@ class AtomicBlenderApp(tk.Tk):
                 6, 11, 9.5, 14.5, 15, 7, fill="#FFFFFF", width=2.0, capstyle=tk.ROUND, joinstyle=tk.ROUND
             )
 
+    def _on_repr_thumb_configure(self, cv: tk.Canvas, w: int, h: int) -> None:
+        if getattr(cv, "_last_thumb_size", None) == (w, h):
+            return
+        setattr(cv, "_last_thumb_size", (w, h))
+        self._refresh_repr_thumbnails()
+
+    def _refresh_repr_thumbnails(self) -> None:
+        titles = {"ball_stick": "Ball & Stick", "licorice": "Licorice", "vdw": "Van der Waals"}
+        for key, (cv, var) in getattr(self, "_repr_thumb_cards", {}).items():
+            cv.delete("all")
+            w = max(84, cv.winfo_width())
+            h = max(48, cv.winfo_height())
+            active = bool(var.get())
+            bg = "#162A2C" if active else "#111318"
+            border = "#14B8A6" if active else "#2D3342"
+            cv.create_rectangle(0, 0, w, h, fill=bg, outline="")
+            cv.create_rectangle(1, 1, w - 1, h - 1, outline=border, width=1.6 if active else 1.0)
+            cx0, cy0 = w * 0.34, h * 0.34
+            cx1, cy1 = w * 0.66, h * 0.50
+            if key in ("ball_stick", "licorice"):
+                bw = 6 if key == "ball_stick" else 4
+                r0 = 9 if key == "ball_stick" else 5
+                r1 = 7 if key == "ball_stick" else 5
+                cv.create_line(cx0, cy0, cx1, cy1, fill="#94A3B8", width=bw, capstyle=tk.ROUND)
+                cv.create_oval(cx0 - r0, cy0 - r0, cx0 + r0, cy0 + r0, fill="#14B8A6", outline="#0F172A", width=1)
+                cv.create_oval(cx1 - r1, cy1 - r1, cx1 + r1, cy1 + r1, fill="#F97316", outline="#0F172A", width=1)
+            else:
+                r0, r1 = 15, 13
+                cv.create_oval(cx0 - r0, cy0 - r0, cx0 + r0, cy0 + r0, fill="#14B8A6", outline="#0F172A", width=1)
+                cv.create_oval(cx1 - r1, cy1 - r1, cx1 + r1, cy1 + r1, fill="#F97316", outline="#0F172A", width=1)
+            cv.create_text(w * 0.5, h - 8, text=titles[key], fill="#F8FAFC" if active else "#94A3B8", font=("Segoe UI", 7, "bold"))
+
     def _refresh_display_checks(self) -> None:
-        for canvas, var in self._display_checks.values():
+        thumb_keys = set(getattr(self, "_repr_thumb_cards", {}).keys())
+        for key, (canvas, var) in self._display_checks.items():
+            if key in thumb_keys:
+                continue
             self._draw_rounded_checkbox(canvas, bool(var.get()))
+        self._refresh_repr_thumbnails()
+
+    def _on_atoms_visibility_toggled(self) -> None:
+        show = bool(self.var_show_atoms.get())
+        self._show_atoms = show
+        if self._vp_scene is not None:
+            self._vp_scene.show_atoms = show
+            self.var_canvas_mode.set("3d")
+        if self._ghost_vp_scene is not None:
+            self._ghost_vp_scene.show_atoms = show
+        self._redraw_canvas()
+
+    def _on_output_mask_toggled(self) -> None:
+        if self._vp_scene is not None:
+            self._vp_scene.show_output_mask = bool(self.var_show_output_mask.get())
+            self.var_canvas_mode.set("3d")
+        if self._ghost_vp_scene is not None:
+            self._ghost_vp_scene.show_output_mask = bool(self.var_show_output_mask.get())
+        self._redraw_canvas()
 
     def _on_display_type_clicked(self, key: str) -> None:
         if key in ("ball_stick", "licorice", "vdw"):
@@ -2203,25 +2389,17 @@ class AtomicBlenderApp(tk.Tk):
                 "licorice": self.var_disp_licorice,
                 "vdw": self.var_disp_vdw,
             }
-            new_state = not bool(var_map[key].get())
-            if new_state:
-                for k_item, v_item in var_map.items():
-                    v_item.set(k_item == key)
-                self._show_atoms = True
-                if key == "ball_stick":
-                    self._set_representation(0.78, "auto", "bicolor")
-                elif key == "licorice":
-                    self._set_representation(0.42, "auto", "bicolor")
-                else:
-                    self._set_representation(1.35, "none", "style")
+            for k_item, v_item in var_map.items():
+                v_item.set(k_item == key)
+            self._show_atoms = True
+            if hasattr(self, "var_show_atoms"):
+                self.var_show_atoms.set(True)
+            if key == "ball_stick":
+                self._set_representation(0.78, "auto", "bicolor")
+            elif key == "licorice":
+                self._set_representation(0.42, "auto", "bicolor")
             else:
-                var_map[key].set(False)
-                self._show_atoms = False
-                self._refresh_display_checks()
-                if self._vp_scene is not None:
-                    self._vp_scene.show_atoms = False
-                    self.var_canvas_mode.set("3d")
-                    self._redraw_canvas()
+                self._set_representation(1.35, "none", "style")
             return
 
         if key == "crystal_lattice":
@@ -2554,7 +2732,10 @@ class AtomicBlenderApp(tk.Tk):
         ).pack(side=tk.LEFT)
         DarkRadiobutton(
             tb, text="Render", variable=self.var_canvas_mode, value="png", command=self._redraw_canvas
-        ).pack(side=tk.LEFT, padx=(6, 10))
+        ).pack(side=tk.LEFT, padx=(6, 8))
+        DarkCheckbutton(
+            tb, text="Frame", variable=self.var_show_output_mask, command=self._on_output_mask_toggled
+        ).pack(side=tk.LEFT, padx=(0, 8))
         ttk.Button(tb, text="Fit", width=5, command=self._on_reset_view).pack(side=tk.LEFT, padx=(0, 4))
         ttk.Button(tb, text="Save View", command=self._on_save_view_json).pack(side=tk.LEFT, padx=(0, 4))
         ttk.Button(tb, text="Copy", width=6, command=self._on_copy_image).pack(side=tk.LEFT, padx=(0, 8))
@@ -2647,7 +2828,8 @@ class AtomicBlenderApp(tk.Tk):
                 self._selection_order.append(idx)
         if self._vp_scene is not None:
             self._vp_scene.selection_order = list(self._selection_order)
-        self.var_measurement.set(compute_selection_measurement(syms, pos, self._selection_order))
+        ref_pos = self._ghost_structure_cache.get("positions") if self._ghost_structure_cache is not None else None
+        self.var_measurement.set(compute_selection_measurement(syms, pos, self._selection_order, reference_positions=ref_pos))
 
     def _toggle_atom_selection(self, idx: int) -> None:
         if idx in self._selected_atoms:
@@ -2906,18 +3088,44 @@ class AtomicBlenderApp(tk.Tk):
         else:
             self._refresh_display_checks()
 
+    def _rebuild_compare_state(self, trigger_preview: bool = True) -> None:
+        if self._base_structure_cache is None:
+            return
+        if self._ghost_structure_cache is not None and self.var_compare_mode.get() == "overlay":
+            merged = merge_ghost_structure(
+                self._base_structure_cache,
+                self._ghost_structure_cache,
+                ghost_alpha=float(self.var_ghost_alpha.get()),
+            )
+            self._structure_cache = merged
+        else:
+            self._structure_cache = dict(self._base_structure_cache)
+        self._structure_version += 1
+        self._written_struct_version = -1
+        self._rebuild_viewport(reset_camera=False, trigger_preview=trigger_preview)
+
+    def _on_ghost_options_changed(self, trigger_blender: bool = True) -> None:
+        if self._ghost_structure_cache is None:
+            return
+        self._rebuild_compare_state(trigger_preview=trigger_blender)
+
     def _apply_ghost_structure_dict(self, ghost_neutral: dict[str, Any], label_name: str = "ghost") -> None:
         if self._structure_cache is None:
             return
         if self._base_structure_cache is None:
             self._base_structure_cache = dict(self._structure_cache)
         self._ghost_structure_cache = dict(ghost_neutral)
-        merged = merge_ghost_structure(self._base_structure_cache, self._ghost_structure_cache)
-        self._structure_cache = merged
-        self._structure_version += 1
-        self._written_struct_version = -1
-        self.var_status.set(f"Ghost overlay active: {label_name}")
-        self._rebuild_viewport(reset_camera=False, trigger_preview=True)
+        self._ghost_label_name = label_name
+        self.var_status.set(f"Compare active ({self.var_compare_mode.get()}): {label_name}")
+        self._rebuild_compare_state(trigger_preview=True)
+
+    def _pin_current_as_ghost(self) -> None:
+        if self._structure_cache is None:
+            messagebox.showinfo("Compare Reference", "Load a structure first.")
+            return
+        ref_src = dict(self._base_structure_cache if self._base_structure_cache is not None else self._structure_cache)
+        lbl = f"Frame {self._trajectory_index + 1}" if len(self._trajectory_frames) > 1 else "Pinned Current"
+        self._apply_ghost_structure_dict(ref_src, label_name=lbl)
 
     def _on_load_ghost_structure(self) -> None:
         if self._structure_cache is None:
@@ -2953,6 +3161,8 @@ class AtomicBlenderApp(tk.Tk):
             self.var_status.set("No ghost overlay active")
             return
         self._ghost_structure_cache = None
+        self._ghost_label_name = ""
+        self._ghost_vp_scene = None
         self._structure_cache = dict(self._base_structure_cache)
         self._structure_cache.pop("dashed_bonds", None)
         self._structure_cache.pop("ghost_start_index", None)
@@ -2987,6 +3197,7 @@ class AtomicBlenderApp(tk.Tk):
 
         out_dir = Path(out_dir_str)
         file_list = [Path(p) for p in paths]
+        out_paths = resolve_batch_output_paths(file_list, out_dir)
         self._task_start = time.monotonic()
         self._set_busy(True, f"Batch rendering {len(file_list)} files...")
 
@@ -3001,8 +3212,7 @@ class AtomicBlenderApp(tk.Tk):
 
         def worker() -> None:
             last_png: Path | None = None
-            for idx, src in enumerate(file_list, start=1):
-                out_p = out_dir / f"{src.stem}.png"
+            for idx, (src, out_p) in enumerate(zip(file_list, out_paths), start=1):
                 c = GuiRenderConfig(
                     input_path=str(src),
                     output_path=str(out_p),
@@ -3091,6 +3301,79 @@ class AtomicBlenderApp(tk.Tk):
             self.slider_frame._to = float(max(2, n_frames))
         if hasattr(self, "var_frame_pos"):
             self.var_frame_pos.set(float(cur_1))
+        if hasattr(self, "var_frame_pinned"):
+            is_end = self._trajectory_index in (0, n_frames - 1)
+            self.var_frame_pinned.set(is_end or (self._trajectory_index in self._strip_pinned_frames))
+        self._draw_energy_profile()
+
+    def _on_toggle_pin_frame(self) -> None:
+        if not self._trajectory_frames:
+            return
+        idx = self._trajectory_index
+        if bool(self.var_frame_pinned.get()):
+            self._strip_pinned_frames.add(idx)
+        elif idx not in (0, len(self._trajectory_frames) - 1):
+            self._strip_pinned_frames.discard(idx)
+        else:
+            self.var_frame_pinned.set(True)
+        self._draw_energy_profile()
+
+    def _draw_energy_profile(self) -> None:
+        if not hasattr(self, "energy_canvas") or not self.energy_canvas.winfo_exists():
+            return
+        cv = self.energy_canvas
+        cv.delete("all")
+        w = max(180, cv.winfo_width())
+        h = max(54, cv.winfo_height())
+        frames = self._trajectory_frames
+        n = len(frames)
+        if n < 2:
+            cv.create_text(w * 0.5, h * 0.5, text="Load multi-frame trajectory (.xyz/.extxyz) for NEB curve", fill="#64748B", font=("Segoe UI", 8))
+            return
+
+        energies = [f.get("energy_ev") for f in frames]
+        has_e = all(isinstance(e, (int, float)) for e in energies)
+        if has_e:
+            e0 = float(energies[0])  # type: ignore[arg-type]
+            vals = [float(e) - e0 for e in energies]  # type: ignore[arg-type]
+            tag_lbl = f"ΔE (peak {max(vals):.3f} eV)"
+        else:
+            p0 = np.asarray(frames[0].get("positions", []), dtype=np.float64)
+            vals = []
+            for f in frames:
+                pk = np.asarray(f.get("positions", []), dtype=np.float64)
+                vals.append(float(np.sqrt(np.mean(np.sum((pk - p0) ** 2, axis=1)))) if pk.shape == p0.shape and len(pk) else 0.0)
+            tag_lbl = "Path RMSD (Å)"
+
+        vmin, vmax = min(vals), max(vals)
+        span = max(1e-6, vmax - vmin)
+        pad_x, pad_top, pad_bot = 14.0, 14.0, 12.0
+        pts: list[tuple[float, float]] = []
+        for idx, val in enumerate(vals):
+            x = pad_x + (idx / max(1, n - 1)) * (w - 2.0 * pad_x)
+            y = (h - pad_bot) - ((val - vmin) / span) * (h - pad_top - pad_bot)
+            pts.append((x, y))
+        for k in range(len(pts) - 1):
+            cv.create_line(pts[k][0], pts[k][1], pts[k + 1][0], pts[k + 1][1], fill="#0D9488", width=2)
+        strip_set = set(select_path_strip_indices(n, max_panels=6, pinned_indices=self._strip_pinned_frames))
+        for idx, (x, y) in enumerate(pts):
+            is_cur = idx == self._trajectory_index
+            is_pin = idx in strip_set
+            r = 4.5 if is_cur else (3.3 if is_pin else 2.5)
+            fill = "#F97316" if is_cur else ("#2DD4BF" if is_pin else "#64748B")
+            outline = "#FFFFFF" if is_cur else ""
+            cv.create_oval(x - r, y - r, x + r, y + r, fill=fill, outline=outline, width=1.2)
+        cv.create_text(6, 7, text=tag_lbl, anchor=tk.W, fill="#94A3B8", font=("Segoe UI", 7))
+
+    def _on_energy_canvas_click(self, event: tk.Event) -> None:
+        n = len(self._trajectory_frames)
+        if n < 2:
+            return
+        w = max(180, self.energy_canvas.winfo_width())
+        pad_x = 14.0
+        frac = max(0.0, min(1.0, (float(event.x) - pad_x) / max(1.0, w - 2.0 * pad_x)))
+        idx = int(round(frac * (n - 1)))
+        self._select_trajectory_frame(idx, trigger_preview=True)
 
     def _select_trajectory_frame(self, index: int, trigger_preview: bool = True) -> None:
         if not self._trajectory_frames:
@@ -3099,8 +3382,14 @@ class AtomicBlenderApp(tk.Tk):
         self._trajectory_index = idx
         frame = dict(self._trajectory_frames[idx])
         self._base_structure_cache = dict(frame)
-        self._ghost_structure_cache = None
-        self._structure_cache = frame
+        if self._ghost_structure_cache is not None and self.var_compare_mode.get() == "overlay":
+            self._structure_cache = merge_ghost_structure(
+                self._base_structure_cache,
+                self._ghost_structure_cache,
+                ghost_alpha=float(self.var_ghost_alpha.get()),
+            )
+        else:
+            self._structure_cache = frame
         self._structure_version += 1
         self._written_struct_version = -1
         self._update_frame_controls()
@@ -3145,11 +3434,11 @@ class AtomicBlenderApp(tk.Tk):
             return
 
         total = len(self._trajectory_frames)
-        step = max(1, (total + 5) // 6)
-        indices = list(range(0, total, step))
-        if indices[-1] != total - 1:
-            indices.append(total - 1)
-        indices = indices[:6]
+        indices = select_path_strip_indices(
+            total,
+            max_panels=6,
+            pinned_indices=self._strip_pinned_frames,
+        )
 
         out_base = Path(cfg.output_path).expanduser() if cfg.output_path.strip() else in_path.with_suffix(".png")
         strip_png = out_base.with_name(f"{out_base.stem}_strip.png")
@@ -3174,7 +3463,13 @@ class AtomicBlenderApp(tk.Tk):
             if show_cvec:
                 fdict["show_cell_vectors"] = True
             if show_poly and fdict.get("symbols") and fdict.get("positions"):
-                fdict["polyhedra"] = find_coordination_polyhedra(fdict["symbols"], fdict["positions"], style=style_dict)
+                fdict["polyhedra"] = find_coordination_polyhedra(
+                    fdict["symbols"],
+                    fdict["positions"],
+                    style=style_dict,
+                    cell_vecs=fdict.get("cell") if fdict.get("has_cell") else None,
+                    pbc=fdict.get("pbc"),
+                )
             tmp_sfd, tmp_sname = tempfile.mkstemp(prefix=f"atomic_strip_f{fi}_", suffix=".json")
             os.close(tmp_sfd)
             Path(tmp_sname).write_text(json.dumps(fdict), encoding="utf-8")
@@ -3402,30 +3697,45 @@ class AtomicBlenderApp(tk.Tk):
                     dashed.append([i, gs_int + i])
 
         if hasattr(self, "var_show_hbonds") and self.var_show_hbonds.get() and n > 1 and len(pos) == n:
-            from atomic_blender.viewport3d import _find_bonds
-
-            bond_cfg = dict(style.get("bonds", {}))
-            if self.var_bonds.get() != "style":
-                bond_cfg["mode"] = self.var_bonds.get()
-                bond_cfg["enabled"] = self.var_bonds.get() != "none"
-            pos_arr = np.asarray(pos, dtype=np.float64)
-            bi, bj = _find_bonds(syms, pos_arr, bond_cfg, ghost_start_index=gs_int)
             try:
                 d_lo = float(self.var_hbond_min.get())
                 d_hi = float(self.var_hbond_max.get())
             except Exception:
                 d_lo, d_hi = 1.55, 2.55
-            contacts = find_dashed_contacts(
-                syms,
-                pos_arr,
-                bond_i=bi,
-                bond_j=bj,
-                mode=self.var_hbond_mode.get(),
-                d_min=d_lo,
-                d_max=d_hi,
-                focal_indices=self._selected_atoms or None,
-                ghost_start_index=gs_int,
+            hb_mode = self.var_hbond_mode.get()
+            c_key = (
+                self._structure_version,
+                self.var_bonds.get(),
+                hb_mode,
+                round(d_lo, 4),
+                round(d_hi, 4),
+                frozenset(self._selected_atoms) if hb_mode == "interface" else None,
+                gs_int,
             )
+            if c_key == self._contact_cache_key:
+                contacts = self._contact_cache_pairs
+            else:
+                from atomic_blender.viewport3d import _find_bonds
+
+                bond_cfg = dict(style.get("bonds", {}))
+                if self.var_bonds.get() != "style":
+                    bond_cfg["mode"] = self.var_bonds.get()
+                    bond_cfg["enabled"] = self.var_bonds.get() != "none"
+                pos_arr = np.asarray(pos, dtype=np.float64)
+                bi, bj = _find_bonds(syms, pos_arr, bond_cfg, ghost_start_index=gs_int)
+                contacts = find_dashed_contacts(
+                    syms,
+                    pos_arr,
+                    bond_i=bi,
+                    bond_j=bj,
+                    mode=hb_mode,
+                    d_min=d_lo,
+                    d_max=d_hi,
+                    focal_indices=self._selected_atoms or None,
+                    ghost_start_index=gs_int,
+                )
+                self._contact_cache_key = c_key
+                self._contact_cache_pairs = list(contacts)
             seen_d = {(min(p[0], p[1]), max(p[0], p[1])) for p in dashed}
             for ia, ib in contacts:
                 key = (min(ia, ib), max(ia, ib))
@@ -3445,7 +3755,13 @@ class AtomicBlenderApp(tk.Tk):
             and main_n >= 5
             and len(pos) >= main_n
         ):
-            polys = find_coordination_polyhedra(syms[:main_n], pos[:main_n], style=style)
+            polys = find_coordination_polyhedra(
+                syms[:main_n],
+                pos[:main_n],
+                style=style,
+                cell_vecs=self._structure_cache.get("cell") if self._structure_cache.get("has_cell") else None,
+                pbc=self._structure_cache.get("pbc"),
+            )
             if self._structure_cache.get("polyhedra") != polys:
                 self._structure_cache["polyhedra"] = polys
                 self._written_struct_version = -1
@@ -4125,6 +4441,7 @@ class AtomicBlenderApp(tk.Tk):
             selection_order=list(self._selection_order),
             colormap_info=cmap_info,
             show_cell_vectors=bool(getattr(self, "var_show_cell_vectors", None) and self.var_show_cell_vectors.get()),
+            show_output_mask=bool(getattr(self, "var_show_output_mask", None) and self.var_show_output_mask.get()),
         )
         self._refresh_display_checks()
         self._rebuild_element_chips()
@@ -4141,6 +4458,31 @@ class AtomicBlenderApp(tk.Tk):
         else:
             self._apply_view_to_viewport(vp)
         self._vp_scene = vp
+
+        if self._ghost_structure_cache is not None and self.var_compare_mode.get() == "side_by_side":
+            gvp = ViewportScene.from_neutral_dict(
+                self._ghost_structure_cache,
+                style=style,
+                radius_scale=float(self.var_radius_scale.get()),
+                bonds_mode=self.var_bonds.get(),
+                bond_color=self.var_bond_color.get(),
+                show_cell=bool(self.var_show_cell.get()),
+                show_atoms=bool(self._show_atoms),
+                show_labels=bool(self.var_show_labels.get()),
+                show_axes=bool(self.var_show_axes.get()),
+                axes_labels=bool(self.var_axes_labels.get()),
+                axes_pos=self._axes_pos,
+                dark_backdrop=bool(self.var_dark_backdrop.get()),
+                show_scale_bar=bool(self.var_show_scale_bar.get()),
+                show_cell_vectors=bool(getattr(self, "var_show_cell_vectors", None) and self.var_show_cell_vectors.get()),
+                show_output_mask=bool(getattr(self, "var_show_output_mask", None) and self.var_show_output_mask.get()),
+            )
+            gvp.quat = vp.quat
+            gvp.target = vp.target.copy()
+            gvp.ortho_scale = vp.ortho_scale
+            self._ghost_vp_scene = gvp
+        else:
+            self._ghost_vp_scene = None
         if reset_camera:
             self.var_canvas_mode.set("3d")
         self._redraw_canvas()
@@ -4434,6 +4776,32 @@ class AtomicBlenderApp(tk.Tk):
         is_interactive = self._dragging if interactive is None else interactive
 
         if _HAS_PIL:
+            if (
+                self._ghost_vp_scene is not None
+                and self.var_compare_mode.get() == "side_by_side"
+                and cw >= 64
+            ):
+                half_w = cw // 2
+                self._ghost_vp_scene.quat = vp.quat
+                self._ghost_vp_scene.target = vp.target.copy()
+                self._ghost_vp_scene.ortho_scale = vp.ortho_scale
+                img_l = self._ghost_vp_scene.render_image(half_w, ch, res_w, res_h, interactive=is_interactive)
+                img_r = vp.render_image(cw - half_w, ch, res_w, res_h, interactive=is_interactive)
+                combined = Image.new("RGBA", (cw, ch), (15, 17, 21, 255))
+                combined.paste(img_l, (0, 0))
+                combined.paste(img_r, (half_w, 0))
+                self._vp_photo_ref = ImageTk.PhotoImage(combined)
+                self.canvas.create_image(0, 0, image=self._vp_photo_ref, anchor=tk.NW)
+                self.canvas.create_line(half_w, 0, half_w, ch, fill="#14B8A6", width=2)
+                self.canvas.create_text(
+                    12, 12, text=f"Ref: {self._ghost_label_name or 'Reference'}", anchor=tk.NW,
+                    fill="#38BDF8", font=("Segoe UI", 9, "bold"),
+                )
+                self.canvas.create_text(
+                    half_w + 12, 12, text="Current", anchor=tk.NW,
+                    fill="#2DD4BF", font=("Segoe UI", 9, "bold"),
+                )
+                return
             img = vp.render_image(cw, ch, res_w, res_h, interactive=is_interactive)
             self._vp_photo_ref = ImageTk.PhotoImage(img)
             self.canvas.create_image(0, 0, image=self._vp_photo_ref, anchor=tk.NW)
@@ -4681,11 +5049,15 @@ class AtomicBlenderApp(tk.Tk):
                 self.var_inspector.set(str(summary))
                 self._selected_atoms.clear()
                 self._selection_order.clear()
+                self._strip_pinned_frames.clear()
+                self._contact_cache_key = None
                 self._trajectory_frames = [dict(neutral)]
                 self._trajectory_index = 0
                 self._update_frame_controls()
                 self._base_structure_cache = dict(neutral)
                 self._ghost_structure_cache = None
+                self._ghost_label_name = ""
+                self._ghost_vp_scene = None
                 self._structure_cache = neutral
                 self._structure_version += 1
                 self._use_interactive_cam = False
@@ -4698,12 +5070,16 @@ class AtomicBlenderApp(tk.Tk):
                 self.var_inspector.set(str(summary))
                 self._selected_atoms.clear()
                 self._selection_order.clear()
+                self._strip_pinned_frames.clear()
+                self._contact_cache_key = None
                 self._trajectory_frames = [dict(f) for f in frames] if frames else []
                 self._trajectory_index = 0
                 self._update_frame_controls()
                 first = dict(self._trajectory_frames[0]) if self._trajectory_frames else {}
                 self._base_structure_cache = dict(first) if first else None
                 self._ghost_structure_cache = None
+                self._ghost_label_name = ""
+                self._ghost_vp_scene = None
                 self._structure_cache = first or None
                 self._structure_version += 1
                 self._use_interactive_cam = False

@@ -623,6 +623,7 @@ class ViewportScene:
     colormap_info: tuple[str, float, float] | None = None
     polyhedra: list[dict[str, Any]] = field(default_factory=list)
     show_cell_vectors: bool = False
+    show_output_mask: bool = False
     _sprite_keys: list[str] = field(default_factory=list)
 
     def __post_init__(self) -> None:
@@ -654,6 +655,7 @@ class ViewportScene:
         selection_order: list[int] | None = None,
         colormap_info: tuple[str, float, float] | None = None,
         show_cell_vectors: bool = False,
+        show_output_mask: bool = False,
     ) -> ViewportScene:
         symbols = list(structure["symbols"])
         positions = np.asarray(structure["positions"], dtype=np.float64).reshape(-1, 3)
@@ -815,6 +817,7 @@ class ViewportScene:
             colormap_info=colormap_info,
             polyhedra=list(structure.get("polyhedra", [])),
             show_cell_vectors=show_cell_vectors,
+            show_output_mask=show_output_mask,
             _sprite_keys=sprite_keys,
         )
 
@@ -987,17 +990,17 @@ class ViewportScene:
         frame_bg = (36, 40, 48, 255) if self.dark_backdrop else (250, 251, 252, 255)
         border_col = (71, 85, 105, 255) if self.dark_backdrop else (148, 163, 184, 255)
 
-        img = Image.new("RGBA", (rw, rh), outer_bg)
+        img = Image.new("RGBA", (rw, rh), frame_bg if self.show_output_mask else outer_bg)
         pad = min(14.0 * ss, min(rw, rh) * 0.12)
         scale = max(1e-4, min((rw - pad) / max(1, res_w), (rh - pad) / max(1, res_h)))
         fw = res_w * scale
         fh = res_h * scale
         fw_i = max(4, int(round(fw)))
         fh_i = max(4, int(round(fh)))
-        frame = Image.new("RGBA", (fw_i, fh_i), frame_bg)
+        frame = img if self.show_output_mask else Image.new("RGBA", (fw_i, fh_i), frame_bg)
         draw = ImageDraw.Draw(frame, "RGBA")
-        cx0 = fw_i * 0.5
-        cy0 = fh_i * 0.5
+        cx0 = frame.width * 0.5
+        cy0 = frame.height * 0.5
 
         px_per_a = (fw / max(1e-3, self.ortho_scale)) if res_w >= res_h else (fh / max(1e-3, self.ortho_scale))
         right, up, back = quat_to_axes(self.quat)
@@ -1288,9 +1291,17 @@ class ViewportScene:
                                 stroke_fill=tstroke,
                             )
 
+        # Composite / align camera frame onto canvas and draw crisp border (+ dark margin mask if show_output_mask)
+        fx0 = int(round((rw - fw_i) * 0.5))
+        fy0 = int(round((rh - fh_i) * 0.5))
+        if self.show_output_mask:
+            sub_frame = img.crop((fx0, fy0, fx0 + fw_i, fy0 + fh_i))
+        else:
+            sub_frame = frame
+
         if self.show_measure_overlay and len(self.selection_order) in (2, 3, 4):
             render_measurement_callout_overlay(
-                frame,
+                sub_frame,
                 self,
                 self.selection_order,
                 res_w,
@@ -1300,7 +1311,7 @@ class ViewportScene:
 
         if self.show_scale_bar:
             render_scale_bar_overlay(
-                frame,
+                sub_frame,
                 self.ortho_scale,
                 res_w,
                 res_h,
@@ -1310,7 +1321,7 @@ class ViewportScene:
         if self.colormap_info is not None:
             cmap_name, z_lo, z_hi = self.colormap_info
             render_colorbar_overlay(
-                frame,
+                sub_frame,
                 cmap_name,
                 z_lo,
                 z_hi,
@@ -1319,7 +1330,7 @@ class ViewportScene:
 
         if self.show_axes:
             render_reference_axes_overlay(
-                frame,
+                sub_frame,
                 self.quat,
                 axes_pos=self.axes_pos,
                 show_labels=self.axes_labels,
@@ -1327,16 +1338,34 @@ class ViewportScene:
                 cell_vecs=self.cell_vecs if self.has_cell else None,
             )
 
-        # Composite clipped camera frame onto canvas and draw crisp border
-        fx0 = int(round((rw - fw_i) * 0.5))
-        fy0 = int(round((rh - fh_i) * 0.5))
-        img.paste(frame, (fx0, fy0))
-        outer_draw = ImageDraw.Draw(img, "RGBA")
-        outer_draw.rectangle(
-            (fx0, fy0, fx0 + fw_i - 1, fy0 + fh_i - 1),
-            outline=border_col,
-            width=1,
-        )
+        img.paste(sub_frame, (fx0, fy0))
+        if self.show_output_mask:
+            mask_ov = Image.new("RGBA", (rw, rh), (0, 0, 0, 0))
+            m_draw = ImageDraw.Draw(mask_ov, "RGBA")
+            m_col = (10, 12, 16, 155)
+            fx1, fy1 = fx0 + fw_i, fy0 + fh_i
+            if fy0 > 0:
+                m_draw.rectangle((0, 0, rw, fy0), fill=m_col)
+            if fy1 < rh:
+                m_draw.rectangle((0, fy1, rw, rh), fill=m_col)
+            if fx0 > 0:
+                m_draw.rectangle((0, fy0, fx0, fy1), fill=m_col)
+            if fx1 < rw:
+                m_draw.rectangle((fx1, fy0, rw, fy1), fill=m_col)
+            img.alpha_composite(mask_ov)
+            outer_draw = ImageDraw.Draw(img, "RGBA")
+            outer_draw.rectangle(
+                (fx0, fy0, fx0 + fw_i - 1, fy0 + fh_i - 1),
+                outline=(20, 184, 166, 235),
+                width=2,
+            )
+        else:
+            outer_draw = ImageDraw.Draw(img, "RGBA")
+            outer_draw.rectangle(
+                (fx0, fy0, fx0 + fw_i - 1, fy0 + fh_i - 1),
+                outline=border_col,
+                width=1,
+            )
         return img
 
     def to_view_dict(
@@ -1424,10 +1453,19 @@ def render_atom_labels_and_selection_overlay(
                 )
 
 
-def choose_scale_bar_angstrom(ortho_scale: float, target_fraction: float = 0.20) -> float:
+def choose_scale_bar_angstrom(
+    ortho_scale: float,
+    target_fraction: float = 0.20,
+    max_angstrom: float | None = None,
+) -> float:
     """Choose a clean physical length in Angstroms spanning roughly ``target_fraction`` of frame."""
     candidates = (0.5, 1.0, 2.0, 5.0, 10.0, 20.0, 50.0, 100.0)
+    if max_angstrom is not None:
+        fitting = [c for c in candidates if c <= float(max_angstrom) + 1e-9]
+        candidates = tuple(fitting) if fitting else (candidates[0],)
     desired = max(0.5, float(ortho_scale) * float(target_fraction))
+    if max_angstrom is not None:
+        desired = min(desired, float(max_angstrom))
     return min(candidates, key=lambda c: abs(c - desired))
 
 
@@ -1439,12 +1477,13 @@ def render_scale_bar_overlay(
     dark_backdrop: bool = True,
 ) -> float:
     """Composite an orthographic physical scale bar onto ``target_img`` in-place and return bar length (Å)."""
-    bar_a = choose_scale_bar_angstrom(ortho_scale)
     if not _HAS_PIL or target_img is None:
-        return bar_a
+        return choose_scale_bar_angstrom(ortho_scale)
     fw, fh = target_img.size
     px_per_a = (fw / max(1e-3, ortho_scale)) if res_w >= res_h else (fh / max(1e-3, ortho_scale))
-    bar_px = max(24.0, min(fw * 0.45, bar_a * px_per_a))
+    max_bar_a = (fw * 0.45) / max(1e-6, px_per_a)
+    bar_a = choose_scale_bar_angstrom(ortho_scale, max_angstrom=max_bar_a)
+    bar_px = max(8.0, bar_a * px_per_a)
 
     draw = ImageDraw.Draw(target_img, "RGBA")
     pad_x = max(14, int(round(min(fw, fh) * 0.03)))
@@ -1799,7 +1838,7 @@ def find_dashed_contacts(
     focal_indices: set[int] | None = None,
     ghost_start_index: int | None = None,
 ) -> list[tuple[int, int]]:
-    """Detect H-bonds, interface contacts, or distance-ranged non-covalent pairs."""
+    """Detect H-bonds, interface contacts, or distance-ranged pairs using an O(N) spatial hash grid."""
     pos = np.asarray(positions, dtype=np.float64).reshape(-1, 3)
     n = min(len(symbols), len(pos))
     if n < 2:
@@ -1814,26 +1853,53 @@ def find_dashed_contacts(
 
     acceptors = {"O", "N", "F", "Cl", "S"}
     focal = set(focal_indices or ())
+    if mode == "interface" and not focal:
+        return []
+
+    cell_size = max(hi, 0.5)
+    grid: dict[tuple[int, int, int], list[int]] = defaultdict(list)
+    for idx in range(n):
+        sym = symbols[idx]
+        if mode == "hbond" and sym != "H" and sym not in acceptors:
+            continue
+        px, py, pz = float(pos[idx, 0]), float(pos[idx, 1]), float(pos[idx, 2])
+        key = (
+            math.floor(px / cell_size),
+            math.floor(py / cell_size),
+            math.floor(pz / cell_size),
+        )
+        grid[key].append(idx)
+
     pairs: list[tuple[int, int]] = []
-    for i in range(n):
-        pi = pos[i]
-        si = symbols[i]
-        for j in range(i + 1, n):
-            if (i, j) in cov_set:
-                continue
-            if ghost_start_index is not None and 0 < ghost_start_index < n:
-                if (i < ghost_start_index) != (j < ghost_start_index):
-                    continue
-            if mode == "hbond":
-                sj = symbols[j]
-                if not ((si == "H" and sj in acceptors) or (sj == "H" and si in acceptors)):
-                    continue
-            elif mode == "interface":
-                if not focal or ((i in focal) == (j in focal)):
-                    continue
-            dist = float(np.linalg.norm(pos[j] - pi))
-            if lo - 1e-6 <= dist <= hi + 1e-6:
-                pairs.append((i, j))
+    for (gx, gy, gz), bucket in grid.items():
+        for dx in (-1, 0, 1):
+            for dy in (-1, 0, 1):
+                for dz in (-1, 0, 1):
+                    nbr = grid.get((gx + dx, gy + dy, gz + dz))
+                    if not nbr:
+                        continue
+                    for i in bucket:
+                        pi = pos[i]
+                        si = symbols[i]
+                        for j in nbr:
+                            if j <= i:
+                                continue
+                            if (i, j) in cov_set:
+                                continue
+                            if ghost_start_index is not None and 0 < ghost_start_index < n:
+                                if (i < ghost_start_index) != (j < ghost_start_index):
+                                    continue
+                            if mode == "hbond":
+                                sj = symbols[j]
+                                if not ((si == "H" and sj in acceptors) or (sj == "H" and si in acceptors)):
+                                    continue
+                            elif mode == "interface":
+                                if (i in focal) == (j in focal):
+                                    continue
+                            dist = float(np.linalg.norm(pos[j] - pi))
+                            if lo - 1e-6 <= dist <= hi + 1e-6:
+                                pairs.append((i, j))
+    pairs.sort()
     return pairs
 
 
@@ -1934,8 +2000,10 @@ def find_coordination_polyhedra(
     style: dict[str, Any] | None = None,
     cutoff_a: float = 2.55,
     alpha: float = 0.36,
+    cell_vecs: Any = None,
+    pbc: Any = None,
 ) -> list[dict[str, Any]]:
-    """Build translucent coordination polyhedra for cation centers coordinated by 4-12 ligands."""
+    """Build translucent coordination polyhedra for cation centers (with periodic-image ligands when cell is periodic)."""
     pos = np.asarray(positions, dtype=np.float64).reshape(-1, 3)
     n = min(len(symbols), len(pos))
     if n < 5:
@@ -1946,18 +2014,42 @@ def find_coordination_polyhedra(
     if len(lig_idx) < 4:
         return []
 
+    shifts = [np.zeros(3, dtype=np.float64)]
+    if cell_vecs is not None:
+        cv = np.asarray(cell_vecs, dtype=np.float64).reshape(3, 3)
+        if abs(float(np.linalg.det(cv))) > 1e-6:
+            pbc_flags = [True, True, True] if pbc is None else [bool(p) for p in pbc]
+            ranges = [(-1, 0, 1) if flag else (0,) for flag in pbc_flags[:3]]
+            shifts = [
+                da * cv[0] + db * cv[1] + dc * cv[2]
+                for da in ranges[0]
+                for db in ranges[1]
+                for dc in ranges[2]
+            ]
+
     lig_pos = pos[lig_idx]
+    all_lig_pts = np.vstack([lig_pos + s for s in shifts])
     style_dict = style or {}
     out: list[dict[str, Any]] = []
     for i in range(n):
         sym = symbols[i]
         if sym not in poly_centers:
             continue
-        dists = np.linalg.norm(lig_pos - pos[i], axis=1)
-        nbrs = [lig_idx[j] for j in range(len(lig_idx)) if 0.4 <= float(dists[j]) <= float(cutoff_a)]
-        if not (4 <= len(nbrs) <= 12):
+        dists = np.linalg.norm(all_lig_pts - pos[i], axis=1)
+        cand_mask = (dists >= 0.4) & (dists <= float(cutoff_a))
+        cand_pts = all_lig_pts[cand_mask]
+        if len(cand_pts) < 4:
             continue
-        v_pts = pos[nbrs]
+        uniq_pts: list[np.ndarray] = []
+        seen_keys: set[tuple[int, int, int]] = set()
+        for pt in cand_pts:
+            k = (int(round(float(pt[0]) * 1000)), int(round(float(pt[1]) * 1000)), int(round(float(pt[2]) * 1000)))
+            if k not in seen_keys:
+                seen_keys.add(k)
+                uniq_pts.append(pt)
+        if not (4 <= len(uniq_pts) <= 12):
+            continue
+        v_pts = np.asarray(uniq_pts, dtype=np.float64)
         faces, edges = _convex_hull_3d_triangles(v_pts)
         if not faces:
             continue

@@ -87,9 +87,14 @@ Inside the desktop client (styled in a modern dark studio UI) you can:
 
 ### Render a structure
 
+If you installed via `pip install git+...` in an empty working directory, generate or download a sample `.cif` first:
+
 ```bash
+# Quick sample CIF in any empty directory (or download from GitHub examples/)
+python -c "from ase.build import bulk; import ase.io; ase.io.write('fcc_cu_bulk.cif', bulk('Cu', 'fcc', a=3.615, cubic=True).repeat((3, 3, 3)))"
+
 # Default isometric view (azimuth 35°, elevation 20°)
-atomic-blender render examples/fcc_cu_bulk.cif --style default --view iso --out cu.png
+atomic-blender render fcc_cu_bulk.cif --style default --view iso --out cu.png
 
 # Slab with large vacuum: side-oblique preset + automatic Z-range cropping
 atomic-blender render examples/co_on_pt111.vasp --style default --view side-oblique --crop-z auto --resolution 1400 1200 --out slab.png
@@ -100,6 +105,12 @@ atomic-blender render examples/water_box.xyz --replicate 2 2 1 --view iso --out 
 # LAMMPS data file with explicit type mapping
 atomic-blender render structure.data --type-map "1:Al,2:C,3:H" --view side-oblique --crop-z auto --out slab.png
 ```
+
+### Before / After Relaxation Comparison (CO on Pt(111))
+
+1. Launch the desktop app: `atomic-blender-gui examples/03_relax_final_CO_Pt111.vasp` (or drag & drop the file).
+2. Open the **Scene** tab → **COMPARE (GHOST OVERLAY)** and click **Load Reference...** to select `examples/03_relax_initial_CO_Pt111.vasp` (or **Pin Current** before switching trajectory frames).
+3. Switch between **Overlay** (translucent ghost reference + dashed displacement vectors) and **Side-by-Side** (synchronized dual camera), double-click an adsorbate atom (`C` or `O`) to read its displacement magnitude `Δr`, and click **Render High-Res PNG**.
 
 ### View presets
 
