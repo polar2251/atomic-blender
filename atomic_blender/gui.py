@@ -109,12 +109,26 @@ def _blend_hex_color(bg_hex: str, fg_hex: str, alpha: float) -> str:
     return f"#{r:02X}{g:02X}{bl:02X}"
 
 
-def _welcome_title_fade_alpha(frame_idx: int, total_frames: int, n_phases: int = 4) -> float:
-    """Return smooth wave opacity in ``[0.36, 1.0]`` so the Welcome heading dims/brightens smoothly."""
-    total = max(1, int(total_frames))
-    phase_len = max(1.0, total / max(1, int(n_phases)))
-    theta = 2.0 * math.pi * ((int(frame_idx) % total) % phase_len) / phase_len
-    return 0.68 + 0.32 * math.cos(theta)
+def _welcome_header_fade_alpha(step: int) -> float:
+    """One-shot header opacity: starts dim (0.15), brightens to 1.0, fades to 0.32 and holds."""
+    s = max(0, int(step))
+    if s <= 0:
+        return 0.15
+    if s <= 16:
+        return 0.15 + 0.85 * (0.5 - 0.5 * math.cos(math.pi * s / 16.0))
+    if s < 36:
+        return 1.0 - 0.68 * (0.5 - 0.5 * math.cos(math.pi * (s - 16) / 20.0))
+    return 0.32
+
+
+_welcome_title_fade_alpha = _welcome_header_fade_alpha
+
+
+def _welcome_prompt_fade_alpha(step: int, period: int = 64) -> float:
+    """Slow repeating breathing opacity in ``[0.22, 1.0]`` for bottom drag & drop prompts."""
+    p = max(2, int(period))
+    s = max(0, int(step)) % p
+    return 0.61 - 0.39 * math.cos(2.0 * math.pi * s / float(p))
 
 
 @dataclass
@@ -1184,6 +1198,7 @@ class AtomicBlenderApp(tk.Tk):
         self._welcome_pil_frames: list[Any] = []
         self._welcome_photo_refs: list[Any] = []
         self._welcome_frame_idx: int = 0
+        self._welcome_anim_step: int = 0
         self._welcome_hover_paused: bool = False
         self._welcome_after_id: str | None = None
         self._load_welcome_animation()
@@ -1487,17 +1502,12 @@ class AtomicBlenderApp(tk.Tk):
         self.var_input.trace_add("write", lambda *_: self._on_input_var_changed())
 
     def _build_layout(self) -> None:
-        banner = ttk.Frame(self, padding=(10, 4, 10, 2), style="Outer.TFrame")
-        banner.pack(fill=tk.X)
-        self.btn_settings = ttk.Button(banner, text="⚙ Settings", command=self._toggle_settings_panel)
-        self.btn_settings.pack(side=tk.RIGHT)
-
-        self.f_settings = ttk.Frame(self, padding=(10, 2, 10, 6), style="Outer.TFrame")
+        self.f_settings = ttk.Frame(self, padding=(10, 4, 10, 6), style="Outer.TFrame")
         self._settings_visible = False
         self._build_settings_drawer(self.f_settings)
 
         paned = ttk.PanedWindow(self, orient=tk.HORIZONTAL)
-        paned.pack(fill=tk.BOTH, expand=True, padx=8, pady=(2, 4))
+        paned.pack(fill=tk.BOTH, expand=True, padx=8, pady=(6, 4))
         self._paned = paned
 
         left_host = ttk.Frame(paned, padding=0, style="Outer.TFrame")
@@ -2778,6 +2788,8 @@ class AtomicBlenderApp(tk.Tk):
         ).pack(side=tk.LEFT)
         self._btn_log_toggle = ttk.Button(tb, text="Log", width=5, command=self._toggle_log_panel)
         self._btn_log_toggle.pack(side=tk.RIGHT)
+        self.btn_settings = ttk.Button(tb, text="⚙ Settings", command=self._toggle_settings_panel)
+        self.btn_settings.pack(side=tk.RIGHT, padx=(0, 6))
 
         self.canvas = tk.Canvas(f_prev, bg="#0F1115", highlightthickness=0)
         self.canvas.pack(fill=tk.BOTH, expand=True)
@@ -4827,9 +4839,10 @@ class AtomicBlenderApp(tk.Tk):
         self._welcome_pil_frames = frames
         self._welcome_photo_refs = [ImageTk.PhotoImage(f) for f in frames]
         self._welcome_frame_idx = 0
+        self._welcome_anim_step = 0
 
     def _welcome_style_phase_for_frame(self, idx: int) -> tuple[int, str, str, str]:
-        total = max(1, len(self._welcome_photo_refs) or len(self._welcome_pil_frames) or 48)
+        total = max(1, len(self._welcome_photo_refs) or len(self._welcome_pil_frames) or 72)
         seg = max(1, total // len(WELCOME_STYLE_PHASES))
         phase_idx = min(len(WELCOME_STYLE_PHASES) - 1, (idx % total) // seg)
         name, desc, color = WELCOME_STYLE_PHASES[phase_idx]
@@ -4843,7 +4856,7 @@ class AtomicBlenderApp(tk.Tk):
             return False
         cx = 0.5 * (bbox[0] + bbox[2])
         cy = 0.5 * (bbox[1] + bbox[3])
-        r = max(84.0, min(116.0, 0.46 * max(bbox[2] - bbox[0], bbox[3] - bbox[1])))
+        r = max(110.0, min(168.0, 0.44 * max(bbox[2] - bbox[0], bbox[3] - bbox[1])))
         return ((x - cx) ** 2 + (y - cy) ** 2) <= (r ** 2)
 
     def _refresh_welcome_hover_badge(self) -> None:
@@ -4870,80 +4883,116 @@ class AtomicBlenderApp(tk.Tk):
             self._welcome_after_id = None
 
     def _draw_welcome_screen(self, cw: int, ch: int) -> None:
-        """Render the minimal Welcome screen: fading Welcome title, rotating atoms, and drop prompt."""
+        """Render the unified Welcome screen with 1.5x molecule, white header, and repeating prompt."""
         self.canvas.delete("welcome")
         dark_bg = bool(self.var_dark_backdrop.get())
-        cx = cw // 2
-        cy = ch // 2
-
-        if ch >= 540:
-            y_atom = cy + 12
-            y_title = max(56, y_atom - 232)
-            y_sub = y_title + 72
-            y_drag = y_atom + 148
-            title_pt = 72
-        else:
-            y_atom = cy + 6
-            y_title = max(44, y_atom - 190)
-            y_sub = y_title + 58
-            y_drag = y_atom + 132
-            title_pt = 58
+        cx = max(cw, 200) // 2
+        eff_ch = ch if ch >= 400 else max(ch, int(self.canvas.cget("height") or 680))
 
         bg_hex = "#0F1115" if dark_bg else "#ECECEC"
         title_fg = "#F8FAFC" if dark_bg else "#0F172A"
-        sub_fg = "#2DD4BF" if dark_bg else "#0D9488"
-        drag_fg = "#94A3B8" if dark_bg else "#475569"
+        drag_fg = "#CBD5E1" if dark_bg else "#334155"
+        formats_fg = "#64748B" if dark_bg else "#64748B"
 
-        total_frames = max(1, len(self._welcome_photo_refs) or len(self._welcome_pil_frames) or 72)
-        title_alpha = _welcome_title_fade_alpha(self._welcome_frame_idx, total_frames, len(WELCOME_STYLE_PHASES))
+        hdr_alpha = _welcome_header_fade_alpha(self._welcome_anim_step)
+        hdr_fill = _blend_hex_color(bg_hex, title_fg, hdr_alpha)
+        prompt_alpha = _welcome_prompt_fade_alpha(self._welcome_anim_step)
+        drag_fill = _blend_hex_color(bg_hex, drag_fg, prompt_alpha)
+        formats_fill = _blend_hex_color(bg_hex, formats_fg, prompt_alpha)
 
-        self.canvas.create_text(
-            cx,
-            y_title,
-            text="Welcome",
-            font=("Segoe UI Light", title_pt),
-            fill=_blend_hex_color(bg_hex, title_fg, title_alpha),
-            tags=("welcome", "welcome_title"),
+        title_pt = 64 if eff_ch >= 600 else 48
+        atom_h = (
+            self._welcome_pil_frames[0].height
+            if self._welcome_pil_frames
+            else 360
         )
+
+        # Measure header heights first so the whole vertical stack is centered and never overlaps at any DPI
+        tmp_sub = self.canvas.create_text(
+            cx, 0, text="Atomic Blender Studio", anchor=tk.N, font=("Segoe UI Light", 13), fill=hdr_fill
+        )
+        tmp_title = self.canvas.create_text(
+            cx, 0, text="Welcome", anchor=tk.N, font=("Segoe UI Light", title_pt), fill=hdr_fill
+        )
+        sb = self.canvas.bbox(tmp_sub)
+        tb = self.canvas.bbox(tmp_title)
+        self.canvas.delete(tmp_sub)
+        self.canvas.delete(tmp_title)
+        sub_h = (sb[3] - sb[1]) if sb else 22
+        title_h = (tb[3] - tb[1]) if tb else 88
+
+        total_h = sub_h + 2 + title_h + 4 + atom_h + 10 + 20 + 6 + 18
+        y_sub_top = max(14, (eff_ch - total_h) // 2)
+
         self.canvas.create_text(
             cx,
-            y_sub,
-            text="ATOMIC BLENDER STUDIO",
-            font=("Segoe UI", 9),
-            fill=sub_fg,
+            y_sub_top,
+            text="Atomic Blender Studio",
+            anchor=tk.N,
+            font=("Segoe UI Light", 13),
+            fill=hdr_fill,
             tags=("welcome", "welcome_subtitle"),
         )
+        sub_bbox = self.canvas.bbox("welcome_subtitle")
+        y_title_top = (sub_bbox[3] + 2) if sub_bbox else (y_sub_top + sub_h + 2)
+        self.canvas.create_text(
+            cx,
+            y_title_top,
+            text="Welcome",
+            anchor=tk.N,
+            font=("Segoe UI Light", title_pt),
+            fill=hdr_fill,
+            tags=("welcome", "welcome_title"),
+        )
+        title_bbox = self.canvas.bbox("welcome_title")
+        y_atom_top = (title_bbox[3] + 4) if title_bbox else (y_title_top + title_h + 4)
 
         if self._welcome_photo_refs:
             idx = self._welcome_frame_idx % len(self._welcome_photo_refs)
             self.canvas.create_image(
                 cx,
-                y_atom,
+                y_atom_top,
                 image=self._welcome_photo_refs[idx],
-                anchor=tk.CENTER,
+                anchor=tk.N,
                 tags=("welcome", "welcome_atom"),
             )
         else:
-            r = 56
+            r = 84
+            yc = y_atom_top + atom_h // 2
             self.canvas.create_oval(
                 cx - r,
-                y_atom - r,
+                yc - r,
                 cx + r,
-                y_atom + r,
+                yc + r,
                 fill="#14B8A6",
                 outline="#2DD4BF",
                 width=2,
                 tags=("welcome", "welcome_atom"),
             )
 
+        atom_bbox = self.canvas.bbox("welcome_atom")
+        y_drag = (atom_bbox[3] + 10) if atom_bbox else (y_atom_top + atom_h + 10)
         self.canvas.create_text(
             cx,
             y_drag,
             text="Drag & drop a structure file anywhere  ·  or click Open",
+            anchor=tk.N,
             justify=tk.CENTER,
             font=("Segoe UI", 10),
-            fill=drag_fg,
+            fill=drag_fill,
             tags=("welcome", "welcome_drag"),
+        )
+        drag_bbox = self.canvas.bbox("welcome_drag")
+        y_formats = (drag_bbox[3] + 6) if drag_bbox else (y_drag + 22)
+        self.canvas.create_text(
+            cx,
+            y_formats,
+            text="CIF  ·  POSCAR  ·  XYZ  ·  LAMMPS  ·  XSF  ·  view / style / recipe JSON",
+            anchor=tk.N,
+            justify=tk.CENTER,
+            font=("Segoe UI", 9),
+            fill=formats_fill,
+            tags=("welcome", "welcome_formats"),
         )
 
         if len(self._welcome_photo_refs) > 1 and self._welcome_after_id is None and not getattr(self, "_destroyed", False):
@@ -4965,20 +5014,32 @@ class AtomicBlenderApp(tk.Tk):
             return
         total_frames = len(self._welcome_photo_refs)
         self._welcome_frame_idx = (self._welcome_frame_idx + 1) % total_frames
+        self._welcome_anim_step += 1
+
         dark_bg = bool(self.var_dark_backdrop.get())
         bg_hex = "#0F1115" if dark_bg else "#ECECEC"
         title_fg = "#F8FAFC" if dark_bg else "#0F172A"
-        title_alpha = _welcome_title_fade_alpha(self._welcome_frame_idx, total_frames, len(WELCOME_STYLE_PHASES))
+        drag_fg = "#CBD5E1" if dark_bg else "#334155"
+        formats_fg = "#64748B" if dark_bg else "#64748B"
+
+        hdr_fill = _blend_hex_color(bg_hex, title_fg, _welcome_header_fade_alpha(self._welcome_anim_step))
+        prompt_alpha = _welcome_prompt_fade_alpha(self._welcome_anim_step)
+        drag_fill = _blend_hex_color(bg_hex, drag_fg, prompt_alpha)
+        formats_fill = _blend_hex_color(bg_hex, formats_fg, prompt_alpha)
         try:
             atom_items = self.canvas.find_withtag("welcome_atom")
             if atom_items and self.canvas.type(atom_items[0]) == "image":
                 self.canvas.itemconfigure(atom_items[0], image=self._welcome_photo_refs[self._welcome_frame_idx])
-                title_items = self.canvas.find_withtag("welcome_title")
-                if title_items:
-                    self.canvas.itemconfigure(
-                        title_items[0],
-                        fill=_blend_hex_color(bg_hex, title_fg, title_alpha),
-                    )
+                for tag_name in ("welcome_title", "welcome_subtitle"):
+                    items = self.canvas.find_withtag(tag_name)
+                    if items:
+                        self.canvas.itemconfigure(items[0], fill=hdr_fill)
+                drag_items = self.canvas.find_withtag("welcome_drag")
+                if drag_items:
+                    self.canvas.itemconfigure(drag_items[0], fill=drag_fill)
+                fmt_items = self.canvas.find_withtag("welcome_formats")
+                if fmt_items:
+                    self.canvas.itemconfigure(fmt_items[0], fill=formats_fill)
             else:
                 self._draw_welcome_screen(max(1, self.canvas.winfo_width()), max(1, self.canvas.winfo_height()))
         except Exception:
