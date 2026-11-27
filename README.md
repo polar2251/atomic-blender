@@ -1,6 +1,12 @@
-# atomic-blender
+<p align="center">
+  <img src="atomic_blender/assets/logo.png" width="112" alt="Atomic Blender Studio Icon">
+</p>
 
-Reusable publication-quality atomic structure renderer combining **ASE** (universal structure parsing, supercell replication, periodic wrapping) with **Blender Cycles** (consistent materials, orthographic framing, GPU/OptiX acceleration, and an interactive Blender N-panel addon).
+<h1 align="center">Atomic Blender Studio</h1>
+
+<p align="center">
+  Reusable publication-quality atomic structure renderer combining <strong>ASE</strong> (universal structure parsing, supercell replication, periodic wrapping) with <strong>Blender Cycles</strong> (consistent materials, orthographic framing, GPU/OptiX acceleration, a standalone desktop studio GUI, and a Blender N-panel addon).
+</p>
 
 <p align="center">
   <img src="examples/renders/fcc_cu_bulk.png" width="30%" alt="FCC Cu bulk">
@@ -27,14 +33,14 @@ Reusable publication-quality atomic structure renderer combining **ASE** (univer
 Install directly from GitHub (for private access, ensure your Git credentials or SSH key are configured):
 
 ```bash
-pip install git+https://github.com/polar2251/atomic-blender.git
+pip install git+https://github.com/polar2251/atomic-blender-studio.git
 ```
 
 Or clone and install locally (standard or editable mode):
 
 ```bash
-git clone https://github.com/polar2251/atomic-blender.git
-cd atomic-blender
+git clone https://github.com/polar2251/atomic-blender-studio.git
+cd atomic-blender-studio
 pip install .          # standard self-contained install
 # or: pip install -e . # editable development install
 ```
@@ -65,13 +71,17 @@ atomic-blender install-addon --zip atomic_blender_studio.zip
 
 ## Desktop GUI Client (`atomic-blender gui`)
 
-Launch the standalone desktop window (built on Python's standard `tkinter`, with no extra GUI packages required):
+Launch the standalone desktop window (built on Python's standard `tkinter`, or build a self-contained Windows app with `atomic-blender install-desktop --build-exe`):
 
 ```bash
 atomic-blender gui
 # or directly:
 atomic-blender-gui [optional_structure_file]
 ```
+
+<p align="center">
+  <img src="examples/renders/gui_welcome_screen.png" width="92%" alt="Atomic Blender Studio Startup Welcome Screen">
+</p>
 
 Inside the desktop client (styled in a modern dark studio UI) you can:
 - **Avogadro-Style Display Types**: Toggle **Ball and Stick**, **Licorice**, **Van der Waals**, **Crystal Lattice**, **Atom Labels**, and **Reference Axes** (`x, y, z` axis triad with **x, y, z Labels** toggle and **Fix (Default)** reset; click and drag the axes gizmo directly on the viewport to reposition it anywhere).
@@ -207,5 +217,5 @@ python examples/generate_examples.py
 This project is released under the [MIT License](LICENSE).
 
 - **ASE** (used as an external Python dependency at runtime) is licensed under the GNU LGPL-2.1-or-later.
-- **Blender** (`bpy`, invoked as a separate Blender installation or inside Blender as an addon) is licensed under the GNU GPL-3.0-or-later. The MIT license of `atomic-blender` is GPL-compatible; Blender itself is not bundled in this repository and is installed separately by the user.
+- **Blender** (`bpy`, invoked as a separate Blender installation or inside Blender as an addon) is licensed under the GNU GPL-3.0-or-later. The MIT license of Atomic Blender Studio (`atomic-blender`) is GPL-compatible; Blender itself is not bundled in this repository and is installed separately by the user.
 
