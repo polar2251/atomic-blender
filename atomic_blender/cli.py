@@ -474,7 +474,7 @@ def render_app_logo_with_blender(
 def render_welcome_loop_with_blender(
     gif_out: Path | None = None,
     blender_exe: Path | None = None,
-    n_frames: int = 48,
+    n_frames: int = 72,
 ) -> Path:
     """Pre-render a seamlessly looping 360° style-switching 3D welcome animation via Blender Cycles."""
     import copy
@@ -508,8 +508,8 @@ def render_welcome_loop_with_blender(
     base_style: dict[str, Any] = {
         "elements": {
             "colors": {"Si": "#14B8A6", "O": "#FB923C", "C": "#38BDF8", "N": "#F1F5F9"},
-            "radii": {"Si": 0.72, "O": 0.58, "C": 0.58, "N": 0.58},
-            "radius_scale": 0.90,
+            "radii": {"Si": 0.86, "O": 0.70, "C": 0.70, "N": 0.74},
+            "radius_scale": 1.0,
         },
         "material": {
             "roughness": 0.28,
@@ -526,10 +526,10 @@ def render_welcome_loop_with_blender(
             "enabled": True,
             "mode": "table",
             "color_mode": "bicolor",
-            "radius": 0.16,
+            "radius": 0.19,
             "segments": 20,
             "smooth": True,
-            "cutoffs": {"Si-O": 2.6, "Si-C": 2.6, "Si-N": 2.6},
+            "cutoffs": {"Si-O": 2.7, "Si-C": 2.7, "Si-N": 2.7},
         },
         "cell": {"enabled": False},
         "lighting": {
@@ -540,7 +540,7 @@ def render_welcome_loop_with_blender(
             "background_color": [0.9, 0.92, 0.95],
         },
         "camera": {"margin": 1.06},
-        "render": {"resolution": [240, 240], "samples": 24, "transparent": True},
+        "render": {"resolution": [240, 240], "samples": 18, "transparent": True},
     }
 
     style_studio = copy.deepcopy(base_style)
@@ -561,13 +561,13 @@ def render_welcome_loop_with_blender(
 
     style_licorice = copy.deepcopy(base_style)
     style_licorice["name"] = "welcome_licorice"
-    style_licorice["elements"]["radius_scale"] = 0.36
-    style_licorice["bonds"]["radius"] = 0.24
+    style_licorice["elements"]["radius_scale"] = 0.44
+    style_licorice["bonds"]["radius"] = 0.27
     style_licorice["material"]["roughness"] = 0.34
 
     style_vdw = copy.deepcopy(base_style)
     style_vdw["name"] = "welcome_vdw"
-    style_vdw["elements"]["radius_scale"] = 1.38
+    style_vdw["elements"]["radius_scale"] = 1.78
     style_vdw["bonds"]["enabled"] = False
     style_vdw["bonds"]["mode"] = "none"
     style_vdw["material"] = {
@@ -610,7 +610,7 @@ def render_angle(scene, cam_obj, frame_idx, out_path):
     cam_obj.location = target + view_dir * 200.0
     cam_obj.rotation_mode = 'QUATERNION'
     cam_obj.rotation_quaternion = rot_quat
-    cam_obj.data.ortho_scale = 6.6
+    cam_obj.data.ortho_scale = 7.8
     scene.render.filepath = str(out_path.resolve())
     bpy.ops.render.render(write_still=True)
 
@@ -628,10 +628,9 @@ for s_idx, style in enumerate(styles):
     start_k = s_idx * seg_len
     for k in range(start_k, start_k + seg_len):
         render_angle(scene, cam_obj, k, out_dir / f'main_{k:02d}.png')
-    prev_2_k = (start_k - 2) % n_frames
-    prev_1_k = (start_k - 1) % n_frames
-    render_angle(scene, cam_obj, prev_2_k, out_dir / f'blend2_{prev_2_k:02d}.png')
-    render_angle(scene, cam_obj, prev_1_k, out_dir / f'blend1_{prev_1_k:02d}.png')
+    for offset, tag in ((3, 'blend3'), (2, 'blend2'), (1, 'blend1')):
+        pk = (start_k - offset) % n_frames
+        render_angle(scene, cam_obj, pk, out_dir / f'{tag}_{pk:02d}.png')
 """
 
     with tempfile.TemporaryDirectory(prefix="atomic_welcome_") as tmpdir:
@@ -680,14 +679,11 @@ for s_idx, style in enumerate(styles):
         composited: list[Image.Image] = []
         for k in range(n_frames):
             fg = Image.open(frames_dir / f"main_{k:02d}.png").convert("RGBA")
-            blend2_p = frames_dir / f"blend2_{k:02d}.png"
-            blend1_p = frames_dir / f"blend1_{k:02d}.png"
-            if blend2_p.is_file():
-                fg_next = Image.open(blend2_p).convert("RGBA")
-                fg = Image.blend(fg, fg_next, 0.33)
-            elif blend1_p.is_file():
-                fg_next = Image.open(blend1_p).convert("RGBA")
-                fg = Image.blend(fg, fg_next, 0.67)
+            for tag, weight in (("blend3", 0.25), ("blend2", 0.50), ("blend1", 0.75)):
+                bp = frames_dir / f"{tag}_{k:02d}.png"
+                if bp.is_file():
+                    fg = Image.blend(fg, Image.open(bp).convert("RGBA"), weight)
+                    break
             frame = backdrop.copy()
             frame.alpha_composite(fg)
             composited.append(frame.convert("P", palette=Image.Palette.ADAPTIVE, colors=255))
@@ -697,7 +693,7 @@ for s_idx, style in enumerate(styles):
             gif_target,
             save_all=True,
             append_images=composited[1:],
-            duration=150,
+            duration=95,
             loop=0,
             optimize=True,
         )
