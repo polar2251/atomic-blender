@@ -1470,8 +1470,25 @@ class TestAtomicBlender(unittest.TestCase):
             self.assertEqual(app.var_atom_style.get(), "Van der Waals")
             self.assertEqual(app.var_guide_mode.get(), "Reference Axes")
             self.assertEqual(app.var_texture_label.get(), "Studio")
-            # Settings button moved into the same preview toolbar as Log toggle
+            # Settings button moved into the same preview toolbar as Log toggle, and 3D/Render/Frame toggles removed
+            tb_frame = app.btn_settings.master
             self.assertEqual(app.btn_settings.winfo_parent(), app._btn_log_toggle.winfo_parent())
+            tb_texts = [
+                w.cget("text") if "text" in w.keys() else getattr(w, "_label", None) and w._label.cget("text")
+                for w in tb_frame.winfo_children()
+            ]
+            self.assertNotIn("3D", tb_texts)
+            self.assertNotIn("Render", tb_texts)
+            self.assertNotIn("Frame", tb_texts)
+            # Consolidated dropdowns across Camera, Select, and Scene tabs
+            self.assertEqual(tuple(app.combo_orient["values"]), ("Iso", "Slab", "a", "b", "c", "c*"))
+            self.assertEqual(tuple(app.combo_focus["values"]), ("None", "Adsorbate Spotlight", "Z-Depth Fade"))
+            self.assertEqual(
+                tuple(app.combo_substrate["values"]),
+                ("Same Scale", "Slim (0.55×)", "Van der Waals (1.35×)"),
+            )
+            self.assertEqual(tuple(app.combo_framing["values"]), ("Custom", "Slab Framing", "Bulk Framing"))
+            self.assertEqual(tuple(app.combo_compare["values"]), ("Overlay", "Side-by-Side"))
 
             app.canvas.configure(width=900, height=700)
             app.update_idletasks()
