@@ -63,7 +63,7 @@ try:
 except Exception:
     _HAS_PIL = False
 
-WELCOME_FRAME_INTERVAL_MS = 150
+WELCOME_FRAME_INTERVAL_MS = 95
 
 WELCOME_STYLE_PHASES: tuple[tuple[str, str, str], ...] = (
     ("Studio  ·  Ball & Stick", "Balanced specular lighting with dual-color covalent bonds", "#2DD4BF"),
@@ -71,6 +71,29 @@ WELCOME_STYLE_PHASES: tuple[tuple[str, str, str], ...] = (
     ("Licorice  ·  Bond Network", "Uniform cylinder framework highlighting coordination topology", "#A78BFA"),
     ("Van der Waals  ·  Space-Filling", "Volumetric atomic radii for packing and surface inspection", "#F59E0B"),
 )
+
+
+def extract_input_path(raw_val: str) -> str:
+    """Extract the filesystem path from either a raw path or ``filename (full_path)`` display string."""
+    s = str(raw_val or "").strip()
+    if s.endswith(")") and " (" in s:
+        idx = s.rfind(" (")
+        label = s[:idx].strip()
+        candidate = s[idx + 2 : -1].strip()
+        if candidate and Path(candidate).name == label:
+            return candidate
+    return s
+
+
+def format_input_display(path_or_str: str | Path) -> str:
+    """Format a file path for the Input box as ``filename (full_path)`` when a parent path is present."""
+    raw = extract_input_path(str(path_or_str))
+    if not raw:
+        return ""
+    name = Path(raw).name
+    if name and name != raw:
+        return f"{name} ({raw})"
+    return raw
 
 
 def _blend_hex_color(bg_hex: str, fg_hex: str, alpha: float) -> str:
@@ -86,22 +109,12 @@ def _blend_hex_color(bg_hex: str, fg_hex: str, alpha: float) -> str:
     return f"#{r:02X}{g:02X}{bl:02X}"
 
 
-def _welcome_text_fade_alpha(frame_idx: int, total_frames: int, n_phases: int = 4) -> float:
-    """Return text opacity in ``[0.14, 1.0]`` that smoothly fades out and in at style transitions."""
+def _welcome_title_fade_alpha(frame_idx: int, total_frames: int, n_phases: int = 4) -> float:
+    """Return smooth wave opacity in ``[0.36, 1.0]`` so the Welcome heading dims/brightens smoothly."""
     total = max(1, int(total_frames))
-    seg = max(1, total // max(1, int(n_phases)))
-    if seg < 4:
-        return 1.0
-    pos = (int(frame_idx) % total) % seg
-    if pos == seg - 2:
-        return 0.48
-    if pos == seg - 1:
-        return 0.14
-    if pos == 0:
-        return 0.35
-    if pos == 1:
-        return 0.72
-    return 1.0
+    phase_len = max(1.0, total / max(1, int(n_phases)))
+    theta = 2.0 * math.pi * ((int(frame_idx) % total) % phase_len) / phase_len
+    return 0.68 + 0.32 * math.cos(theta)
 
 
 @dataclass
@@ -132,9 +145,10 @@ class GuiRenderConfig:
 
 def validate_gui_config(cfg: GuiRenderConfig) -> Path:
     """Validate GUI fields before invoking the CLI renderer and return resolved input path."""
-    if not cfg.input_path.strip():
+    raw_in = extract_input_path(cfg.input_path)
+    if not raw_in:
         raise ValueError("Please select an input structure file.")
-    in_path = Path(cfg.input_path).expanduser()
+    in_path = Path(raw_in).expanduser()
     if not in_path.is_file():
         raise FileNotFoundError(f"Input structure file not found: {in_path}")
 
@@ -1399,11 +1413,11 @@ class AtomicBlenderApp(tk.Tk):
         styles = sorted(_collect_style_files().keys()) or ["default"]
         self._available_styles = styles
 
-        self.var_inspector = tk.StringVar(value="Select an atomic structure file (.cif, POSCAR, .xyz, .data, .json)")
-        self.var_input = tk.StringVar(value=initial_input or "")
+        self.var_inspector = tk.StringVar(value="")
+        self.var_input = tk.StringVar(value=format_input_display(initial_input) if initial_input else "")
         self.var_output = tk.StringVar(value="")
         if initial_input:
-            self.var_output.set(str(Path(initial_input).with_suffix(".png")))
+            self.var_output.set(str(Path(extract_input_path(initial_input)).with_suffix(".png")))
 
         self.var_type_map = tk.StringVar(value="")
         self.var_style = tk.StringVar(value="studio" if "studio" in styles else styles[0])
@@ -1469,15 +1483,12 @@ class AtomicBlenderApp(tk.Tk):
         self.var_z_max = tk.StringVar(value="")
         self._active_tab = "view"
         self.var_status = tk.StringVar(value="Ready")
-        self.var_input.trace_add("write", lambda *_: self._sync_type_map_visibility())
+        self._formatting_input = False
+        self.var_input.trace_add("write", lambda *_: self._on_input_var_changed())
 
     def _build_layout(self) -> None:
-        banner = ttk.Frame(self, padding=(10, 6, 10, 4), style="Outer.TFrame")
+        banner = ttk.Frame(self, padding=(10, 4, 10, 2), style="Outer.TFrame")
         banner.pack(fill=tk.X)
-        ttk.Label(banner, text="Structure:", font=("Segoe UI", 9, "bold"), style="Banner.TLabel").pack(side=tk.LEFT)
-        ttk.Label(banner, textvariable=self.var_inspector, foreground="#2DD4BF", style="Banner.TLabel").pack(
-            side=tk.LEFT, padx=(6, 0)
-        )
         self.btn_settings = ttk.Button(banner, text="⚙ Settings", command=self._toggle_settings_panel)
         self.btn_settings.pack(side=tk.RIGHT)
 
@@ -1627,9 +1638,9 @@ class AtomicBlenderApp(tk.Tk):
         f_io.columnconfigure(1, weight=1)
 
         ttk.Label(f_io, text="Input").grid(row=0, column=0, sticky=tk.W, pady=2)
-        entry_in = ttk.Entry(f_io, textvariable=self.var_input, width=30)
-        entry_in.grid(row=0, column=1, sticky=tk.EW, padx=4, pady=2)
-        entry_in.bind("<FocusOut>", lambda _e: self._schedule_inspect())
+        self.entry_in = ttk.Entry(f_io, textvariable=self.var_input, width=30)
+        self.entry_in.grid(row=0, column=1, sticky=tk.EW, padx=4, pady=2)
+        self.entry_in.bind("<FocusOut>", lambda _e: (self._format_input_entry_display(), self._schedule_inspect()))
         row_in_btns = ttk.Frame(f_io)
         row_in_btns.grid(row=0, column=2, sticky=tk.EW, pady=2)
         ttk.Button(row_in_btns, text="Open", width=6, command=self._browse_input).pack(side=tk.LEFT)
@@ -2112,24 +2123,10 @@ class AtomicBlenderApp(tk.Tk):
             command=self._on_atoms_visibility_toggled,
         ).pack(side=tk.RIGHT, padx=(0, 6))
 
-        f_thumbs = ttk.Frame(f_disp)
-        f_thumbs.pack(fill=tk.X, pady=(0, 6))
-        self._repr_thumb_cards: dict[str, tuple[tk.Canvas, tk.BooleanVar]] = {}
-        thumb_specs = (
-            ("ball_stick", "Ball & Stick", self.var_disp_ball_stick),
-            ("licorice", "Licorice", self.var_disp_licorice),
-            ("vdw", "VdW", self.var_disp_vdw),
-        )
-        for idx_t, (key, title, var) in enumerate(thumb_specs):
-            f_thumbs.columnconfigure(idx_t, weight=1, uniform="repr_thumb")
-            cv = tk.Canvas(f_thumbs, height=48, bg="#111318", highlightthickness=0, cursor="hand2")
-            cv.grid(row=0, column=idx_t, sticky=tk.EW, padx=(0, 4 if idx_t < 2 else 0))
-            cv.bind("<Button-1>", lambda _e, k=key: self._on_display_type_clicked(k))
-            cv.bind("<Configure>", lambda e, c=cv: self._on_repr_thumb_configure(c, e.width, e.height))
-            self._repr_thumb_cards[key] = (cv, var)
-            self._display_checks[key] = (cv, var)
-
         rows = (
+            ("ball_stick", "Ball and Stick", self.var_disp_ball_stick, None),
+            ("licorice", "Licorice", self.var_disp_licorice, None),
+            ("vdw", "Van der Waals", self.var_disp_vdw, None),
             ("crystal_lattice", "Crystal Lattice", self.var_show_cell, lambda: self._switch_tab("tool")),
             ("cell_vectors", "Lattice Vectors (a, b, c)", self.var_show_cell_vectors, None),
             ("polyhedra", "Coordination Polyhedra", self.var_show_polyhedra, None),
@@ -2320,10 +2317,35 @@ class AtomicBlenderApp(tk.Tk):
             self.var_pan_step.set(step)
         self.move_camera_angstrom(dx_sign * step, dy_sign * step)
 
+    def _format_input_entry_display(self) -> None:
+        if getattr(self, "_formatting_input", False):
+            return
+        cur = self.var_input.get()
+        formatted = format_input_display(cur)
+        if formatted and formatted != cur:
+            self._formatting_input = True
+            try:
+                self.var_input.set(formatted)
+            finally:
+                self._formatting_input = False
+
+    def _on_input_var_changed(self) -> None:
+        if not getattr(self, "_formatting_input", False):
+            entry = getattr(self, "entry_in", None)
+            has_focus = False
+            if entry is not None:
+                try:
+                    has_focus = self.focus_get() is entry
+                except Exception:
+                    has_focus = False
+            if not has_focus:
+                self._format_input_entry_display()
+        self._sync_type_map_visibility()
+
     def _sync_type_map_visibility(self) -> None:
         if not hasattr(self, "lbl_type_map"):
             return
-        in_path = self.var_input.get().strip().lower()
+        in_path = extract_input_path(self.var_input.get()).lower()
         show_tm = in_path.endswith((".data", ".lmp")) or bool(self.var_type_map.get().strip())
         if show_tm:
             self.lbl_type_map.grid(row=1, column=0, sticky=tk.W, pady=2)
@@ -2372,45 +2394,9 @@ class AtomicBlenderApp(tk.Tk):
                 6, 11, 9.5, 14.5, 15, 7, fill="#FFFFFF", width=2.0, capstyle=tk.ROUND, joinstyle=tk.ROUND
             )
 
-    def _on_repr_thumb_configure(self, cv: tk.Canvas, w: int, h: int) -> None:
-        if getattr(cv, "_last_thumb_size", None) == (w, h):
-            return
-        setattr(cv, "_last_thumb_size", (w, h))
-        self._refresh_repr_thumbnails()
-
-    def _refresh_repr_thumbnails(self) -> None:
-        titles = {"ball_stick": "Ball & Stick", "licorice": "Licorice", "vdw": "Van der Waals"}
-        for key, (cv, var) in getattr(self, "_repr_thumb_cards", {}).items():
-            cv.delete("all")
-            w = max(84, cv.winfo_width())
-            h = max(48, cv.winfo_height())
-            active = bool(var.get())
-            bg = "#162A2C" if active else "#111318"
-            border = "#14B8A6" if active else "#2D3342"
-            cv.create_rectangle(0, 0, w, h, fill=bg, outline="")
-            cv.create_rectangle(1, 1, w - 1, h - 1, outline=border, width=1.6 if active else 1.0)
-            cx0, cy0 = w * 0.34, h * 0.34
-            cx1, cy1 = w * 0.66, h * 0.50
-            if key in ("ball_stick", "licorice"):
-                bw = 6 if key == "ball_stick" else 4
-                r0 = 9 if key == "ball_stick" else 5
-                r1 = 7 if key == "ball_stick" else 5
-                cv.create_line(cx0, cy0, cx1, cy1, fill="#94A3B8", width=bw, capstyle=tk.ROUND)
-                cv.create_oval(cx0 - r0, cy0 - r0, cx0 + r0, cy0 + r0, fill="#14B8A6", outline="#0F172A", width=1)
-                cv.create_oval(cx1 - r1, cy1 - r1, cx1 + r1, cy1 + r1, fill="#F97316", outline="#0F172A", width=1)
-            else:
-                r0, r1 = 15, 13
-                cv.create_oval(cx0 - r0, cy0 - r0, cx0 + r0, cy0 + r0, fill="#14B8A6", outline="#0F172A", width=1)
-                cv.create_oval(cx1 - r1, cy1 - r1, cx1 + r1, cy1 + r1, fill="#F97316", outline="#0F172A", width=1)
-            cv.create_text(w * 0.5, h - 8, text=titles[key], fill="#F8FAFC" if active else "#94A3B8", font=("Segoe UI", 7, "bold"))
-
     def _refresh_display_checks(self) -> None:
-        thumb_keys = set(getattr(self, "_repr_thumb_cards", {}).keys())
-        for key, (canvas, var) in self._display_checks.items():
-            if key in thumb_keys:
-                continue
+        for _key, (canvas, var) in self._display_checks.items():
             self._draw_rounded_checkbox(canvas, bool(var.get()))
-        self._refresh_repr_thumbnails()
 
     def _on_atoms_visibility_toggled(self) -> None:
         show = bool(self.var_show_atoms.get())
@@ -4081,9 +4067,9 @@ class AtomicBlenderApp(tk.Tk):
 
     def _run_inspect_async(self) -> None:
         self._inspect_after_id = None
-        path = self.var_input.get().strip()
+        path = extract_input_path(self.var_input.get())
         if not path:
-            self.var_inspector.set("Select an atomic structure file (.cif, POSCAR, .xyz, .data, .json)")
+            self.var_inspector.set("")
             return
         type_map = self.var_type_map.get()
         rep = (int(self.var_rep_x.get()), int(self.var_rep_y.get()), int(self.var_rep_z.get()))
@@ -4164,7 +4150,7 @@ class AtomicBlenderApp(tk.Tk):
         if self._structure_cache is not None and not self._structure_cache.get("has_cell", False):
             rep = (1, 1, 1)
         return GuiRenderConfig(
-            input_path=self.var_input.get(),
+            input_path=extract_input_path(self.var_input.get()),
             output_path=self.var_output.get(),
             style=self.var_style.get(),
             view_mode=self.var_view_mode.get(),
@@ -4357,7 +4343,7 @@ class AtomicBlenderApp(tk.Tk):
         self._run_cli_async(cli_args, mode="open_blender", target_path=blend_path)
 
     def _on_open_folder(self) -> None:
-        target = self.var_output.get().strip() or self.var_input.get().strip()
+        target = self.var_output.get().strip() or extract_input_path(self.var_input.get())
         if not target:
             messagebox.showinfo("Open Folder", "No input or output path selected yet.")
             return
@@ -4861,14 +4847,7 @@ class AtomicBlenderApp(tk.Tk):
         return ((x - cx) ** 2 + (y - cy) ** 2) <= (r ** 2)
 
     def _refresh_welcome_hover_badge(self) -> None:
-        dots_items = self.canvas.find_withtag("welcome_dots")
-        if not dots_items:
-            return
-        phase_idx, _, _, _ = self._welcome_style_phase_for_frame(self._welcome_frame_idx)
-        dots_text = "  ".join("●" if i == phase_idx else "○" for i in range(len(WELCOME_STYLE_PHASES)))
-        if self._welcome_hover_paused:
-            dots_text = f"{dots_text}   ·   Paused"
-        self.canvas.itemconfigure(dots_items[0], text=dots_text)
+        return
 
     def _on_canvas_hover_motion(self, event: tk.Event) -> None:
         paused = self._is_point_over_welcome_atom(int(event.x), int(event.y))
@@ -4891,54 +4870,46 @@ class AtomicBlenderApp(tk.Tk):
             self._welcome_after_id = None
 
     def _draw_welcome_screen(self, cw: int, ch: int) -> None:
-        """Render the startup Welcome heading, hover-pausable rotating atoms, and scannable guide."""
+        """Render the minimal Welcome screen: fading Welcome title, rotating atoms, and drop prompt."""
         self.canvas.delete("welcome")
         dark_bg = bool(self.var_dark_backdrop.get())
         cx = cw // 2
         cy = ch // 2
 
         if ch >= 540:
-            y_atom = cy - 4
-            y_title = max(48, y_atom - 196)
-            y_sub = y_title + 48
-            y_badge = y_atom + 132
-            y_desc = y_badge + 22
-            y_dots = y_desc + 22
-            y_drag = y_dots + 34
-            y_formats = y_drag + 22
-            title_pt = 56
+            y_atom = cy + 12
+            y_title = max(56, y_atom - 232)
+            y_sub = y_title + 72
+            y_drag = y_atom + 148
+            title_pt = 72
         else:
-            y_atom = cy
-            y_title = max(34, y_atom - 166)
-            y_sub = y_title + 38
-            y_badge = y_atom + 122
-            y_desc = y_badge + 20
-            y_dots = y_desc + 18
-            y_drag = y_dots + 26
-            y_formats = y_drag + 18
-            title_pt = 46
+            y_atom = cy + 6
+            y_title = max(44, y_atom - 190)
+            y_sub = y_title + 58
+            y_drag = y_atom + 132
+            title_pt = 58
 
         bg_hex = "#0F1115" if dark_bg else "#ECECEC"
         title_fg = "#F8FAFC" if dark_bg else "#0F172A"
         sub_fg = "#2DD4BF" if dark_bg else "#0D9488"
-        desc_fg = "#94A3B8" if dark_bg else "#475569"
-        drag_fg = "#E2E8F0" if dark_bg else "#1E293B"
-        formats_fg = "#64748B" if dark_bg else "#64748B"
-        dots_fg = "#64748B" if dark_bg else "#94A3B8"
+        drag_fg = "#94A3B8" if dark_bg else "#475569"
+
+        total_frames = max(1, len(self._welcome_photo_refs) or len(self._welcome_pil_frames) or 72)
+        title_alpha = _welcome_title_fade_alpha(self._welcome_frame_idx, total_frames, len(WELCOME_STYLE_PHASES))
 
         self.canvas.create_text(
             cx,
             y_title,
             text="Welcome",
             font=("Segoe UI Light", title_pt),
-            fill=title_fg,
+            fill=_blend_hex_color(bg_hex, title_fg, title_alpha),
             tags=("welcome", "welcome_title"),
         )
         self.canvas.create_text(
             cx,
             y_sub,
             text="ATOMIC BLENDER STUDIO",
-            font=("Segoe UI Semibold", 9),
+            font=("Segoe UI", 9),
             fill=sub_fg,
             tags=("welcome", "welcome_subtitle"),
         )
@@ -4965,54 +4936,14 @@ class AtomicBlenderApp(tk.Tk):
                 tags=("welcome", "welcome_atom"),
             )
 
-        total_frames = max(1, len(self._welcome_photo_refs) or len(self._welcome_pil_frames) or 48)
-        phase_idx, phase_name, phase_desc, phase_col = self._welcome_style_phase_for_frame(self._welcome_frame_idx)
-        fade_alpha = _welcome_text_fade_alpha(self._welcome_frame_idx, total_frames, len(WELCOME_STYLE_PHASES))
-        dots_text = "  ".join("●" if i == phase_idx else "○" for i in range(len(WELCOME_STYLE_PHASES)))
-        if self._welcome_hover_paused:
-            dots_text = f"{dots_text}   ·   Paused"
-
-        self.canvas.create_text(
-            cx,
-            y_badge,
-            text=phase_name,
-            font=("Segoe UI Semibold", 11),
-            fill=_blend_hex_color(bg_hex, phase_col, fade_alpha),
-            tags=("welcome", "welcome_style"),
-        )
-        self.canvas.create_text(
-            cx,
-            y_desc,
-            text=phase_desc,
-            font=("Segoe UI", 9),
-            fill=_blend_hex_color(bg_hex, desc_fg, fade_alpha),
-            tags=("welcome", "welcome_style_desc"),
-        )
-        self.canvas.create_text(
-            cx,
-            y_dots,
-            text=dots_text,
-            font=("Segoe UI", 9),
-            fill=dots_fg,
-            tags=("welcome", "welcome_dots"),
-        )
         self.canvas.create_text(
             cx,
             y_drag,
             text="Drag & drop a structure file anywhere  ·  or click Open",
             justify=tk.CENTER,
-            font=("Segoe UI Semibold", 11),
+            font=("Segoe UI", 10),
             fill=drag_fg,
             tags=("welcome", "welcome_drag"),
-        )
-        self.canvas.create_text(
-            cx,
-            y_formats,
-            text="CIF  ·  POSCAR  ·  XYZ  ·  LAMMPS  ·  XSF  ·  view / style / recipe JSON",
-            justify=tk.CENTER,
-            font=("Segoe UI", 9),
-            fill=formats_fg,
-            tags=("welcome", "welcome_formats"),
         )
 
         if len(self._welcome_photo_refs) > 1 and self._welcome_after_id is None and not getattr(self, "_destroyed", False):
@@ -5029,39 +4960,25 @@ class AtomicBlenderApp(tk.Tk):
         if not self._welcome_photo_refs:
             return
         if self._welcome_hover_paused:
-            self._refresh_welcome_hover_badge()
             if len(self._welcome_photo_refs) > 1 and not getattr(self, "_destroyed", False):
                 self._welcome_after_id = self.after(WELCOME_FRAME_INTERVAL_MS, self._tick_welcome_animation)
             return
         total_frames = len(self._welcome_photo_refs)
         self._welcome_frame_idx = (self._welcome_frame_idx + 1) % total_frames
-        phase_idx, phase_name, phase_desc, phase_col = self._welcome_style_phase_for_frame(self._welcome_frame_idx)
-        fade_alpha = _welcome_text_fade_alpha(self._welcome_frame_idx, total_frames, len(WELCOME_STYLE_PHASES))
         dark_bg = bool(self.var_dark_backdrop.get())
         bg_hex = "#0F1115" if dark_bg else "#ECECEC"
-        desc_fg = "#94A3B8" if dark_bg else "#475569"
-        dots_text = "  ".join("●" if i == phase_idx else "○" for i in range(len(WELCOME_STYLE_PHASES)))
+        title_fg = "#F8FAFC" if dark_bg else "#0F172A"
+        title_alpha = _welcome_title_fade_alpha(self._welcome_frame_idx, total_frames, len(WELCOME_STYLE_PHASES))
         try:
             atom_items = self.canvas.find_withtag("welcome_atom")
             if atom_items and self.canvas.type(atom_items[0]) == "image":
                 self.canvas.itemconfigure(atom_items[0], image=self._welcome_photo_refs[self._welcome_frame_idx])
-                style_items = self.canvas.find_withtag("welcome_style")
-                if style_items:
+                title_items = self.canvas.find_withtag("welcome_title")
+                if title_items:
                     self.canvas.itemconfigure(
-                        style_items[0],
-                        text=phase_name,
-                        fill=_blend_hex_color(bg_hex, phase_col, fade_alpha),
+                        title_items[0],
+                        fill=_blend_hex_color(bg_hex, title_fg, title_alpha),
                     )
-                desc_items = self.canvas.find_withtag("welcome_style_desc")
-                if desc_items:
-                    self.canvas.itemconfigure(
-                        desc_items[0],
-                        text=phase_desc,
-                        fill=_blend_hex_color(bg_hex, desc_fg, fade_alpha),
-                    )
-                dots_items = self.canvas.find_withtag("welcome_dots")
-                if dots_items:
-                    self.canvas.itemconfigure(dots_items[0], text=dots_text)
             else:
                 self._draw_welcome_screen(max(1, self.canvas.winfo_width()), max(1, self.canvas.winfo_height()))
         except Exception:
@@ -5365,7 +5282,7 @@ class AtomicBlenderApp(tk.Tk):
                 self._structure_cache = neutral
                 self._structure_version += 1
                 self._use_interactive_cam = False
-                in_raw = self.var_input.get().strip()
+                in_raw = extract_input_path(self.var_input.get())
                 if in_raw:
                     self._add_recent_file(in_raw)
                 self._rebuild_viewport(reset_camera=True, trigger_preview=True)
@@ -5387,7 +5304,7 @@ class AtomicBlenderApp(tk.Tk):
                 self._structure_cache = first or None
                 self._structure_version += 1
                 self._use_interactive_cam = False
-                in_raw = self.var_input.get().strip()
+                in_raw = extract_input_path(self.var_input.get())
                 if in_raw:
                     self._add_recent_file(in_raw)
                 if self._structure_cache is not None:

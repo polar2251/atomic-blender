@@ -240,7 +240,8 @@ class TestAtomicBlender(unittest.TestCase):
             app.withdraw()
             try:
                 app.handle_dropped_files([str(cif), str(view_json), str(style_json)])
-                self.assertEqual(app.var_input.get(), str(cif))
+                self.assertEqual(app.var_input.get(), f"{cif.name} ({cif})")
+                self.assertEqual(app._collect_config().input_path, str(cif))
                 self.assertEqual(app.var_view_mode.get(), "file")
                 self.assertEqual(app.var_view_file.get(), str(view_json))
                 self.assertEqual(app.var_style.get(), str(style_json))
@@ -249,7 +250,7 @@ class TestAtomicBlender(unittest.TestCase):
                 app._queue.put(("drop", [str(struct_json)]))
                 app.after(150, app.destroy)
                 app.mainloop()
-                self.assertEqual(app.var_input.get(), str(struct_json))
+                self.assertEqual(app.var_input.get(), f"{struct_json.name} ({struct_json})")
             except Exception:
                 try:
                     app.destroy()
@@ -1397,45 +1398,60 @@ class TestAtomicBlender(unittest.TestCase):
         from atomic_blender.gui import (
             AtomicBlenderApp,
             WELCOME_FRAME_INTERVAL_MS,
-            WELCOME_STYLE_PHASES,
             _blend_hex_color,
-            _welcome_text_fade_alpha,
+            _welcome_title_fade_alpha,
+            extract_input_path,
+            format_input_display,
         )
 
-        self.assertGreaterEqual(WELCOME_FRAME_INTERVAL_MS, 140)
-        self.assertEqual(_welcome_text_fade_alpha(5, 48), 1.0)
-        self.assertLess(_welcome_text_fade_alpha(11, 48), 0.2)
+        self.assertLessEqual(WELCOME_FRAME_INTERVAL_MS, 100)
+        self.assertAlmostEqual(_welcome_title_fade_alpha(0, 72), 1.0, places=3)
+        self.assertLess(_welcome_title_fade_alpha(9, 72), 0.45)
         self.assertEqual(_blend_hex_color("#000000", "#FFFFFF", 0.0), "#000000")
         self.assertEqual(_blend_hex_color("#000000", "#FFFFFF", 1.0), "#FFFFFF")
+        sample_p = r"C:\tmp\demo\sample.cif"
+        self.assertEqual(format_input_display(sample_p), r"sample.cif (C:\tmp\demo\sample.cif)")
+        self.assertEqual(extract_input_path(format_input_display(sample_p)), sample_p)
 
         gif_path = package_dir() / "assets" / "welcome_loop.gif"
         self.assertTrue(gif_path.is_file(), f"Missing pre-rendered welcome GIF: {gif_path}")
         with Image.open(gif_path) as im:
-            self.assertGreaterEqual(getattr(im, "n_frames", 1), 48)
+            self.assertGreaterEqual(getattr(im, "n_frames", 1), 72)
 
         app = AtomicBlenderApp()
         app.withdraw()
         try:
+            # No "Structure:" banner label text cluttering top bar, and no thumbnail cards in Display panel
+            self.assertFalse(hasattr(app, "_repr_thumb_cards"))
+            self.assertIn("ball_stick", app._display_checks)
+            self.assertIn("licorice", app._display_checks)
+            self.assertIn("vdw", app._display_checks)
+
             app.canvas.configure(width=800, height=620)
             app.update_idletasks()
             app._draw_3d_viewport()
 
             title_ids = app.canvas.find_withtag("welcome_title")
+            sub_ids = app.canvas.find_withtag("welcome_subtitle")
             atom_ids = app.canvas.find_withtag("welcome_atom")
-            style_ids = app.canvas.find_withtag("welcome_style")
-            desc_ids = app.canvas.find_withtag("welcome_style_desc")
             drag_ids = app.canvas.find_withtag("welcome_drag")
-            self.assertTrue(title_ids and atom_ids and style_ids and desc_ids and drag_ids)
+            self.assertTrue(title_ids and sub_ids and atom_ids and drag_ids)
+            # No descriptions or 4 bottom dots on the Welcome canvas
+            self.assertEqual(app.canvas.find_withtag("welcome_style"), ())
+            self.assertEqual(app.canvas.find_withtag("welcome_style_desc"), ())
+            self.assertEqual(app.canvas.find_withtag("welcome_dots"), ())
             self.assertEqual(app.canvas.itemcget(title_ids[0], "text"), "Welcome")
             title_font = app.canvas.itemcget(title_ids[0], "font")
-            self.assertIn("56", title_font)
+            self.assertIn("72", title_font)
             self.assertIn("Light", title_font)
             self.assertIn("Drag & drop", app.canvas.itemcget(drag_ids[0], "text"))
 
             y_title = app.canvas.coords(title_ids[0])[1]
+            y_sub = app.canvas.coords(sub_ids[0])[1]
             y_atom = app.canvas.coords(atom_ids[0])[1]
             y_drag = app.canvas.coords(drag_ids[0])[1]
-            self.assertLess(y_title, y_atom)
+            self.assertGreaterEqual(y_sub - y_title, 68)
+            self.assertLess(y_sub, y_atom)
             self.assertLess(y_atom, y_drag)
 
             # Hovering over the atom center pauses frame advancement; leaving resumes it
@@ -1451,17 +1467,13 @@ class TestAtomicBlender(unittest.TestCase):
             self.assertFalse(app._welcome_hover_paused)
 
             n_frames = len(app._welcome_photo_refs)
-            self.assertGreaterEqual(n_frames, 48)
-            seen_styles: set[str] = set()
-            seen_style_colors: set[str] = set()
+            self.assertGreaterEqual(n_frames, 72)
+            seen_title_colors: set[str] = set()
             for _ in range(n_frames):
-                seen_styles.add(app.canvas.itemcget(style_ids[0], "text"))
-                seen_style_colors.add(app.canvas.itemcget(style_ids[0], "fill"))
+                seen_title_colors.add(app.canvas.itemcget(title_ids[0], "fill"))
                 app._tick_welcome_animation()
             self.assertEqual(app._welcome_frame_idx, 0)
-            self.assertGreater(len(seen_style_colors), len(WELCOME_STYLE_PHASES))
-            for phase_name, _, _ in WELCOME_STYLE_PHASES:
-                self.assertTrue(any(phase_name in s for s in seen_styles), f"Missing phase {phase_name} in {seen_styles}")
+            self.assertGreater(len(seen_title_colors), 4)
             self.assertIsNotNone(app._welcome_after_id)
         finally:
             app.destroy()
