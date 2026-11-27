@@ -328,8 +328,9 @@ def render_app_logo_with_blender(
     ico_out: Path | None = None,
     blender_exe: Path | None = None,
 ) -> tuple[Path, Path]:
-    """Render a high-visibility, low-reflection 3D molecule logo in Blender Cycles."""
-    from PIL import Image, ImageDraw
+    """Render a modern low-glare 3D molecule app icon (dark-glass squircle) in Blender Cycles."""
+    import numpy as np
+    from PIL import Image, ImageDraw, ImageFilter
 
     assets_dir = Path(__file__).resolve().parent / "assets"
     assets_dir.mkdir(parents=True, exist_ok=True)
@@ -355,52 +356,52 @@ def render_app_logo_with_blender(
         "origin": [0.0, 0.0, 0.0],
     }
     logo_style = {
-        "name": "logo_matte",
+        "name": "logo_modern_studio",
         "elements": {
             "colors": {
                 "Si": "#14B8A6",
                 "O": "#FB923C",
                 "C": "#38BDF8",
-                "N": "#F1F5F9",
+                "N": "#F8FAFC",
             },
             "radii": {
-                "Si": 0.72,
-                "O": 0.58,
-                "C": 0.58,
-                "N": 0.58,
+                "Si": 0.88,
+                "O": 0.72,
+                "C": 0.72,
+                "N": 0.74,
             },
             "radius_scale": 1.0,
         },
         "material": {
-            "roughness": 0.92,
-            "specular": 0.05,
-            "metallic": 0.0,
-            "coat_weight": 0.0,
-            "subsurface_weight": 0.04,
-            "ao_factor": 0.14,
-            "metal": {"roughness": 0.92, "specular": 0.05, "metallic": 0.0, "coat_weight": 0.0},
-            "nonmetal": {"roughness": 0.92, "specular": 0.05, "metallic": 0.0, "coat_weight": 0.0},
+            "roughness": 0.48,
+            "specular": 0.35,
+            "metallic": 0.04,
+            "coat_weight": 0.06,
+            "subsurface_weight": 0.05,
+            "ao_factor": 0.16,
+            "metal": {"roughness": 0.44, "specular": 0.40, "metallic": 0.08, "coat_weight": 0.06},
+            "nonmetal": {"roughness": 0.50, "specular": 0.32, "metallic": 0.02, "coat_weight": 0.05},
         },
-        "atom_mesh": {"segments": 40, "ring_count": 20, "smooth": True},
+        "atom_mesh": {"segments": 48, "ring_count": 24, "smooth": True},
         "bonds": {
             "enabled": True,
             "mode": "table",
             "color_mode": "bicolor",
-            "radius": 0.21,
-            "segments": 24,
+            "radius": 0.22,
+            "segments": 28,
             "smooth": True,
-            "cutoffs": {"Si-O": 2.6, "Si-C": 2.6, "Si-N": 2.6},
+            "cutoffs": {"Si-O": 2.7, "Si-C": 2.7, "Si-N": 2.7},
         },
         "cell": {"enabled": False},
         "lighting": {
-            "key": {"energy": 2.2, "angle_deg": 40.0, "elevation_deg": 48.0, "azimuth_deg": 38.0},
-            "fill": {"energy": 145.0, "size": 16.0, "distance": 11.0, "elevation_deg": 24.0, "azimuth_deg": -52.0},
-            "rim": {"energy": 75.0, "size": 12.0, "distance": 12.0, "elevation_deg": -12.0, "azimuth_deg": 195.0},
-            "background_strength": 0.55,
-            "background_color": [0.9, 0.92, 0.95],
+            "sun": {"energy": 1.75, "rotation_deg": [28.0, -18.0, 24.0]},
+            "fill": {"energy": 210.0, "size": 22.0, "distance": 11.0, "elevation_deg": 24.0, "azimuth_deg": -48.0},
+            "rim": {"energy": 95.0, "size": 14.0, "distance": 12.0, "elevation_deg": -15.0, "azimuth_deg": 195.0},
+            "background_strength": 0.70,
+            "background_color": [0.92, 0.94, 0.97],
         },
-        "camera": {"margin": 1.04},
-        "render": {"resolution": [512, 512], "samples": 48, "transparent": True},
+        "camera": {"margin": 1.05},
+        "render": {"resolution": [640, 640], "samples": 48, "transparent": True},
     }
 
     with tempfile.TemporaryDirectory(prefix="atomic_logo_") as tmpdir:
@@ -441,26 +442,67 @@ def render_app_logo_with_blender(
         fg = Image.open(raw_png).convert("RGBA")
         ss_size = 1024
         size = 512
-        badge = Image.new("RGBA", (ss_size, ss_size), (0, 0, 0, 0))
-        draw = ImageDraw.Draw(badge, "RGBA")
-        draw.rounded_rectangle(
+
+        # Sleek dark-slate vertical gradient squircle with soft teal core glow and glass rim
+        t = np.linspace(0.0, 1.0, ss_size, dtype=np.float32)[:, None]
+        grad_rgb = np.empty((ss_size, ss_size, 4), dtype=np.uint8)
+        grad_rgb[:, :, 0] = np.round((1.0 - t) * 24 + t * 10).astype(np.uint8)
+        grad_rgb[:, :, 1] = np.round((1.0 - t) * 32 + t * 14).astype(np.uint8)
+        grad_rgb[:, :, 2] = np.round((1.0 - t) * 48 + t * 22).astype(np.uint8)
+        grad_rgb[:, :, 3] = 255
+        grad_img = Image.fromarray(grad_rgb, mode="RGBA")
+
+        glow = Image.new("RGBA", (ss_size, ss_size), (0, 0, 0, 0))
+        glow_draw = ImageDraw.Draw(glow, "RGBA")
+        glow_draw.ellipse((212, 200, 812, 800), fill=(20, 184, 166, 56))
+        glow_draw.ellipse((320, 140, 704, 460), fill=(56, 189, 248, 28))
+        glow = glow.filter(ImageFilter.GaussianBlur(radius=120))
+        grad_img.alpha_composite(glow)
+
+        mask = Image.new("L", (ss_size, ss_size), 0)
+        mask_draw = ImageDraw.Draw(mask)
+        mask_draw.rounded_rectangle((24, 24, ss_size - 24, ss_size - 24), radius=232, fill=255)
+
+        badge_ss = Image.new("RGBA", (ss_size, ss_size), (0, 0, 0, 0))
+        badge_ss.paste(grad_img, (0, 0), mask)
+
+        rim_draw = ImageDraw.Draw(badge_ss, "RGBA")
+        rim_draw.rounded_rectangle(
             (28, 28, ss_size - 28, ss_size - 28),
-            radius=220,
-            fill=(15, 20, 30, 255),
-            outline=(20, 184, 166, 240),
-            width=22,
+            radius=228,
+            fill=None,
+            outline=(255, 255, 255, 34),
+            width=4,
         )
-        badge = badge.resize((size, size), Image.Resampling.LANCZOS)
+        rim_draw.rounded_rectangle(
+            (24, 24, ss_size - 24, ss_size - 24),
+            radius=232,
+            fill=None,
+            outline=(45, 212, 191, 140),
+            width=6,
+        )
 
         bbox = fg.getbbox()
         if bbox is not None:
             fg = fg.crop(bbox)
-        target_box = int(size * 0.78)
+        target_box = int(ss_size * 0.74)
         scale = target_box / max(1, max(fg.width, fg.height))
         nw = max(1, int(round(fg.width * scale)))
         nh = max(1, int(round(fg.height * scale)))
         fg_resized = fg.resize((nw, nh), Image.Resampling.LANCZOS)
-        badge.alpha_composite(fg_resized, dest=((size - nw) // 2, (size - nh) // 2))
+        dx = (ss_size - nw) // 2
+        dy = (ss_size - nh) // 2
+
+        # Soft drop shadow under the 3D molecule inside the squircle
+        alpha_ch = fg_resized.getchannel("A")
+        shadow_layer = Image.new("RGBA", (ss_size, ss_size), (0, 0, 0, 0))
+        shadow_tint = Image.new("RGBA", (nw, nh), (0, 0, 0, 115))
+        shadow_layer.paste(shadow_tint, (dx, dy + 18), alpha_ch)
+        shadow_layer = shadow_layer.filter(ImageFilter.GaussianBlur(radius=24))
+        badge_ss.alpha_composite(shadow_layer)
+        badge_ss.alpha_composite(fg_resized, dest=(dx, dy))
+
+        badge = badge_ss.resize((size, size), Image.Resampling.LANCZOS)
 
         png_target.parent.mkdir(parents=True, exist_ok=True)
         badge.save(png_target, format="PNG")
@@ -710,7 +752,7 @@ def ensure_app_icon(target_path: Path | None = None) -> Path:
 
     if bundled_ico.is_file() and bundled_ico.stat().st_size > 0:
         if target_path is None:
-            if not ico_path.is_file() or ico_path.stat().st_size != bundled_ico.stat().st_size:
+            if not ico_path.is_file() or ico_path.read_bytes() != bundled_ico.read_bytes():
                 shutil.copy2(bundled_ico, ico_path)
             return ico_path
         if not ico_path.is_file() or ico_path.stat().st_size == 0:

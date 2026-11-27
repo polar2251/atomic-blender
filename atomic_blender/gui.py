@@ -1396,6 +1396,22 @@ class AtomicBlenderApp(tk.Tk):
         style.map("Dots.TButton", background=[("active", ctrl)], foreground=[("active", fg)])
 
         style.configure(
+            "Tool.TButton",
+            background=ctrl,
+            foreground=fg,
+            bordercolor=ctrl,
+            lightcolor=ctrl,
+            darkcolor=ctrl,
+            padding=(4, 3),
+            font=("Segoe UI", 9),
+        )
+        style.map(
+            "Tool.TButton",
+            background=[("active", ctrl_hover), ("pressed", "#1B1F29"), ("disabled", "#151820")],
+            foreground=[("disabled", "#475569")],
+        )
+
+        style.configure(
             "TEntry",
             fieldbackground=recessed,
             foreground=fg,
@@ -1541,7 +1557,7 @@ class AtomicBlenderApp(tk.Tk):
         left_body = ttk.Frame(left_host, padding=0, style="Outer.TFrame")
         left_body.pack(side=tk.TOP, fill=tk.BOTH, expand=True)
 
-        left_canvas = tk.Canvas(left_body, bg="#0F1115", highlightthickness=0, width=436)
+        left_canvas = tk.Canvas(left_body, bg="#0F1115", highlightthickness=0, width=396)
         left_scroll = ttk.Scrollbar(left_body, orient=tk.VERTICAL, command=left_canvas.yview)
         left = ttk.Frame(left_canvas, padding=6, style="Outer.TFrame")
         left_win = left_canvas.create_window((0, 0), window=left, anchor=tk.NW)
@@ -2796,27 +2812,38 @@ class AtomicBlenderApp(tk.Tk):
         self._v_pane = v_pane
 
         f_prev = ttk.Frame(v_pane, padding=(2, 2), style="Outer.TFrame")
-        tb = ttk.Frame(f_prev, padding=(4, 3))
+        tb = ttk.Frame(f_prev, padding=(2, 3))
         tb.pack(fill=tk.X, pady=(0, 4))
+        # Pack right-aligned utility buttons first so Tk always reserves their space.
+        self._btn_log_toggle = ttk.Button(
+            tb, text="Log", style="Tool.TButton", width=0, command=self._toggle_log_panel
+        )
+        self._btn_log_toggle.pack(side=tk.RIGHT)
+        self.btn_settings = ttk.Button(
+            tb, text="⚙ Settings", style="Tool.TButton", width=0, command=self._toggle_settings_panel
+        )
+        self.btn_settings.pack(side=tk.RIGHT, padx=(0, 3))
         DarkRadiobutton(
             tb, text="3D", variable=self.var_canvas_mode, value="3d", command=self._redraw_canvas
         ).pack(side=tk.LEFT)
         DarkRadiobutton(
             tb, text="Render", variable=self.var_canvas_mode, value="png", command=self._redraw_canvas
-        ).pack(side=tk.LEFT, padx=(4, 6))
+        ).pack(side=tk.LEFT, padx=(2, 3))
         DarkCheckbutton(
             tb, text="Frame", variable=self.var_show_output_mask, command=self._on_output_mask_toggled
-        ).pack(side=tk.LEFT, padx=(0, 6))
-        ttk.Button(tb, text="Fit", width=4, command=self._on_reset_view).pack(side=tk.LEFT, padx=(0, 3))
-        ttk.Button(tb, text="Save View", command=self._on_save_view_json).pack(side=tk.LEFT, padx=(0, 3))
-        ttk.Button(tb, text="Copy", width=5, command=self._on_copy_image).pack(side=tk.LEFT, padx=(0, 6))
+        ).pack(side=tk.LEFT, padx=(0, 3))
+        ttk.Button(tb, text="Fit", style="Tool.TButton", width=0, command=self._on_reset_view).pack(
+            side=tk.LEFT, padx=(0, 2)
+        )
+        ttk.Button(tb, text="Save View", style="Tool.TButton", width=0, command=self._on_save_view_json).pack(
+            side=tk.LEFT, padx=(0, 2)
+        )
+        ttk.Button(tb, text="Copy", style="Tool.TButton", width=0, command=self._on_copy_image).pack(
+            side=tk.LEFT, padx=(0, 3)
+        )
         DarkCheckbutton(
             tb, text="Dark", variable=self.var_dark_backdrop, command=self._on_backdrop_toggled
-        ).pack(side=tk.LEFT, padx=(0, 6))
-        self._btn_log_toggle = ttk.Button(tb, text="Log", width=5, command=self._toggle_log_panel)
-        self._btn_log_toggle.pack(side=tk.RIGHT)
-        self.btn_settings = ttk.Button(tb, text="⚙ Settings", command=self._toggle_settings_panel)
-        self.btn_settings.pack(side=tk.RIGHT, padx=(0, 4))
+        ).pack(side=tk.LEFT, padx=(0, 2))
 
         self.canvas = tk.Canvas(f_prev, bg="#0F1115", highlightthickness=0)
         self.canvas.pack(fill=tk.BOTH, expand=True)
