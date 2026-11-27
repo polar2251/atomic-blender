@@ -15,6 +15,8 @@ from pathlib import Path
 
 from atomic_blender.convert import convert_file
 
+BLENDER_DOWNLOAD_URL = "https://www.blender.org/download/"
+
 
 def package_dir() -> Path:
     """Return the installed ``atomic_blender`` package directory."""
@@ -121,7 +123,8 @@ def find_blender_executable(explicit: str | None = None) -> Path:
             return candidate
 
     raise FileNotFoundError(
-        "Could not locate Blender executable. Pass --blender <path>, add blender to PATH, or set BLENDER_EXE."
+        "Could not locate Blender executable. "
+        f"Install Blender from {BLENDER_DOWNLOAD_URL}, pass --blender <path>, add blender to PATH, or set BLENDER_EXE."
     )
 
 
