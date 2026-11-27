@@ -31,7 +31,6 @@ from atomic_blender.cli import (
     package_dir,
     resolve_style_path,
 )
-from atomic_blender.convert import atoms_to_neutral_dict, read_structure, read_structure_frames
 from atomic_blender.elements import METAL_ELEMENTS, VIEW_PRESETS, classify_dropped_file
 from atomic_blender.viewport3d import (
     ViewportScene,
@@ -1107,6 +1106,8 @@ def inspect_structure_summary(
                 f"({alpha:.1f}°, {beta:.1f}°, {gamma:.1f}°)"
             )
         return f"{p.name} | {n_atoms} atoms ({elems}) | no periodic cell"
+
+    from atomic_blender.convert import read_structure
 
     atoms = read_structure(p, type_map=type_map.strip() or None)
     if replicate != (1, 1, 1) and atoms.cell.rank == 3:
@@ -3220,6 +3221,8 @@ class AtomicBlenderApp(tk.Tk):
             if p.suffix.lower() == ".json":
                 ghost_dict = json.loads(p.read_text(encoding="utf-8"))
             else:
+                from atomic_blender.convert import atoms_to_neutral_dict, read_structure
+
                 rep = (int(self.var_rep_x.get()), int(self.var_rep_y.get()), int(self.var_rep_z.get()))
                 atoms = read_structure(p, type_map=type_map)
                 eff_rep = rep if atoms.cell.rank == 3 else (1, 1, 1)
@@ -4122,6 +4125,8 @@ class AtomicBlenderApp(tk.Tk):
                 if not p.is_file():
                     self._queue.put(("inspect", (req_seq, path, f"File not found: {p.name}")))
                     return
+                from atomic_blender.convert import read_structure_frames
+
                 frames = read_structure_frames(
                     p,
                     type_map=type_map.strip() or None,

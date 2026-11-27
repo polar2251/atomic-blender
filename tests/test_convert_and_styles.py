@@ -1665,6 +1665,89 @@ class TestAtomicBlender(unittest.TestCase):
                 )
                 self.assertIn("REBUILD_PURGE_OK", res.stdout)
 
+    def test_lazy_ase_import_and_vectorized_viewport_and_instanced_bonds(self) -> None:
+        import subprocess
+        import sys
+        from atomic_blender.cli import find_blender_executable, resolve_style_path
+        from atomic_blender.viewport3d import ViewportScene, quat_to_axes
+
+        # 1. Importing cli and gui must NOT eagerly load heavy ASE modules
+        repo_root = Path(__file__).resolve().parent.parent
+        proc = subprocess.run(
+            [
+                sys.executable,
+                "-c",
+                "import sys, atomic_blender.cli, atomic_blender.gui; "
+                "loaded = [m for m in sys.modules if m == 'ase' or m.startswith('ase.')]; "
+                "assert not loaded, f'Eager ASE imports found: {loaded}'; "
+                "print('LAZY_OK')",
+            ],
+            cwd=str(repo_root),
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        self.assertIn("LAZY_OK", proc.stdout)
+
+        # 2. Vectorized ViewportScene bond segment cache + pick_atom_at + render_image
+        st = {
+            "symbols": ["Cu", "Cu", "Cu", "Cu"],
+            "positions": [[0.0, 0.0, 0.0], [2.2, 0.0, 0.0], [0.0, 2.2, 0.0], [2.2, 2.2, 0.0]],
+            "cell": [[6.0, 0.0, 0.0], [0.0, 6.0, 0.0], [0.0, 0.0, 6.0]],
+            "pbc": [True, True, True],
+            "has_cell": True,
+            "origin": [0.0, 0.0, 0.0],
+        }
+        style = json.loads(resolve_style_path("studio").read_text(encoding="utf-8"))
+        vp = ViewportScene.from_neutral_dict(st, style, bonds_mode="auto", bond_color="bicolor")
+        vp.fit_camera(aspect=1.0)
+        seg_p0, seg_p1, seg_a, seg_b, seg_cols = vp._get_trimmed_bond_segments()
+        self.assertEqual(len(seg_p0), 12)  # 6 Cu-Cu pairs (4 edges + 2 diagonals) * 2 bicolor halves
+        self.assertEqual(len(seg_p1), 12)
+        self.assertEqual(len(seg_a), 12)
+        self.assertEqual(len(seg_cols), 12)
+        # Cached tuple returned on repeated calls
+        self.assertIs(vp._get_trimmed_bond_segments()[0], seg_p0)
+        img_drag = vp.render_image(300, 300, 300, 300, interactive=True)
+        img_hq = vp.render_image(300, 300, 300, 300, interactive=False)
+        self.assertEqual(img_drag.size, (300, 300))
+        self.assertEqual(img_hq.size, (300, 300))
+        # Center of 4 symmetric Cu atoms doesn't hit any atom; projecting atom 0 directly hits atom 0
+        right, up, _back = quat_to_axes(vp.quat)
+        rel0 = vp.positions[0] - vp.target
+        u0 = 0.5 + float((rel0 @ right) / vp.ortho_scale)
+        v0 = 0.5 - float((rel0 @ up) / vp.ortho_scale)
+        self.assertEqual(vp.pick_atom_at(u0, v0, 300, 300, 286.0, 286.0), 0)
+
+        # 3. Blender scene_builder shares instanced unit-cylinder prototype mesh across all same-material bonds
+        try:
+            blender_exe = find_blender_executable()
+        except FileNotFoundError:
+            blender_exe = None
+        if blender_exe is not None:
+            with tempfile.TemporaryDirectory() as tmp:
+                drv = Path(tmp) / "test_bond_instancing.py"
+                drv.write_text(
+                    "import bpy, sys\n"
+                    f"sys.path.insert(0, {str(repo_root)!r})\n"
+                    "from atomic_blender import scene_builder\n"
+                    f"st = {st!r}\n"
+                    "style = {'material': {'roughness': 0.35}, 'bonds': {'enabled': True, 'mode': 'auto', 'color_mode': 'bicolor'}, 'cell': {'enabled': False}}\n"
+                    "scene_builder.build_scene(st, style, view='iso', reset_factory=True)\n"
+                    "proto_bonds = [m for m in bpy.data.meshes if m.name.startswith('proto_bond_')]\n"
+                    "assert len(proto_bonds) == 1, f'Expected 1 shared bond proto mesh, got {[m.name for m in proto_bonds]}'\n"
+                    "assert proto_bonds[0].users == 12, f'Expected 12 bond instances, got {proto_bonds[0].users}'\n"
+                    "print('BOND_INSTANCE_OK')\n",
+                    encoding="utf-8",
+                )
+                b_proc = subprocess.run(
+                    [str(blender_exe), "--background", "--factory-startup", "--python-exit-code", "1", "--python", str(drv)],
+                    capture_output=True,
+                    text=True,
+                    check=True,
+                )
+                self.assertIn("BOND_INSTANCE_OK", b_proc.stdout)
+
 
 if __name__ == "__main__":
     unittest.main()

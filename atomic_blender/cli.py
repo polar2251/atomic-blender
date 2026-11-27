@@ -13,8 +13,6 @@ import tempfile
 import zipfile
 from pathlib import Path
 
-from atomic_blender.convert import convert_file
-
 BLENDER_DOWNLOAD_URL = "https://www.blender.org/download/"
 
 
@@ -160,6 +158,8 @@ def cmd_render(args: argparse.Namespace) -> int:
         if args.input.suffix.lower() == ".json" and tuple(args.replicate) == (1, 1, 1) and not args.no_wrap and not args.format:
             neutral_json = args.input.resolve()
         else:
+            from atomic_blender.convert import convert_file
+
             neutral_json = tmp_path / "structure.json"
             convert_file(
                 input_path=args.input,
@@ -218,6 +218,8 @@ def cmd_render(args: argparse.Namespace) -> int:
 
 
 def cmd_convert(args: argparse.Namespace) -> int:
+    from atomic_blender.convert import convert_file
+
     convert_file(
         input_path=args.input,
         output_json=args.out,
