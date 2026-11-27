@@ -156,10 +156,11 @@ def generate_feature_test_structures(examples_dir: Path) -> list[Path]:
     neb_frames: list[Atoms] = []
     for k in range(5):
         t = k / 4.0
-        # Slight transition-state barrier arc (+0.55 A at midpoint t=0.5)
+        # Slight transition-state barrier arc (+0.55 A at midpoint t=0.5) with relative energy profile
         pos_o = (1.0 - t) * p_start + t * p_end + np.array([0.0, 0.0, 0.55 * math.sin(math.pi * t)])
         frame = neb_base.copy()
         frame += Atoms("O", positions=[pos_o])
+        frame.info["energy"] = round(-120.0 + 0.65 * (math.sin(math.pi * t) ** 2), 4)
         neb_frames.append(frame)
     p5 = examples_dir / "05_neb_diffusion_5frames.xyz"
     ase.io.write(str(p5), neb_frames, format="extxyz")

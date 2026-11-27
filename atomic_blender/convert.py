@@ -89,27 +89,46 @@ def atoms_to_neutral_dict(
         raise ValueError(f"Replication counts must be >= 1, got {replicate}")
 
     has_cell = bool(work.cell.rank == 3)
-    eff_pbc = [bool(p) for p in work.pbc] if any(work.pbc) else ([True, True, True] if has_cell else [False, False, False])
-    if wrap and has_cell:
-        work.wrap(pbc=eff_pbc)
+    pbc_flags = [bool(p) for p in work.pbc]
+    if wrap and has_cell and any(pbc_flags):
+        work.wrap(pbc=pbc_flags)
 
     if (rx, ry, rz) != (1, 1, 1):
         if not has_cell:
             raise ValueError("Cannot replicate a non-periodic structure without a 3D cell.")
         work = work.repeat((rx, ry, rz))
-        if wrap:
-            work.wrap(pbc=eff_pbc)
+        if wrap and any(pbc_flags):
+            work.wrap(pbc=pbc_flags)
 
-    return {
+    energy_ev: float | None = None
+    for e_key in ("energy", "free_energy", "E", "dft_energy"):
+        if e_key in atoms.info:
+            try:
+                energy_ev = float(atoms.info[e_key])
+                break
+            except Exception:
+                pass
+    if energy_ev is None and getattr(atoms, "_calc", None) is not None:
+        try:
+            res = getattr(atoms._calc, "results", {})
+            if isinstance(res, dict) and "energy" in res:
+                energy_ev = float(res["energy"])
+        except Exception:
+            pass
+
+    payload: dict[str, Any] = {
         "schema_version": 1,
         "source": source,
         "symbols": work.get_chemical_symbols(),
         "positions": [[float(x), float(y), float(z)] for x, y, z in work.get_positions()],
         "cell": [[float(x), float(y), float(z)] for x, y, z in work.cell.array],
-        "pbc": [bool(p) for p in work.pbc],
+        "pbc": pbc_flags,
         "has_cell": has_cell,
         "origin": [0.0, 0.0, 0.0],
     }
+    if energy_ev is not None:
+        payload["energy_ev"] = energy_ev
+    return payload
 
 
 def read_structure_frames(
