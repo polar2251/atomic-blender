@@ -943,6 +943,27 @@ class BlenderPreviewWorker:
             self._pending = dict(payload)
             self._cond.notify_all()
 
+    @staticmethod
+    def _cleanup_popen(proc: subprocess.Popen[str]) -> None:
+        """Terminate ``proc`` if still alive, reap it, and close all stdio pipes cleanly."""
+        if getattr(proc, "stdin", None) is not None:
+            try:
+                proc.stdin.close()  # type: ignore[union-attr]
+            except Exception:
+                pass
+        try:
+            if proc.poll() is None:
+                proc.kill()
+            proc.wait(timeout=1.5)
+        except Exception:
+            pass
+        for pipe in (getattr(proc, "stdout", None), getattr(proc, "stderr", None)):
+            if pipe is not None:
+                try:
+                    pipe.close()
+                except Exception:
+                    pass
+
     def _close_proc(self) -> None:
         proc = self._proc
         self._proc = None
@@ -953,14 +974,12 @@ class BlenderPreviewWorker:
             if proc.poll() is None and proc.stdin is not None:
                 proc.stdin.write(json.dumps({"action": "quit"}) + "\n")
                 proc.stdin.flush()
+                proc.stdin.close()
                 proc.wait(timeout=1.5)
         except Exception:
             pass
-        try:
-            if proc.poll() is None:
-                proc.kill()
-        except Exception:
-            pass
+        finally:
+            self._cleanup_popen(proc)
 
     def _ensure_proc(self, blender_exe: str) -> subprocess.Popen[str]:
         if self._proc is not None and self._proc.poll() is None and self._active_blender == blender_exe:
@@ -1001,10 +1020,7 @@ class BlenderPreviewWorker:
                 ready = True
                 break
         if not ready:
-            try:
-                proc.kill()
-            except Exception:
-                pass
+            self._cleanup_popen(proc)
             raise RuntimeError("Blender preview server exited before becoming ready.")
         self._proc = proc
         self._active_blender = blender_exe
@@ -1076,7 +1092,8 @@ def inspect_structure_summary(
     if p.suffix.lower() == ".json":
         import json
 
-        data = json.loads(p.read_text(encoding="utf-8"))
+        loaded = json.loads(p.read_text(encoding="utf-8"))
+        data = loaded[0] if isinstance(loaded, list) and loaded else (loaded if isinstance(loaded, dict) else {})
         syms = data.get("symbols", [])
         elems = ", ".join(sorted(set(syms)))
         eff_rep = replicate if data.get("has_cell", False) else (1, 1, 1)
@@ -1169,6 +1186,7 @@ class AtomicBlenderApp(tk.Tk):
         self._busy = False
         self._task_start = 0.0
         self._inspect_after_id: str | None = None
+        self._inspect_seq: int = 0
         self._hq_after_id: str | None = None
         self._preview_path: Path | None = None
         self._pil_image: Any = None
@@ -4081,12 +4099,15 @@ class AtomicBlenderApp(tk.Tk):
             self._request_blender_preview()
 
     def _schedule_inspect(self) -> None:
+        self._inspect_seq += 1
         if self._inspect_after_id is not None:
             self.after_cancel(self._inspect_after_id)
         self._inspect_after_id = self.after(150, self._run_inspect_async)
 
     def _run_inspect_async(self) -> None:
         self._inspect_after_id = None
+        self._inspect_seq += 1
+        req_seq = self._inspect_seq
         path = extract_input_path(self.var_input.get())
         if not path:
             self.var_inspector.set("")
@@ -4099,7 +4120,7 @@ class AtomicBlenderApp(tk.Tk):
             try:
                 p = Path(path).expanduser()
                 if not p.is_file():
-                    self._queue.put(("inspect", f"File not found: {p.name}"))
+                    self._queue.put(("inspect", (req_seq, path, f"File not found: {p.name}")))
                     return
                 frames = read_structure_frames(
                     p,
@@ -4111,9 +4132,9 @@ class AtomicBlenderApp(tk.Tk):
                 summary = inspect_structure_summary(path, type_map=type_map, replicate=eff_rep)
                 if len(frames) > 1:
                     summary = f"{summary} | {len(frames)} frames"
-                self._queue.put(("structure_frames", (summary, frames)))
+                self._queue.put(("structure_frames", (req_seq, path, summary, frames)))
             except Exception as exc:
-                self._queue.put(("inspect", f"Inspect error: {exc}"))
+                self._queue.put(("inspect", (req_seq, path, f"Inspect error: {exc}")))
 
         threading.Thread(target=worker, daemon=True).start()
 
@@ -5334,9 +5355,22 @@ class AtomicBlenderApp(tk.Tk):
             except queue.Empty:
                 break
             if kind == "inspect":
-                self.var_inspector.set(str(payload))
+                if isinstance(payload, tuple) and len(payload) == 3:
+                    req_seq, req_path, msg = payload
+                    cur_path = extract_input_path(self.var_input.get())
+                    if req_seq != self._inspect_seq or (cur_path and cur_path != req_path):
+                        continue
+                    self.var_inspector.set(str(msg))
+                else:
+                    self.var_inspector.set(str(payload))
             elif kind == "structure":
-                summary, neutral = payload
+                if len(payload) == 4:
+                    req_seq, req_path, summary, neutral = payload
+                    cur_path = extract_input_path(self.var_input.get())
+                    if req_seq != self._inspect_seq or (cur_path and cur_path != req_path):
+                        continue
+                else:
+                    summary, neutral = payload
                 self.var_inspector.set(str(summary))
                 self._selected_atoms.clear()
                 self._selection_order.clear()
@@ -5357,7 +5391,13 @@ class AtomicBlenderApp(tk.Tk):
                     self._add_recent_file(in_raw)
                 self._rebuild_viewport(reset_camera=True, trigger_preview=True)
             elif kind == "structure_frames":
-                summary, frames = payload
+                if len(payload) == 4:
+                    req_seq, req_path, summary, frames = payload
+                    cur_path = extract_input_path(self.var_input.get())
+                    if req_seq != self._inspect_seq or (cur_path and cur_path != req_path):
+                        continue
+                else:
+                    summary, frames = payload
                 self.var_inspector.set(str(summary))
                 self._selected_atoms.clear()
                 self._selection_order.clear()

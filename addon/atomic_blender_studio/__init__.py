@@ -108,6 +108,109 @@ def _default_python_exe() -> str:
     return cfg.get("python_exe", "python")
 
 
+def _transform_neutral_json_dict(
+    payload: dict[str, Any],
+    replicate: tuple[int, int, int],
+    wrap: bool,
+) -> dict[str, Any]:
+    """Apply periodic wrapping and supercell replication directly to neutral JSON in pure Python."""
+    rx, ry, rz = (int(replicate[0]), int(replicate[1]), int(replicate[2]))
+    if rx < 1 or ry < 1 or rz < 1:
+        raise ValueError(f"Replication counts must be >= 1, got {replicate}")
+
+    out = dict(payload)
+    symbols = list(out.get("symbols", []))
+    positions = [[float(c) for c in p] for p in out.get("positions", [])]
+    cell = [[float(c) for c in row] for row in out.get("cell", [[0.0, 0.0, 0.0]] * 3)]
+    origin = [float(c) for c in out.get("origin", [0.0, 0.0, 0.0])]
+    has_cell = bool(out.get("has_cell", False))
+    raw_pbc = out.get("pbc", [has_cell, has_cell, has_cell])
+    pbc_flags = [bool(raw_pbc[k]) if k < len(raw_pbc) else has_cell for k in range(3)]
+
+    # Cell row vectors a, b, c; matrix M has rows a, b, c so r = origin + frac * M
+    a, b, c = cell[0], cell[1], cell[2]
+    det = (
+        a[0] * (b[1] * c[2] - b[2] * c[1])
+        - a[1] * (b[0] * c[2] - b[2] * c[0])
+        + a[2] * (b[0] * c[1] - b[1] * c[0])
+    )
+    if wrap and has_cell and any(pbc_flags) and abs(det) > 1e-12 and positions:
+        # Columns of inv(M.T) = rows of inv(M).T; compute cofactor/det for M.T
+        m00, m01, m02 = a[0], b[0], c[0]
+        m10, m11, m12 = a[1], b[1], c[1]
+        m20, m21, m22 = a[2], b[2], c[2]
+        inv = [
+            [
+                (m11 * m22 - m12 * m21) / det,
+                (m02 * m21 - m01 * m22) / det,
+                (m01 * m12 - m02 * m11) / det,
+            ],
+            [
+                (m12 * m20 - m10 * m22) / det,
+                (m00 * m22 - m02 * m20) / det,
+                (m02 * m10 - m00 * m12) / det,
+            ],
+            [
+                (m10 * m21 - m11 * m20) / det,
+                (m01 * m20 - m00 * m21) / det,
+                (m00 * m11 - m01 * m10) / det,
+            ],
+        ]
+        wrapped_pos = []
+        for p in positions:
+            rx_v, ry_v, rz_v = p[0] - origin[0], p[1] - origin[1], p[2] - origin[2]
+            fa = inv[0][0] * rx_v + inv[0][1] * ry_v + inv[0][2] * rz_v
+            fb = inv[1][0] * rx_v + inv[1][1] * ry_v + inv[1][2] * rz_v
+            fc = inv[2][0] * rx_v + inv[2][1] * ry_v + inv[2][2] * rz_v
+            if pbc_flags[0]:
+                fa %= 1.0
+            if pbc_flags[1]:
+                fb %= 1.0
+            if pbc_flags[2]:
+                fc %= 1.0
+            wrapped_pos.append([
+                origin[0] + fa * a[0] + fb * b[0] + fc * c[0],
+                origin[1] + fa * a[1] + fb * b[1] + fc * c[1],
+                origin[2] + fa * a[2] + fb * b[2] + fc * c[2],
+            ])
+        positions = wrapped_pos
+
+    if (rx, ry, rz) != (1, 1, 1):
+        if not has_cell or abs(det) <= 1e-12:
+            raise ValueError("Cannot replicate a non-periodic structure without a 3D cell.")
+        n_orig = len(symbols)
+        rep_symbols: list[str] = []
+        rep_positions: list[list[float]] = []
+        for ix in range(rx):
+            for iy in range(ry):
+                for iz in range(rz):
+                    sx = ix * a[0] + iy * b[0] + iz * c[0]
+                    sy = ix * a[1] + iy * b[1] + iz * c[1]
+                    sz = ix * a[2] + iy * b[2] + iz * c[2]
+                    rep_symbols.extend(symbols)
+                    for p in positions:
+                        rep_positions.append([p[0] + sx, p[1] + sy, p[2] + sz])
+        symbols = rep_symbols
+        positions = rep_positions
+        cell = [
+            [a[0] * rx, a[1] * rx, a[2] * rx],
+            [b[0] * ry, b[1] * ry, b[2] * ry],
+            [c[0] * rz, c[1] * rz, c[2] * rz],
+        ]
+        for list_key in ("alphas", "radius_scales", "colors"):
+            raw_list = out.get(list_key)
+            if isinstance(raw_list, list) and len(raw_list) == n_orig:
+                out[list_key] = list(raw_list) * (rx * ry * rz)
+
+    out["symbols"] = symbols
+    out["positions"] = positions
+    out["cell"] = cell
+    out["pbc"] = pbc_flags
+    out["has_cell"] = has_cell
+    out["origin"] = origin
+    return out
+
+
 def _load_structure_any(
     filepath: Path,
     python_exe: str,
@@ -116,8 +219,10 @@ def _load_structure_any(
     wrap: bool,
 ) -> dict[str, Any]:
     """Load neutral JSON directly or invoke system Python ASE converter for any format."""
-    if filepath.suffix.lower() == ".json" and replicate == (1, 1, 1):
-        return json.loads(filepath.read_text(encoding="utf-8"))
+    if filepath.suffix.lower() == ".json":
+        data = json.loads(filepath.read_text(encoding="utf-8"))
+        frame = dict(data[-1]) if isinstance(data, list) else dict(data)
+        return _transform_neutral_json_dict(frame, replicate=replicate, wrap=wrap)
 
     cfg = _load_addon_config()
     repo_root = cfg.get("repo_root") or str(_ADDON_DIR.parent.parent)

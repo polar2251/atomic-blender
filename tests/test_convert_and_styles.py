@@ -1518,6 +1518,153 @@ class TestAtomicBlender(unittest.TestCase):
             app.destroy()
         self.assertIsNone(app._welcome_after_id)
 
+    def test_neutral_json_replication_stale_inspect_pipe_cleanup_and_scene_rebuild(self) -> None:
+        import importlib.util
+        import subprocess
+        from types import SimpleNamespace
+        from atomic_blender.cli import find_blender_executable
+        from atomic_blender.convert import convert_file, read_structure_frames
+        from atomic_blender.gui import AtomicBlenderApp, BlenderPreviewWorker
+
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_p = Path(tmp)
+            src_json = tmp_p / "cell.json"
+            out_json = tmp_p / "rep.json"
+            payload = {
+                "schema_version": 1,
+                "source": "unit_test",
+                "symbols": ["Cu", "O"],
+                "positions": [[-0.5, 0.25, 1.0], [2.0, 2.0, 2.0]],
+                "cell": [[4.0, 0.0, 0.0], [0.0, 4.0, 0.0], [0.0, 0.0, 4.0]],
+                "pbc": [True, True, True],
+                "has_cell": True,
+                "origin": [0.0, 0.0, 0.0],
+                "alphas": [1.0, 0.5],
+            }
+            src_json.write_text(json.dumps(payload), encoding="utf-8")
+
+            # 1. Neutral JSON replication & wrapping in convert_file and read_structure_frames
+            rep = convert_file(src_json, out_json, replicate=(2, 2, 1), wrap=True)
+            self.assertEqual(len(rep["symbols"]), 8)
+            self.assertEqual(rep["alphas"], [1.0, 0.5] * 4)
+            self.assertEqual(rep["cell"], [[8.0, 0.0, 0.0], [0.0, 8.0, 0.0], [0.0, 0.0, 4.0]])
+            self.assertAlmostEqual(rep["positions"][0][0], 3.5, places=6)
+
+            frames = read_structure_frames(src_json, replicate=(2, 1, 1), wrap=True)
+            self.assertEqual(len(frames), 1)
+            self.assertEqual(len(frames[0]["symbols"]), 4)
+
+            # 2. Addon neutral JSON loader replicates without failing on ASE
+            import ast
+            import math
+            from typing import Any
+            repo_root = Path(__file__).resolve().parent.parent
+            addon_path = repo_root / "atomic_blender" / "addon" / "atomic_blender_studio" / "__init__.py"
+            addon_src = addon_path.read_text(encoding="utf-8")
+            tree = ast.parse(addon_src, filename=str(addon_path))
+            selected_nodes = [
+                n for n in tree.body
+                if isinstance(n, ast.FunctionDef)
+                and n.name in {"_transform_neutral_json_dict", "_load_structure_any"}
+            ]
+            addon_ns: dict[str, Any] = {
+                "Any": Any,
+                "Path": Path,
+                "json": json,
+                "math": math,
+                "_ADDON_DIR": addon_path.parent,
+                "_load_addon_config": lambda: {},
+            }
+            exec(compile(ast.Module(body=selected_nodes, type_ignores=[]), str(addon_path), "exec"), addon_ns)
+            addon_rep = addon_ns["_load_structure_any"](src_json, "python", "", (2, 2, 1), True)
+            self.assertEqual(len(addon_rep["symbols"]), 8)
+            self.assertAlmostEqual(addon_rep["positions"][0][0], 3.5, places=6)
+
+            # 3. Stale async inspect results are discarded when a newer sequence/path is active
+            app = AtomicBlenderApp()
+            app.withdraw()
+            try:
+                old_p = tmp_p / "old.json"
+                cur_p = tmp_p / "cur.json"
+                old_p.write_text(json.dumps(payload), encoding="utf-8")
+                cur_p.write_text(json.dumps(payload), encoding="utf-8")
+                app.var_input.set(str(cur_p))
+                app._inspect_seq = 5
+                app._queue.put(("structure_frames", (4, str(old_p), "STALE", [dict(payload)])))
+                app._queue.put(("inspect", (4, str(old_p), "STALE_MSG")))
+                app._queue.put(("structure_frames", (5, str(cur_p), "FRESH", [dict(rep)])))
+                app._poll_queue()
+                self.assertEqual(app.var_inspector.get(), "FRESH")
+                assert app._structure_cache is not None
+                self.assertEqual(len(app._structure_cache["symbols"]), 8)
+            finally:
+                app.destroy()
+
+            # 4. Preview worker closes stdio pipes when cleaning up subprocesses
+            closed_flags = {"stdin": False, "stdout": False, "stderr": False, "killed": False, "waited": False}
+
+            class _FakePipe:
+                def __init__(self, key: str) -> None:
+                    self._key = key
+                def write(self, _s: str) -> int:
+                    return 0
+                def flush(self) -> None:
+                    pass
+                def close(self) -> None:
+                    closed_flags[self._key] = True
+
+            fake_proc = SimpleNamespace(
+                stdin=_FakePipe("stdin"),
+                stdout=_FakePipe("stdout"),
+                stderr=_FakePipe("stderr"),
+                poll=lambda: None,
+                kill=lambda: closed_flags.__setitem__("killed", True),
+                wait=lambda timeout=1.5: closed_flags.__setitem__("waited", True) or 0,
+            )
+            worker = BlenderPreviewWorker(on_done=lambda *_: None, on_error=lambda *_: None)
+            worker._proc = fake_proc  # type: ignore[assignment]
+            worker._close_proc()
+            self.assertTrue(all(closed_flags.values()), f"Expected all pipe cleanup steps: {closed_flags}")
+
+            # 5. Headless Blender integration: repeated build_scene(reset_factory=False) purges unused datablocks
+            try:
+                blender_exe = find_blender_executable()
+            except FileNotFoundError:
+                blender_exe = None
+            if blender_exe is not None:
+                drv = tmp_p / "test_rebuild_purge.py"
+                drv.write_text(
+                    "import bpy, importlib.util, pathlib, sys\n"
+                    f"sys.path.insert(0, {str(repo_root)!r})\n"
+                    "from atomic_blender import scene_builder\n"
+                    f"addon_spec = importlib.util.spec_from_file_location('ab_addon_real', {str(addon_path)!r})\n"
+                    "addon_mod = importlib.util.module_from_spec(addon_spec)\n"
+                    "addon_spec.loader.exec_module(addon_mod)\n"
+                    f"st_rep = addon_mod._load_structure_any(pathlib.Path({str(src_json)!r}), 'python', '', (2, 2, 1), True)\n"
+                    "assert len(st_rep['symbols']) == 8\n"
+                    "st = {'symbols': ['Cu', 'O'], 'positions': [[0,0,0],[1.9,0,0]], 'cell': [[4,0,0],[0,4,0],[0,0,4]], 'pbc': [True,True,True], 'has_cell': True, 'origin': [0,0,0]}\n"
+                    "style = {'material': {'roughness': 0.35}, 'bonds': {'enabled': True, 'mode': 'auto', 'color_mode': 'bicolor'}, 'cell': {'enabled': True}, 'render': {'resolution': [64, 64], 'samples': 2}}\n"
+                    "mesh_counts = []\n"
+                    "mat_counts = []\n"
+                    "for _ in range(3):\n"
+                    "    scene_builder.build_scene(st, style, view='iso', reset_factory=False)\n"
+                    "    mesh_counts.append(len(bpy.data.meshes))\n"
+                    "    mat_counts.append(len(bpy.data.materials))\n"
+                    "zero_meshes = [m.name for m in bpy.data.meshes if m.users == 0 and m.name.startswith(('proto_', 'bond_', 'cell_', 'poly_', 'cellvec_'))]\n"
+                    "zero_mats = [m.name for m in bpy.data.materials if m.users == 0 and m.name.startswith('mat_')]\n"
+                    "assert not zero_meshes and not zero_mats, f'Leaked datablocks: {zero_meshes} {zero_mats}'\n"
+                    "assert len(set(mesh_counts)) == 1 and len(set(mat_counts)) == 1, f'Datablocks accumulated: meshes={mesh_counts} mats={mat_counts}'\n"
+                    "print('REBUILD_PURGE_OK', mesh_counts, mat_counts)\n",
+                    encoding="utf-8",
+                )
+                res = subprocess.run(
+                    [str(blender_exe), "--background", "--factory-startup", "--python-exit-code", "1", "--python", str(drv)],
+                    capture_output=True,
+                    text=True,
+                    check=True,
+                )
+                self.assertIn("REBUILD_PURGE_OK", res.stdout)
+
 
 if __name__ == "__main__":
     unittest.main()

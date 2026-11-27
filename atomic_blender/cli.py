@@ -157,7 +157,7 @@ def cmd_render(args: argparse.Namespace) -> int:
 
     with tempfile.TemporaryDirectory(prefix="atomic_blender_") as tmpdir:
         tmp_path = Path(tmpdir)
-        if args.input.suffix.lower() == ".json" and args.replicate == [1, 1, 1] and not args.format:
+        if args.input.suffix.lower() == ".json" and tuple(args.replicate) == (1, 1, 1) and not args.no_wrap and not args.format:
             neutral_json = args.input.resolve()
         else:
             neutral_json = tmp_path / "structure.json"

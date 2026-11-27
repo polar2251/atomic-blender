@@ -177,11 +177,58 @@ def _element_material_kwargs(elem: str, style: dict[str, Any]) -> dict[str, floa
     return merged
 
 
+def _purge_unused_scene_datablocks(
+    meshes: set[Any],
+    materials: set[Any],
+    lights: set[Any],
+    cameras: set[Any],
+) -> None:
+    """Remove unused meshes, materials, lights, and cameras after clearing a rebuilt scene."""
+    prefixes = ("proto_", "bond_", "cell_", "poly_", "cellvec_", "mat_", "AtomicSun", "AtomicFill", "AtomicRim", "OrthoCam")
+    for block_pool, candidates in (
+        (bpy.data.meshes, meshes),
+        (bpy.data.lights, lights),
+        (bpy.data.cameras, cameras),
+        (bpy.data.materials, materials),
+    ):
+        for db in list(candidates):
+            try:
+                if getattr(db, "users", 1) == 0:
+                    block_pool.remove(db)
+            except Exception:
+                pass
+        for db in list(block_pool):
+            try:
+                if getattr(db, "users", 1) == 0 and db.name.startswith(prefixes):
+                    block_pool.remove(db)
+            except Exception:
+                pass
+
+
 def _ensure_collection(scene: bpy.types.Scene, clear_existing: bool) -> bpy.types.Collection:
-    """Return the dedicated collection, optionally removing any previously built objects."""
+    """Return the dedicated collection, removing previous objects and zero-user datablocks."""
     col = bpy.data.collections.get(COLLECTION_NAME)
+    old_meshes: set[Any] = set()
+    old_materials: set[Any] = set()
+    old_lights: set[Any] = set()
+    old_cameras: set[Any] = set()
     if col is not None and clear_existing:
         for obj in list(col.objects):
+            data = getattr(obj, "data", None)
+            if data is not None:
+                obj_type = getattr(obj, "type", "")
+                if obj_type == "MESH":
+                    old_meshes.add(data)
+                    for mat in getattr(data, "materials", ()):
+                        if mat is not None:
+                            old_materials.add(mat)
+                elif obj_type == "LIGHT":
+                    old_lights.add(data)
+                elif obj_type == "CAMERA":
+                    old_cameras.add(data)
+            for slot in getattr(obj, "material_slots", ()):
+                if getattr(slot, "material", None) is not None:
+                    old_materials.add(slot.material)
             bpy.data.objects.remove(obj, do_unlink=True)
     if clear_existing:
         # Remove Blender's default startup Cube/Light/Camera (which live in 'Collection')
@@ -189,6 +236,7 @@ def _ensure_collection(scene: bpy.types.Scene, clear_existing: bool) -> bpy.type
             obj = bpy.data.objects.get(default_name)
             if obj is not None:
                 bpy.data.objects.remove(obj, do_unlink=True)
+        _purge_unused_scene_datablocks(old_meshes, old_materials, old_lights, old_cameras)
     if col is None:
         col = bpy.data.collections.new(COLLECTION_NAME)
         scene.collection.children.link(col)
