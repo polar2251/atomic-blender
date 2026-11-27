@@ -460,18 +460,49 @@ class TestAtomicBlender(unittest.TestCase):
             app._rebuild_viewport(reset_camera=True, trigger_preview=False)
             assert app._vp_scene is not None
 
-            # Verify default Display Types states
-            self.assertTrue(app.var_disp_ball_stick.get())
+            # Verify default Display Types states (Van der Waals & Reference Axes defaults)
+            self.assertTrue(app.var_disp_vdw.get())
+            self.assertFalse(app.var_disp_ball_stick.get())
+            self.assertEqual(app.var_atom_style.get(), "Van der Waals")
+            self.assertEqual(tuple(app.combo_atom_style["values"]), ("Van der Waals", "Ball and Stick", "Licorice"))
+            self.assertEqual(app.var_guide_mode.get(), "Reference Axes")
+            self.assertEqual(
+                tuple(app.combo_guide_mode["values"]),
+                ("Reference Axes", "Reference Axes (a, b, c)", "Coordination Polyhedra"),
+            )
+            self.assertEqual(tuple(app.combo_texture["values"]), ("Studio", "Chalk", "Flat", "Metal"))
             self.assertTrue(app.var_show_cell.get())
             self.assertTrue(app.var_show_axes.get())
             self.assertTrue(app.var_axes_labels.get())
             self.assertTrue(app.var_axes_fixed.get())
             self.assertEqual(app._axes_pos, (0.12, 0.86))
 
+            # Switch guide dropdown to Reference Axes (a, b, c) and Coordination Polyhedra, then back
+            app.var_guide_mode.set("Reference Axes (a, b, c)")
+            app._on_guide_mode_selected()
+            self.assertTrue(app.var_show_axes.get())
+            self.assertTrue(app.var_show_cell_vectors.get())
+            self.assertFalse(app.var_show_polyhedra.get())
+
+            app.var_guide_mode.set("Coordination Polyhedra")
+            app._on_guide_mode_selected()
+            self.assertFalse(app.var_show_axes.get())
+            self.assertTrue(app.var_show_polyhedra.get())
+
+            app.var_guide_mode.set("Reference Axes")
+            app._on_guide_mode_selected()
+            self.assertTrue(app.var_show_axes.get())
+
+            # Switch Texture dropdown
+            app.var_texture_label.set("Metal")
+            app._on_texture_selected()
+            self.assertEqual(app.var_material_finish.get(), "metallic")
+
             # Switch to Licorice and toggle Atom Labels
             app._on_display_type_clicked("licorice")
             self.assertFalse(app.var_disp_ball_stick.get())
             self.assertTrue(app.var_disp_licorice.get())
+            self.assertEqual(app.var_atom_style.get(), "Licorice")
             self.assertAlmostEqual(app.var_radius_scale.get(), 0.42, places=2)
 
             app._on_display_type_clicked("atom_labels")
@@ -487,12 +518,13 @@ class TestAtomicBlender(unittest.TestCase):
             self.assertEqual(app._drag_mode, "axes")
             self.assertFalse(app.var_axes_fixed.get())
 
-            ev_move = type("E", (), {"x": 450, "y": 150, "state": 0})()
+            drag_tx = int(max(450, app.canvas.winfo_width() * 0.78))
+            ev_move = type("E", (), {"x": drag_tx, "y": 150, "state": 0})()
             app._on_canvas_motion(ev_move)  # type: ignore[arg-type]
             self.assertGreater(app._axes_pos[0], 0.5)
             self.assertLess(app._axes_pos[1], 0.5)
 
-            ev_up = type("E", (), {"x": 450, "y": 150, "state": 0})()
+            ev_up = type("E", (), {"x": drag_tx, "y": 150, "state": 0})()
             app._on_canvas_mouse_up(ev_up)  # type: ignore[arg-type]
             self.assertFalse(app._dragging)
 
@@ -1432,9 +1464,12 @@ class TestAtomicBlender(unittest.TestCase):
         app.withdraw()
         try:
             self.assertFalse(hasattr(app, "_repr_thumb_cards"))
-            self.assertIn("ball_stick", app._display_checks)
-            self.assertIn("licorice", app._display_checks)
-            self.assertIn("vdw", app._display_checks)
+            self.assertIn("atom_style", app._display_checks)
+            self.assertIn("reference_axes", app._display_checks)
+            self.assertIn("crystal_lattice", app._display_checks)
+            self.assertEqual(app.var_atom_style.get(), "Van der Waals")
+            self.assertEqual(app.var_guide_mode.get(), "Reference Axes")
+            self.assertEqual(app.var_texture_label.get(), "Studio")
             # Settings button moved into the same preview toolbar as Log toggle
             self.assertEqual(app.btn_settings.winfo_parent(), app._btn_log_toggle.winfo_parent())
 
