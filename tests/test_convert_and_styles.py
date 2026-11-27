@@ -1179,6 +1179,35 @@ class TestAtomicBlender(unittest.TestCase):
             finally:
                 app.destroy()
 
+    def test_missing_blender_detection_and_download_prompt(self) -> None:
+        from unittest.mock import patch
+        from atomic_blender.cli import BLENDER_DOWNLOAD_URL
+        from atomic_blender.gui import AtomicBlenderApp
+
+        with patch("atomic_blender.gui.find_blender_executable", side_effect=FileNotFoundError("not found")):
+            app = AtomicBlenderApp(prompt_missing_blender=False)
+            app.withdraw()
+            try:
+                self.assertEqual(app.var_blender.get(), "")
+                with (
+                    patch("atomic_blender.gui.messagebox.askyesno", return_value=False) as mock_ask,
+                    patch("atomic_blender.gui.webbrowser.open") as mock_open,
+                ):
+                    app._check_blender_on_startup()
+                    mock_ask.assert_called_once()
+                    mock_open.assert_not_called()
+
+                # Startup prompt only fires once automatically; render action forces prompt again
+                with (
+                    patch("atomic_blender.gui.messagebox.askyesno", return_value=True) as mock_ask,
+                    patch("atomic_blender.gui.webbrowser.open") as mock_open,
+                ):
+                    app._on_render()
+                    mock_ask.assert_called_once()
+                    mock_open.assert_called_once_with(BLENDER_DOWNLOAD_URL)
+            finally:
+                app.destroy()
+
 
 if __name__ == "__main__":
     unittest.main()

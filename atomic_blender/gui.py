@@ -18,10 +18,11 @@ import time
 import tkinter as tk
 from tkinter import colorchooser, filedialog, messagebox, scrolledtext, ttk
 from typing import Any
+import webbrowser
 
 import numpy as np
 
-from atomic_blender.cli import _collect_style_files, find_blender_executable, resolve_style_path
+from atomic_blender.cli import BLENDER_DOWNLOAD_URL, _collect_style_files, find_blender_executable, resolve_style_path
 from atomic_blender.convert import atoms_to_neutral_dict, read_structure, read_structure_frames
 from atomic_blender.elements import METAL_ELEMENTS, VIEW_PRESETS, classify_dropped_file
 from atomic_blender.viewport3d import (
@@ -996,7 +997,7 @@ def _enable_hidpi() -> None:
 class AtomicBlenderApp(tk.Tk):
     """Desktop GUI client for atomic-blender."""
 
-    def __init__(self, initial_input: str | None = None) -> None:
+    def __init__(self, initial_input: str | None = None, prompt_missing_blender: bool = False) -> None:
         _enable_hidpi()
         super().__init__()
         self.title("Atomic Blender Studio — Desktop Client")
@@ -1044,6 +1045,8 @@ class AtomicBlenderApp(tk.Tk):
         )
 
         self._init_variables(initial_input)
+        self._prompt_missing_blender = bool(prompt_missing_blender)
+        self._blender_prompted = False
         self._build_layout()
         self._wndproc_ref: Any = None
         self._orig_wndproc: Any = None
@@ -1054,6 +1057,57 @@ class AtomicBlenderApp(tk.Tk):
         self._poll_after_id = self.after(100, self._poll_queue)
         if initial_input:
             self._schedule_inspect()
+        if self._prompt_missing_blender and not self.var_blender.get().strip():
+            self.after(250, self._check_blender_on_startup)
+
+    def _has_valid_blender(self) -> bool:
+        """Return True if a configured or auto-detected Blender executable exists on disk."""
+        raw = self.var_blender.get().strip()
+        if raw:
+            try:
+                resolved = find_blender_executable(raw)
+                self.var_blender.set(str(resolved))
+                return True
+            except FileNotFoundError:
+                return False
+        try:
+            detected = find_blender_executable()
+            self.var_blender.set(str(detected))
+            return True
+        except FileNotFoundError:
+            return False
+
+    def prompt_blender_install(self, force: bool = False) -> bool:
+        """Ask whether to open the official Blender download page when Blender is missing."""
+        if not force and self._blender_prompted:
+            return False
+        self._blender_prompted = True
+        open_page = messagebox.askyesno(
+            "Blender Not Found",
+            "Blender (4.x / 5.x) was not detected on this system.\n\n"
+            "You can still use the interactive 3D viewport, measurements, slicing, and trajectory preview, "
+            "but high-resolution Cycles rendering and .blend export require Blender.\n\n"
+            f"Open the official Blender download page now?\n({BLENDER_DOWNLOAD_URL})",
+            parent=self,
+        )
+        if open_page:
+            webbrowser.open(BLENDER_DOWNLOAD_URL)
+            self.var_status.set(f"Opened Blender download page: {BLENDER_DOWNLOAD_URL}")
+            return True
+        self.var_status.set("Blender not detected (3D viewport active; set path in Settings -> Blender)")
+        return False
+
+    def _check_blender_on_startup(self) -> None:
+        if getattr(self, "_destroyed", False):
+            return
+        if not self._has_valid_blender():
+            self.prompt_blender_install(force=False)
+
+    def _ensure_blender_available(self) -> bool:
+        if self._has_valid_blender():
+            return True
+        self.prompt_blender_install(force=True)
+        return False
 
     def _enable_dark_titlebar(self) -> None:
         """Enable dark window chrome on Windows 10/11."""
@@ -2743,6 +2797,8 @@ class AtomicBlenderApp(tk.Tk):
     def _on_render_top_side_panel(self) -> None:
         if self._busy:
             return
+        if not self._ensure_blender_available():
+            return
         try:
             cfg = self._collect_config()
             in_path = validate_gui_config(cfg)
@@ -2888,6 +2944,8 @@ class AtomicBlenderApp(tk.Tk):
 
     def _on_batch_render_files(self) -> None:
         if self._busy:
+            return
+        if not self._ensure_blender_available():
             return
         paths = filedialog.askopenfilenames(
             title="Select Structures for Batch Render",
@@ -3055,6 +3113,8 @@ class AtomicBlenderApp(tk.Tk):
 
     def _on_render_path_strip(self) -> None:
         if self._busy:
+            return
+        if not self._ensure_blender_available():
             return
         if len(self._trajectory_frames) < 2:
             messagebox.showinfo("Path Strip", "Load a multi-frame trajectory (.xyz / .extxyz / .traj) first.")
@@ -3872,6 +3932,8 @@ class AtomicBlenderApp(tk.Tk):
     def _on_render(self) -> None:
         if self._busy:
             return
+        if not self._ensure_blender_available():
+            return
         try:
             cfg = self._collect_config()
             in_path = validate_gui_config(cfg)
@@ -3887,6 +3949,8 @@ class AtomicBlenderApp(tk.Tk):
 
     def _on_open_in_blender(self) -> None:
         if self._busy:
+            return
+        if not self._ensure_blender_available():
             return
         try:
             cfg = self._collect_config()
@@ -4869,7 +4933,7 @@ class AtomicBlenderApp(tk.Tk):
 
 def launch_gui(initial_input: str | None = None) -> int:
     """Launch the desktop GUI event loop."""
-    app = AtomicBlenderApp(initial_input=initial_input)
+    app = AtomicBlenderApp(initial_input=initial_input, prompt_missing_blender=True)
     app.mainloop()
     return 0
 
