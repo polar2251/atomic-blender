@@ -19,13 +19,23 @@ BLENDER_DOWNLOAD_URL = "https://www.blender.org/download/"
 
 
 def package_dir() -> Path:
-    """Return the installed ``atomic_blender`` package directory."""
+    """Return the installed or PyInstaller-bundled ``atomic_blender`` package directory."""
+    if getattr(sys, "frozen", False) and hasattr(sys, "_MEIPASS"):
+        bundled = Path(getattr(sys, "_MEIPASS")) / "atomic_blender"
+        if bundled.is_dir():
+            return bundled.resolve()
     return Path(__file__).resolve().parent
 
 
 def package_root() -> Path:
     """Return parent directory of the ``atomic_blender`` package (repo root or site-packages)."""
     return package_dir().parent
+
+
+def _subprocess_no_window_kwargs() -> dict[str, int]:
+    """Hide console windows on Windows when invoked from a GUI process."""
+    flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+    return {"creationflags": flags} if flags else {}
 
 
 def _style_search_dirs() -> list[Path]:
@@ -203,7 +213,7 @@ def cmd_render(args: argparse.Namespace) -> int:
         existing_pp = env.get("PYTHONPATH", "")
         env["PYTHONPATH"] = f"{root_str}{os.pathsep}{existing_pp}" if existing_pp else root_str
 
-        proc = subprocess.run(blender_args, env=env)
+        proc = subprocess.run(blender_args, env=env, **_subprocess_no_window_kwargs())
         return proc.returncode
 
 
@@ -283,6 +293,7 @@ def cmd_install_addon(args: argparse.Namespace) -> int:
             capture_output=True,
             text=True,
             check=True,
+            **_subprocess_no_window_kwargs(),
         )
         addons_dir = None
         for line in probe.stdout.splitlines():
@@ -304,8 +315,430 @@ def cmd_install_addon(args: argparse.Namespace) -> int:
                 "import bpy; bpy.ops.preferences.addon_enable(module='atomic_blender_studio'); bpy.ops.wm.save_userpref()",
             ],
             check=True,
+            **_subprocess_no_window_kwargs(),
         )
     print(f"Installed addon 'atomic_blender_studio' -> {target_dir}")
+    return 0
+
+
+def render_app_logo_with_blender(
+    png_out: Path | None = None,
+    ico_out: Path | None = None,
+    blender_exe: Path | None = None,
+) -> tuple[Path, Path]:
+    """Render a high-visibility, low-reflection 3D molecule logo in Blender Cycles."""
+    from PIL import Image, ImageDraw
+
+    assets_dir = Path(__file__).resolve().parent / "assets"
+    assets_dir.mkdir(parents=True, exist_ok=True)
+    png_target = (png_out or (assets_dir / "logo.png")).resolve()
+    ico_target = (ico_out or (assets_dir / "logo.ico")).resolve()
+    blender = find_blender_executable(str(blender_exe) if blender_exe else None)
+    scene_script = Path(__file__).resolve().parent / "scene_builder.py"
+
+    # Place atoms in the iso camera frame (az=35 deg, el=20 deg) so all 3 bonds & 4 spheres read cleanly at 16-256 px
+    logo_structure = {
+        "schema_version": 1,
+        "source": "logo",
+        "symbols": ["Si", "O", "C", "N"],
+        "positions": [
+            [0.0, 0.0, 0.0],
+            [-0.59, -0.42, 2.02],
+            [1.35, -1.35, -0.92],
+            [-1.36, 1.75, -1.16],
+        ],
+        "cell": [[10.0, 0.0, 0.0], [0.0, 10.0, 0.0], [0.0, 0.0, 10.0]],
+        "pbc": [False, False, False],
+        "has_cell": False,
+        "origin": [0.0, 0.0, 0.0],
+    }
+    logo_style = {
+        "name": "logo_matte",
+        "elements": {
+            "colors": {
+                "Si": "#14B8A6",
+                "O": "#FB923C",
+                "C": "#38BDF8",
+                "N": "#F1F5F9",
+            },
+            "radii": {
+                "Si": 0.72,
+                "O": 0.58,
+                "C": 0.58,
+                "N": 0.58,
+            },
+            "radius_scale": 1.0,
+        },
+        "material": {
+            "roughness": 0.92,
+            "specular": 0.05,
+            "metallic": 0.0,
+            "coat_weight": 0.0,
+            "subsurface_weight": 0.04,
+            "ao_factor": 0.14,
+            "metal": {"roughness": 0.92, "specular": 0.05, "metallic": 0.0, "coat_weight": 0.0},
+            "nonmetal": {"roughness": 0.92, "specular": 0.05, "metallic": 0.0, "coat_weight": 0.0},
+        },
+        "atom_mesh": {"segments": 40, "ring_count": 20, "smooth": True},
+        "bonds": {
+            "enabled": True,
+            "mode": "table",
+            "color_mode": "bicolor",
+            "radius": 0.21,
+            "segments": 24,
+            "smooth": True,
+            "cutoffs": {"Si-O": 2.6, "Si-C": 2.6, "Si-N": 2.6},
+        },
+        "cell": {"enabled": False},
+        "lighting": {
+            "key": {"energy": 2.2, "angle_deg": 40.0, "elevation_deg": 48.0, "azimuth_deg": 38.0},
+            "fill": {"energy": 145.0, "size": 16.0, "distance": 11.0, "elevation_deg": 24.0, "azimuth_deg": -52.0},
+            "rim": {"energy": 75.0, "size": 12.0, "distance": 12.0, "elevation_deg": -12.0, "azimuth_deg": 195.0},
+            "background_strength": 0.55,
+            "background_color": [0.9, 0.92, 0.95],
+        },
+        "camera": {"margin": 1.04},
+        "render": {"resolution": [512, 512], "samples": 48, "transparent": True},
+    }
+
+    with tempfile.TemporaryDirectory(prefix="atomic_logo_") as tmpdir:
+        tmp_path = Path(tmpdir)
+        s_json = tmp_path / "logo_struct.json"
+        st_json = tmp_path / "logo_style.json"
+        raw_png = tmp_path / "raw_mol.png"
+        s_json.write_text(json.dumps(logo_structure, indent=2), encoding="utf-8")
+        st_json.write_text(json.dumps(logo_style, indent=2), encoding="utf-8")
+
+        env = os.environ.copy()
+        root_str = str(Path(__file__).resolve().parent.parent)
+        existing_pp = env.get("PYTHONPATH", "")
+        env["PYTHONPATH"] = f"{root_str}{os.pathsep}{existing_pp}" if existing_pp else root_str
+
+        subprocess.run(
+            [
+                str(blender),
+                "--background",
+                "--factory-startup",
+                "--python",
+                str(scene_script),
+                "--",
+                "--structure",
+                str(s_json),
+                "--style",
+                str(st_json),
+                "--view",
+                "iso",
+                "--out",
+                str(raw_png),
+            ],
+            check=True,
+            env=env,
+            **_subprocess_no_window_kwargs(),
+        )
+
+        fg = Image.open(raw_png).convert("RGBA")
+        ss_size = 1024
+        size = 512
+        badge = Image.new("RGBA", (ss_size, ss_size), (0, 0, 0, 0))
+        draw = ImageDraw.Draw(badge, "RGBA")
+        draw.rounded_rectangle(
+            (28, 28, ss_size - 28, ss_size - 28),
+            radius=220,
+            fill=(15, 20, 30, 255),
+            outline=(20, 184, 166, 240),
+            width=22,
+        )
+        badge = badge.resize((size, size), Image.Resampling.LANCZOS)
+
+        bbox = fg.getbbox()
+        if bbox is not None:
+            fg = fg.crop(bbox)
+        target_box = int(size * 0.78)
+        scale = target_box / max(1, max(fg.width, fg.height))
+        nw = max(1, int(round(fg.width * scale)))
+        nh = max(1, int(round(fg.height * scale)))
+        fg_resized = fg.resize((nw, nh), Image.Resampling.LANCZOS)
+        badge.alpha_composite(fg_resized, dest=((size - nw) // 2, (size - nh) // 2))
+
+        png_target.parent.mkdir(parents=True, exist_ok=True)
+        badge.save(png_target, format="PNG")
+        ico_target.parent.mkdir(parents=True, exist_ok=True)
+        badge.save(
+            ico_target,
+            format="ICO",
+            sizes=[(16, 16), (24, 24), (32, 32), (48, 48), (64, 64), (128, 128), (256, 256)],
+        )
+    return png_target, ico_target
+
+
+def ensure_app_icon(target_path: Path | None = None) -> Path:
+    """Return the multi-size Windows ``.ico`` studio app icon (using bundled Blender-rendered asset)."""
+    bundled_ico = package_dir() / "assets" / "logo.ico"
+    ico_path = (target_path or (Path.home() / ".atomic_blender" / "atomic_blender_studio.ico")).expanduser()
+    ico_path.parent.mkdir(parents=True, exist_ok=True)
+
+    if bundled_ico.is_file() and bundled_ico.stat().st_size > 0:
+        if target_path is None:
+            if not ico_path.is_file() or ico_path.stat().st_size != bundled_ico.stat().st_size:
+                shutil.copy2(bundled_ico, ico_path)
+            return ico_path
+        if not ico_path.is_file() or ico_path.stat().st_size == 0:
+            shutil.copy2(bundled_ico, ico_path)
+        return ico_path
+
+    if ico_path.is_file() and ico_path.stat().st_size > 0:
+        return ico_path
+
+    from PIL import Image, ImageDraw
+    from atomic_blender.viewport3d import build_sphere_sprite
+
+    size = 256
+    canvas = Image.new("RGBA", (size, size), (0, 0, 0, 0))
+    draw = ImageDraw.Draw(canvas, "RGBA")
+    draw.rounded_rectangle((10, 10, 246, 246), radius=54, fill=(15, 19, 28, 255), outline=(20, 184, 166, 220), width=5)
+
+    draw.ellipse((46, 46, 210, 210), outline=(45, 212, 191, 55), width=3)
+
+    centers = {"top": (128.0, 74.0), "left": (78.0, 166.0), "right": (178.0, 166.0)}
+    for a, b in (("top", "left"), ("top", "right"), ("left", "right")):
+        p0, p1 = centers[a], centers[b]
+        draw.line((p0[0], p0[1], p1[0], p1[1]), fill=(148, 163, 184, 240), width=16)
+
+    specs = (
+        ("top", "#FB923C", 84, 0.90, 0.0),
+        ("left", "#38BDF8", 78, 0.90, 0.0),
+        ("right", "#14B8A6", 86, 0.90, 0.0),
+    )
+    for key, col, diam, rough, metal in specs:
+        sp = build_sphere_sprite(hex_color=col, roughness=rough, specular=0.06, metallic=metal, coat_weight=0.0, size=diam)
+        cx, cy = centers[key]
+        canvas.alpha_composite(sp, dest=(int(round(cx - diam * 0.5)), int(round(cy - diam * 0.5))))
+
+    canvas.save(
+        ico_path,
+        format="ICO",
+        sizes=[(16, 16), (32, 32), (48, 48), (64, 64), (128, 128), (256, 256)],
+    )
+    return ico_path
+
+
+def _resolve_gui_exe(target_exe: Path | None = None) -> Path:
+    """Resolve the best GUI executable path (standalone dist .exe, frozen exe, or Scripts GUI launcher)."""
+    if target_exe is not None:
+        p = Path(target_exe).expanduser().resolve()
+        if not p.is_file():
+            raise FileNotFoundError(f"Target executable not found: {p}")
+        return p
+    if getattr(sys, "frozen", False):
+        return Path(sys.executable).resolve()
+
+    candidates = [
+        Path.cwd() / "dist" / "AtomicBlenderStudio" / "AtomicBlenderStudio.exe",
+        package_root() / "dist" / "AtomicBlenderStudio" / "AtomicBlenderStudio.exe",
+        Path.home() / ".atomic_blender" / "dist" / "AtomicBlenderStudio" / "AtomicBlenderStudio.exe",
+        Path(sys.executable).parent / "Scripts" / "AtomicBlenderStudio.exe",
+        Path(sys.executable).parent / "Scripts" / "atomic-blender-gui.exe",
+    ]
+    for name in ("AtomicBlenderStudio", "atomic-blender-gui"):
+        found = shutil.which(name)
+        if found:
+            candidates.append(Path(found))
+    for cand in candidates:
+        if cand.is_file():
+            return cand.resolve()
+    raise FileNotFoundError(
+        "Could not locate AtomicBlenderStudio.exe or atomic-blender-gui.exe. "
+        "Run 'atomic-blender install-desktop --build-exe' or 'pip install .'."
+    )
+
+
+def build_standalone_exe(output_dir: Path | None = None, install_shortcuts: bool = True) -> Path:
+    """Build a standalone windowless Windows ``AtomicBlenderStudio.exe`` bundle via PyInstaller."""
+    if output_dir is not None:
+        dist_root = Path(output_dir).expanduser().resolve()
+    elif (Path.cwd() / "pyproject.toml").is_file():
+        dist_root = (Path.cwd() / "dist").resolve()
+    else:
+        dist_root = (Path.home() / ".atomic_blender" / "dist").resolve()
+    dist_root.mkdir(parents=True, exist_ok=True)
+
+    ico_path = ensure_app_icon()
+    pkg = package_dir()
+    sep = os.pathsep
+    add_data_entries = [
+        f"{pkg / 'styles'}{sep}atomic_blender/styles",
+        f"{pkg / 'addon' / 'atomic_blender_studio' / '__init__.py'}{sep}atomic_blender/addon/atomic_blender_studio",
+        f"{pkg / 'scene_builder.py'}{sep}atomic_blender",
+        f"{pkg / 'elements.py'}{sep}atomic_blender",
+        f"{pkg / '__init__.py'}{sep}atomic_blender",
+    ]
+    if (pkg / "assets").is_dir():
+        add_data_entries.append(f"{pkg / 'assets'}{sep}atomic_blender/assets")
+
+    with tempfile.TemporaryDirectory(prefix="atomic_pyinstaller_") as tmpdir:
+        tmp_path = Path(tmpdir)
+        entry_py = tmp_path / "launch_studio.py"
+        entry_py.write_text(
+            "from atomic_blender.gui import main\n"
+            "raise SystemExit(main())\n",
+            encoding="utf-8",
+        )
+        runner_py = tmp_path / "run_pyinstaller.py"
+        runner_py.write_text(
+            "import ast\n"
+            "import sys\n"
+            "from pathlib import Path\n"
+            "from PyInstaller import __main__ as pyi_main\n"
+            "from PyInstaller.lib.modulegraph import modulegraph as mg\n\n"
+            "_orig_scan_bytecode = mg.ModuleGraph._scan_bytecode\n"
+            "def _safe_scan_bytecode(self, module, co, is_scanning_imports=True, *args, **kwargs):\n"
+            "    try:\n"
+            "        return _orig_scan_bytecode(self, module, co, is_scanning_imports, *args, **kwargs)\n"
+            "    except IndexError:\n"
+            "        if is_scanning_imports:\n"
+            "            fn = getattr(co, 'co_filename', None) or getattr(module, 'filename', None)\n"
+            "            if fn and Path(fn).is_file():\n"
+            "                self._scan_ast(module, ast.parse(Path(fn).read_text(encoding='utf-8'), filename=fn))\n"
+            "        return None\n"
+            "mg.ModuleGraph._scan_bytecode = _safe_scan_bytecode\n"
+            "pyi_main.run(sys.argv[1:])\n",
+            encoding="utf-8",
+        )
+        cmd = [
+            sys.executable,
+            str(runner_py),
+            "--noconfirm",
+            "--clean",
+            "--onedir",
+            "--noconsole",
+            "--name",
+            "AtomicBlenderStudio",
+            "--icon",
+            str(ico_path),
+            "--distpath",
+            str(dist_root),
+            "--workpath",
+            str(tmp_path / "build"),
+            "--specpath",
+            str(tmp_path),
+            "--hidden-import",
+            "atomic_blender.cli",
+            "--hidden-import",
+            "atomic_blender.convert",
+            "--hidden-import",
+            "atomic_blender.elements",
+            "--hidden-import",
+            "atomic_blender.viewport3d",
+            "--collect-submodules",
+            "ase.io",
+            "--collect-data",
+            "ase",
+            "--exclude-module",
+            "matplotlib",
+            "--exclude-module",
+            "torch",
+            "--exclude-module",
+            "pandas",
+            "--exclude-module",
+            "sympy",
+            "--exclude-module",
+            "IPython",
+            "--exclude-module",
+            "pytest",
+            "--exclude-module",
+            "notebook",
+        ]
+        for entry in add_data_entries:
+            cmd.extend(["--add-data", entry])
+        cmd.append(str(entry_py))
+
+        subprocess.run(cmd, check=True)
+
+    exe_path = dist_root / "AtomicBlenderStudio" / "AtomicBlenderStudio.exe"
+    if not exe_path.is_file():
+        raise FileNotFoundError(f"PyInstaller build did not produce {exe_path}")
+    if install_shortcuts:
+        install_desktop_shortcut(target_exe=exe_path)
+    return exe_path
+
+
+def install_desktop_shortcut(
+    desktop: bool = True,
+    start_menu: bool = True,
+    target_exe: Path | None = None,
+    desktop_dir: Path | None = None,
+    start_menu_dir: Path | None = None,
+) -> list[Path]:
+    """Create Desktop and Start Menu shortcuts (``.lnk`` on Windows) for Atomic Blender Studio."""
+    if not (sys.platform.startswith("win") or os.name == "nt"):
+        raise RuntimeError("Desktop .exe shortcut creation is currently supported on Windows.")
+
+    exe_path = _resolve_gui_exe(target_exe)
+    ico_path = ensure_app_icon()
+
+    ps_script = """
+$ErrorActionPreference = 'Stop'
+$WshShell = New-Object -ComObject WScript.Shell
+$created = @()
+if ($env:AB_DO_DESKTOP -eq '1') {
+    $dir = if ($env:AB_DESKTOP_DIR) { $env:AB_DESKTOP_DIR } else { [Environment]::GetFolderPath('Desktop') }
+    if (!(Test-Path $dir)) { New-Item -ItemType Directory -Path $dir -Force | Out-Null }
+    $lnkPath = Join-Path $dir 'Atomic Blender Studio.lnk'
+    $s = $WshShell.CreateShortcut($lnkPath)
+    $s.TargetPath = $env:AB_TARGET_EXE
+    $s.WorkingDirectory = $env:AB_WORK_DIR
+    $s.IconLocation = "$($env:AB_ICON_PATH),0"
+    $s.Description = 'Atomic Blender Studio — Publication Atomic Structure Renderer'
+    $s.Save()
+    $created += $lnkPath
+}
+if ($env:AB_DO_START -eq '1') {
+    $dir = if ($env:AB_START_DIR) { $env:AB_START_DIR } else { [Environment]::GetFolderPath('Programs') }
+    if (!(Test-Path $dir)) { New-Item -ItemType Directory -Path $dir -Force | Out-Null }
+    $lnkPath = Join-Path $dir 'Atomic Blender Studio.lnk'
+    $s = $WshShell.CreateShortcut($lnkPath)
+    $s.TargetPath = $env:AB_TARGET_EXE
+    $s.WorkingDirectory = $env:AB_WORK_DIR
+    $s.IconLocation = "$($env:AB_ICON_PATH),0"
+    $s.Description = 'Atomic Blender Studio — Publication Atomic Structure Renderer'
+    $s.Save()
+    $created += $lnkPath
+}
+$created | ForEach-Object { Write-Output $_ }
+"""
+    env = os.environ.copy()
+    env["AB_DO_DESKTOP"] = "1" if desktop else "0"
+    env["AB_DO_START"] = "1" if start_menu else "0"
+    env["AB_DESKTOP_DIR"] = str(desktop_dir) if desktop_dir is not None else ""
+    env["AB_START_DIR"] = str(start_menu_dir) if start_menu_dir is not None else ""
+    env["AB_TARGET_EXE"] = str(exe_path)
+    env["AB_WORK_DIR"] = str(exe_path.parent)
+    env["AB_ICON_PATH"] = str(ico_path)
+
+    res = subprocess.run(
+        ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", ps_script],
+        capture_output=True,
+        text=True,
+        check=True,
+        env=env,
+        **_subprocess_no_window_kwargs(),
+    )
+    return [Path(line.strip()) for line in res.stdout.splitlines() if line.strip()]
+
+
+def cmd_install_desktop(args: argparse.Namespace) -> int:
+    """Build standalone .exe (optional) and create Desktop / Start Menu shortcuts."""
+    target = args.target_exe
+    if getattr(args, "build_exe", False):
+        target = build_standalone_exe(install_shortcuts=False)
+        print(f"Built standalone app -> {target}")
+    created = install_desktop_shortcut(
+        desktop=not args.no_desktop,
+        start_menu=not args.no_start_menu,
+        target_exe=target,
+    )
+    for p in created:
+        print(f"Created shortcut -> {p}")
     return 0
 
 
@@ -367,6 +800,13 @@ def build_parser() -> argparse.ArgumentParser:
     p_gui = sub.add_parser("gui", help="Launch the standalone desktop GUI client")
     p_gui.add_argument("input", nargs="?", type=Path, default=None, help="Optional structure file to prefill")
     p_gui.set_defaults(func=cmd_gui)
+
+    p_desk = sub.add_parser("install-desktop", help="Install Desktop and Start Menu shortcuts (and optional standalone .exe)")
+    p_desk.add_argument("--build-exe", action="store_true", help="Build standalone AtomicBlenderStudio.exe bundle via PyInstaller")
+    p_desk.add_argument("--target-exe", type=Path, default=None, help="Explicit executable path for shortcut target")
+    p_desk.add_argument("--no-desktop", action="store_true", help="Skip creating the Desktop shortcut")
+    p_desk.add_argument("--no-start-menu", action="store_true", help="Skip creating the Start Menu shortcut")
+    p_desk.set_defaults(func=cmd_install_desktop)
 
     return parser
 

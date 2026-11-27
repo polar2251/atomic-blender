@@ -17,10 +17,13 @@ dependencies = [
 
 [project.scripts]
 atomic-blender = "atomic_blender.cli:main"
+
+[project.gui-scripts]
 atomic-blender-gui = "atomic_blender.gui:main"
+AtomicBlenderStudio = "atomic_blender.gui:main"
 
 [tool.setuptools.packages.find]
 include = ["atomic_blender*"]
 
 [tool.setuptools.package-data]
-atomic_blender = ["styles/*.json", "addon/atomic_blender_studio/*.py"]
+atomic_blender = ["styles/*.json", "addon/atomic_blender_studio/*.py", "assets/*"]

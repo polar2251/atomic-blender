@@ -16,6 +16,7 @@ __pycache__/
 .pytest_cache/
 dist/
 build/
+*.spec
 
 # Large structure files & trajectories
 *.traj
