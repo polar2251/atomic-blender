@@ -9,6 +9,7 @@ from typing import Any
 
 import ase.io
 from ase.data import atomic_numbers
+import numpy as np
 
 
 def parse_type_map(spec: str | list[str] | None) -> dict[int, int] | None:
@@ -131,6 +132,70 @@ def atoms_to_neutral_dict(
     return payload
 
 
+def transform_neutral_dict(
+    payload: dict[str, Any],
+    replicate: tuple[int, int, int] = (1, 1, 1),
+    wrap: bool = True,
+    strict_nonperiodic_replicate: bool = True,
+) -> dict[str, Any]:
+    """Apply axis-wise periodic wrapping and supercell replication directly to a neutral dict."""
+    rx, ry, rz = (int(replicate[0]), int(replicate[1]), int(replicate[2]))
+    if rx < 1 or ry < 1 or rz < 1:
+        raise ValueError(f"Replication counts must be >= 1, got {replicate}")
+
+    out = dict(payload)
+    symbols = list(out.get("symbols", []))
+    pos_arr = np.asarray(out.get("positions", []), dtype=float).reshape((-1, 3))
+    cell_mat = np.asarray(out.get("cell", [[0.0, 0.0, 0.0], [0.0, 0.0, 0.0], [0.0, 0.0, 0.0]]), dtype=float).reshape((3, 3))
+    origin_arr = np.asarray(out.get("origin", [0.0, 0.0, 0.0]), dtype=float).reshape((3,))
+    has_cell = bool(out.get("has_cell", False))
+    raw_pbc = out.get("pbc", [has_cell, has_cell, has_cell])
+    pbc_flags = [bool(raw_pbc[k]) if k < len(raw_pbc) else has_cell for k in range(3)]
+
+    det = float(np.linalg.det(cell_mat)) if has_cell else 0.0
+    if wrap and has_cell and any(pbc_flags) and abs(det) > 1e-12 and len(pos_arr) > 0:
+        rel = pos_arr - origin_arr
+        frac = np.linalg.solve(cell_mat.T, rel.T).T
+        for axis in range(3):
+            if pbc_flags[axis]:
+                frac[:, axis] = np.mod(frac[:, axis], 1.0)
+        pos_arr = origin_arr + frac @ cell_mat
+
+    if (rx, ry, rz) != (1, 1, 1):
+        if not has_cell or abs(det) <= 1e-12:
+            if strict_nonperiodic_replicate:
+                raise ValueError("Cannot replicate a non-periodic structure without a 3D cell.")
+        else:
+            n_orig = len(symbols)
+            shifts = [
+                ix * cell_mat[0] + iy * cell_mat[1] + iz * cell_mat[2]
+                for ix in range(rx)
+                for iy in range(ry)
+                for iz in range(rz)
+            ]
+            rep_symbols: list[str] = []
+            rep_pos_blocks: list[np.ndarray] = []
+            for sh in shifts:
+                rep_symbols.extend(symbols)
+                if len(pos_arr) > 0:
+                    rep_pos_blocks.append(pos_arr + sh)
+            symbols = rep_symbols
+            pos_arr = np.vstack(rep_pos_blocks) if rep_pos_blocks else pos_arr
+            cell_mat = np.array([cell_mat[0] * rx, cell_mat[1] * ry, cell_mat[2] * rz], dtype=float)
+            for list_key in ("alphas", "radius_scales", "colors"):
+                raw_list = out.get(list_key)
+                if isinstance(raw_list, list) and len(raw_list) == n_orig:
+                    out[list_key] = list(raw_list) * (rx * ry * rz)
+
+    out["symbols"] = symbols
+    out["positions"] = [[float(x), float(y), float(z)] for x, y, z in pos_arr]
+    out["cell"] = [[float(x), float(y), float(z)] for x, y, z in cell_mat]
+    out["pbc"] = pbc_flags
+    out["has_cell"] = has_cell
+    out["origin"] = [float(origin_arr[0]), float(origin_arr[1]), float(origin_arr[2])]
+    return out
+
+
 def read_structure_frames(
     input_path: Path,
     fmt: str | None = None,
@@ -140,11 +205,18 @@ def read_structure_frames(
     wrap: bool = True,
 ) -> list[dict[str, Any]]:
     """Read single or multi-frame trajectory files into a list of neutral structure dicts."""
-    if input_path.suffix.lower() == ".json":
+    if input_path.suffix.lower() == ".json" and fmt is None:
         data = json.loads(input_path.read_text(encoding="utf-8"))
-        if isinstance(data, list):
-            return [dict(item) for item in data]
-        return [dict(data)]
+        items = data if isinstance(data, list) else [data]
+        return [
+            transform_neutral_dict(
+                dict(item),
+                replicate=replicate,
+                wrap=wrap,
+                strict_nonperiodic_replicate=False,
+            )
+            for item in items
+        ]
 
     frames = read_structure(
         input_path=input_path,
@@ -171,7 +243,26 @@ def convert_file(
     wrap: bool = True,
     index: int | str = -1,
 ) -> dict[str, Any]:
-    """Read structure file via ASE and write neutral JSON to ``output_json``."""
+    """Read structure file via ASE (or neutral JSON) and write neutral JSON to ``output_json``."""
+    if input_path.suffix.lower() == ".json" and fmt is None:
+        data = json.loads(input_path.read_text(encoding="utf-8"))
+        if isinstance(data, list):
+            if not data:
+                raise ValueError(f"Empty structure list in JSON file: {input_path}")
+            idx_i = int(index) if isinstance(index, int) or str(index).lstrip("-").isdigit() else -1
+            raw_frame = dict(data[idx_i])
+        else:
+            raw_frame = dict(data)
+        payload = transform_neutral_dict(
+            raw_frame,
+            replicate=replicate,
+            wrap=wrap,
+            strict_nonperiodic_replicate=True,
+        )
+        output_json.parent.mkdir(parents=True, exist_ok=True)
+        output_json.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+        return payload
+
     atoms = read_structure(
         input_path=input_path,
         fmt=fmt,
