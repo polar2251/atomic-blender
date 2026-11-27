@@ -1406,11 +1406,11 @@ class TestAtomicBlender(unittest.TestCase):
         )
 
         self.assertLessEqual(WELCOME_FRAME_INTERVAL_MS, 100)
-        # Header: starts dim (0.15) -> bright (1.0 at step 16) -> holds faint (0.32 for step >= 36)
-        self.assertAlmostEqual(_welcome_header_fade_alpha(0), 0.15, places=3)
-        self.assertAlmostEqual(_welcome_header_fade_alpha(16), 1.0, places=3)
-        self.assertAlmostEqual(_welcome_header_fade_alpha(36), 0.32, places=3)
-        self.assertAlmostEqual(_welcome_header_fade_alpha(80), 0.32, places=3)
+        # Header: starts dim (0.08) -> bright (0.76 at step 16) -> holds faint (0.16 for step >= 36)
+        self.assertAlmostEqual(_welcome_header_fade_alpha(0), 0.08, places=3)
+        self.assertAlmostEqual(_welcome_header_fade_alpha(16), 0.76, places=3)
+        self.assertAlmostEqual(_welcome_header_fade_alpha(36), 0.16, places=3)
+        self.assertAlmostEqual(_welcome_header_fade_alpha(80), 0.16, places=3)
         # Bottom prompt: dim -> bright -> repeating
         self.assertAlmostEqual(_welcome_prompt_fade_alpha(0), 0.22, places=2)
         self.assertAlmostEqual(_welcome_prompt_fade_alpha(32), 1.0, places=2)
@@ -1459,7 +1459,7 @@ class TestAtomicBlender(unittest.TestCase):
             self.assertIn("Drag & drop", app.canvas.itemcget(drag_ids[0], "text"))
             self.assertIn("CIF", app.canvas.itemcget(fmt_ids[0], "text"))
 
-            # Atomic Blender Studio sits directly above Welcome with zero bbox overlap
+            # Atomic Blender Studio sits directly above Welcome with tightened halved gap
             sub_bbox = app.canvas.bbox(sub_ids[0])
             title_bbox = app.canvas.bbox(title_ids[0])
             atom_bbox = app.canvas.bbox(atom_ids[0])
@@ -1468,8 +1468,13 @@ class TestAtomicBlender(unittest.TestCase):
             self.assertIsNotNone(title_bbox)
             self.assertIsNotNone(atom_bbox)
             self.assertIsNotNone(drag_bbox)
-            self.assertLessEqual(sub_bbox[3], title_bbox[1])
-            self.assertLessEqual(title_bbox[3], atom_bbox[1])
+            sub_mid = 0.5 * (sub_bbox[1] + sub_bbox[3])
+            title_mid = 0.5 * (title_bbox[1] + title_bbox[3])
+            title_h = max(1, title_bbox[3] - title_bbox[1])
+            self.assertGreater(title_mid - sub_mid, 10)
+            self.assertLess(title_bbox[1], sub_bbox[3])
+            self.assertLess(title_mid - sub_mid, title_h * 0.75)
+            self.assertLessEqual(title_bbox[3] - 12, atom_bbox[1])
             self.assertLessEqual(atom_bbox[3], drag_bbox[1])
 
             # Header title & subtitle share the exact white-fade fill color
