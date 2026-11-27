@@ -22,7 +22,15 @@ import webbrowser
 
 import numpy as np
 
-from atomic_blender.cli import BLENDER_DOWNLOAD_URL, _collect_style_files, find_blender_executable, resolve_style_path
+from atomic_blender.cli import (
+    BLENDER_DOWNLOAD_URL,
+    _collect_style_files,
+    ensure_app_icon,
+    find_blender_executable,
+    install_desktop_shortcut,
+    package_dir,
+    resolve_style_path,
+)
 from atomic_blender.convert import atoms_to_neutral_dict, read_structure, read_structure_frames
 from atomic_blender.elements import METAL_ELEMENTS, VIEW_PRESETS, classify_dropped_file
 from atomic_blender.viewport3d import (
@@ -831,9 +839,10 @@ class BlenderPreviewWorker:
         if self._proc is not None and self._proc.poll() is None and self._active_blender == blender_exe:
             return self._proc
         self._close_proc()
-        scene_script = Path(__file__).resolve().parent / "scene_builder.py"
+        pkg_dir = package_dir()
+        scene_script = pkg_dir / "scene_builder.py"
         env = os.environ.copy()
-        pkg_parent = str(Path(__file__).resolve().parent.parent)
+        pkg_parent = str(pkg_dir.parent)
         existing_pp = env.get("PYTHONPATH", "")
         env["PYTHONPATH"] = f"{pkg_parent}{os.pathsep}{existing_pp}" if existing_pp else pkg_parent
         kwargs: dict[str, Any] = {}
@@ -981,11 +990,15 @@ def _open_folder(folder: Path) -> None:
 
 
 def _enable_hidpi() -> None:
-    """Enable native DPI awareness on Windows so fonts and the 3D canvas are crisp."""
+    """Enable native DPI awareness and AppUserModelID on Windows so fonts, canvas, and taskbar icon are crisp."""
     if sys.platform.startswith("win") or os.name == "nt":
         try:
             import ctypes
 
+            try:
+                ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("AtomicBlender.Studio.Desktop.1")
+            except Exception:
+                pass
             try:
                 ctypes.windll.shcore.SetProcessDpiAwareness(1)
             except Exception:
@@ -1003,6 +1016,17 @@ class AtomicBlenderApp(tk.Tk):
         self.title("Atomic Blender Studio — Desktop Client")
         self.geometry("1340x860")
         self.minsize(1100, 680)
+        try:
+            self.iconbitmap(default=str(ensure_app_icon()))
+        except Exception:
+            pass
+        try:
+            logo_png = package_dir() / "assets" / "logo.png"
+            if _HAS_PIL and logo_png.is_file():
+                self._app_icon_photo = ImageTk.PhotoImage(Image.open(logo_png).convert("RGBA"))
+                self.iconphoto(True, self._app_icon_photo)
+        except Exception:
+            pass
 
         self._configure_theme()
 
@@ -1475,6 +1499,7 @@ class AtomicBlenderApp(tk.Tk):
         ttk.Label(row_rec, text="Figure Recipe:").pack(side=tk.LEFT, padx=(0, 8))
         ttk.Button(row_rec, text="Save Recipe...", command=self._on_save_recipe).pack(side=tk.LEFT, padx=(0, 4))
         ttk.Button(row_rec, text="Load Recipe...", command=self._on_load_recipe).pack(side=tk.LEFT)
+        ttk.Button(row_rec, text="Desktop Shortcut", command=self._on_create_desktop_shortcut).pack(side=tk.RIGHT)
         self._sync_view_mode()
 
     def _build_controls(self, parent: ttk.Frame, action_parent: ttk.Frame | None = None) -> None:
@@ -2843,13 +2868,7 @@ class AtomicBlenderApp(tk.Tk):
                     )
                     args = build_render_cli_args(c, out_png=out_p)
                     self._queue.put(("log", f"$ atomic-blender {' '.join(args)}"))
-                    proc = subprocess.Popen(
-                        [sys.executable, "-m", "atomic_blender.cli", *args],
-                        stdout=subprocess.PIPE,
-                        stderr=subprocess.STDOUT,
-                        text=True,
-                        bufsize=1,
-                    )
+                    proc = self._popen_cli(args)
                     assert proc.stdout is not None
                     for raw_line in proc.stdout:
                         self._queue.put(("log", raw_line))
@@ -3007,13 +3026,7 @@ class AtomicBlenderApp(tk.Tk):
                 )
                 args = build_render_cli_args(c, out_png=out_p)
                 self._queue.put(("log", f"[{idx}/{len(file_list)}] $ atomic-blender {' '.join(args)}"))
-                proc = subprocess.Popen(
-                    [sys.executable, "-m", "atomic_blender.cli", *args],
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.STDOUT,
-                    text=True,
-                    bufsize=1,
-                )
+                proc = self._popen_cli(args)
                 assert proc.stdout is not None
                 for raw_line in proc.stdout:
                     self._queue.put(("log", raw_line))
@@ -3198,13 +3211,7 @@ class AtomicBlenderApp(tk.Tk):
                 )
                 args = build_render_cli_args(c, out_png=out_p)
                 self._queue.put(("log", f"$ atomic-blender {' '.join(args)}"))
-                proc = subprocess.Popen(
-                    [sys.executable, "-m", "atomic_blender.cli", *args],
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.STDOUT,
-                    text=True,
-                    bufsize=1,
-                )
+                proc = self._popen_cli(args)
                 assert proc.stdout is not None
                 for raw_line in proc.stdout:
                     self._queue.put(("log", raw_line))
@@ -3222,6 +3229,15 @@ class AtomicBlenderApp(tk.Tk):
                 self._queue.put(("done_strip", (1, strip_png, str(exc))))
 
         threading.Thread(target=worker, daemon=True).start()
+
+    def _on_create_desktop_shortcut(self) -> None:
+        try:
+            created = install_desktop_shortcut(desktop=True, start_menu=True)
+            names = "\n".join(str(p) for p in created)
+            self.var_status.set(f"Created {len(created)} shortcut(s) for Atomic Blender Studio")
+            messagebox.showinfo("Desktop Shortcut Created", f"Created shortcut(s):\n\n{names}", parent=self)
+        except Exception as exc:
+            messagebox.showerror("Desktop Shortcut Failed", str(exc), parent=self)
 
     def export_figure_recipe(self) -> dict[str, Any]:
         """Export current visual styling, representation, slicing, overlays, and camera as a recipe dict."""
@@ -3816,20 +3832,27 @@ class AtomicBlenderApp(tk.Tk):
         self.btn_blender.configure(state=state)
         self.var_status.set(status_text)
 
+    def _popen_cli(self, cli_args: list[str]) -> subprocess.Popen[str]:
+        """Launch ``atomic_blender.cli`` cleanly in Python or frozen .exe mode without console flicker."""
+        cmd = [sys.executable, "-m", "atomic_blender.cli", *cli_args]
+        kwargs: dict[str, Any] = {
+            "stdout": subprocess.PIPE,
+            "stderr": subprocess.STDOUT,
+            "text": True,
+            "bufsize": 1,
+        }
+        flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+        if flags:
+            kwargs["creationflags"] = flags
+        return subprocess.Popen(cmd, **kwargs)
+
     def _run_cli_async(self, cli_args: list[str], mode: str, target_path: Path) -> None:
         self._task_start = time.monotonic()
         self._set_busy(True, f"Running {mode}...")
         self._append_log(f"$ atomic-blender {' '.join(cli_args)}")
 
         def worker() -> None:
-            cmd = [sys.executable, "-m", "atomic_blender.cli", *cli_args]
-            proc = subprocess.Popen(
-                cmd,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
-                text=True,
-                bufsize=1,
-            )
+            proc = self._popen_cli(cli_args)
             assert proc.stdout is not None
             for raw_line in proc.stdout:
                 self._queue.put(("log", raw_line))
@@ -4939,9 +4962,14 @@ def launch_gui(initial_input: str | None = None) -> int:
 
 
 def main(argv: list[str] | None = None) -> int:
+    raw_argv = list(sys.argv[1:] if argv is None else argv)
+    if len(raw_argv) >= 2 and raw_argv[0] == "-m" and raw_argv[1] == "atomic_blender.cli":
+        from atomic_blender.cli import main as cli_main
+
+        return cli_main(raw_argv[2:])
     parser = argparse.ArgumentParser(prog="atomic-blender-gui", description="Launch Atomic Blender desktop GUI")
     parser.add_argument("input", nargs="?", default=None, help="Optional structure file to prefill")
-    args = parser.parse_args(argv)
+    args = parser.parse_args(raw_argv)
     return launch_gui(initial_input=args.input)
 
 

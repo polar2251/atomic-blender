@@ -1208,6 +1208,39 @@ class TestAtomicBlender(unittest.TestCase):
             finally:
                 app.destroy()
 
+    def test_desktop_icon_shortcut_and_frozen_cli_dispatch(self) -> None:
+        import os
+        from atomic_blender.cli import build_parser, ensure_app_icon, install_desktop_shortcut
+        from atomic_blender.gui import main as gui_main
+
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            ico = ensure_app_icon(tmp_path / "studio.ico")
+            self.assertTrue(ico.is_file())
+            self.assertGreater(ico.stat().st_size, 500)
+
+            self.assertEqual(gui_main(["-m", "atomic_blender.cli", "styles"]), 0)
+            parsed = build_parser().parse_args(["install-desktop", "--no-start-menu"])
+            self.assertTrue(parsed.no_start_menu)
+            self.assertFalse(parsed.no_desktop)
+
+            if os.name == "nt":
+                fake_exe = tmp_path / "AtomicBlenderStudio.exe"
+                fake_exe.write_text("stub", encoding="utf-8")
+                desk_dir = tmp_path / "Desktop"
+                start_dir = tmp_path / "StartMenu"
+                links = install_desktop_shortcut(
+                    desktop=True,
+                    start_menu=True,
+                    target_exe=fake_exe,
+                    desktop_dir=desk_dir,
+                    start_menu_dir=start_dir,
+                )
+                self.assertEqual(len(links), 2)
+                for lnk in links:
+                    self.assertTrue(lnk.is_file())
+                    self.assertEqual(lnk.name, "Atomic Blender Studio.lnk")
+
 
 if __name__ == "__main__":
     unittest.main()
