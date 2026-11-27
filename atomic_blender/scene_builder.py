@@ -243,6 +243,35 @@ def _ensure_collection(scene: bpy.types.Scene, clear_existing: bool) -> bpy.type
     return col
 
 
+def _create_unit_cylinder_proto_mesh(
+    name: str,
+    segments: int,
+    smooth: bool,
+    mat: bpy.types.Material,
+) -> bpy.types.Mesh:
+    """Create a unit-radius, unit-depth Z-aligned cylinder prototype mesh for fast bond instancing."""
+    import bmesh
+
+    mesh = bpy.data.meshes.new(name)
+    bm = bmesh.new()
+    bmesh.ops.create_cone(
+        bm,
+        cap_ends=True,
+        cap_tris=False,
+        segments=segments,
+        radius1=1.0,
+        radius2=1.0,
+        depth=1.0,
+    )
+    bm.to_mesh(mesh)
+    bm.free()
+    if smooth:
+        for poly in mesh.polygons:
+            poly.use_smooth = True
+    mesh.materials.append(mat)
+    return mesh
+
+
 def _create_cylinder_mesh(
     p0: Vector,
     p1: Vector,
@@ -252,12 +281,22 @@ def _create_cylinder_mesh(
     col: bpy.types.Collection,
     segments: int = 14,
     smooth: bool = True,
+    proto_mesh: bpy.types.Mesh | None = None,
 ) -> bpy.types.Object | None:
-    """Create a smooth cylinder connecting ``p0`` and ``p1`` without slow mode switches."""
+    """Create a smooth cylinder connecting ``p0`` and ``p1``, instancing ``proto_mesh`` when given."""
     dv = p1 - p0
     length = dv.length
     if length < 1e-6:
         return None
+    if proto_mesh is not None:
+        obj = bpy.data.objects.new(name, proto_mesh)
+        obj.location = (p0 + p1) * 0.5
+        obj.rotation_mode = "QUATERNION"
+        obj.rotation_quaternion = dv.normalized().to_track_quat("Z", "Y")
+        obj.scale = (radius, radius, length)
+        col.objects.link(obj)
+        return obj
+
     mesh = bpy.data.meshes.new(f"{name}_mesh")
     # Build unit cylinder along Z using bmesh for speed and zero bpy.ops overhead
     import bmesh
@@ -881,29 +920,47 @@ def build_scene(
             if bond_color_override and bond_color_override != "style"
             else str(bond_cfg.get("color_mode", "single"))
         )
+        bond_proto_meshes: dict[str, bpy.types.Mesh] = {}
+
+        def _get_bond_proto(mat: bpy.types.Material) -> bpy.types.Mesh:
+            pm = bond_proto_meshes.get(mat.name)
+            if pm is None:
+                pm = _create_unit_cylinder_proto_mesh(
+                    name=f"proto_bond_{mat.name}",
+                    segments=b_seg,
+                    smooth=b_smooth,
+                    mat=mat,
+                )
+                bond_proto_meshes[mat.name] = pm
+            return pm
+
         if color_mode == "bicolor":
             for i, j in bond_pairs:
                 pi, pj = positions[i], positions[j]
                 pm = (pi + pj) * 0.5
+                mat_i = elem_materials[(symbols[i], round(alphas[i], 3), atom_colors[i])]
+                mat_j = elem_materials[(symbols[j], round(alphas[j], 3), atom_colors[j])]
                 _create_cylinder_mesh(
                     pi,
                     pm,
                     b_rad,
-                    elem_materials[(symbols[i], round(alphas[i], 3), atom_colors[i])],
+                    mat_i,
                     f"bond_{i}_{j}_a",
                     col,
                     segments=b_seg,
                     smooth=b_smooth,
+                    proto_mesh=_get_bond_proto(mat_i),
                 )
                 _create_cylinder_mesh(
                     pm,
                     pj,
                     b_rad,
-                    elem_materials[(symbols[j], round(alphas[j], 3), atom_colors[j])],
+                    mat_j,
                     f"bond_{i}_{j}_b",
                     col,
                     segments=b_seg,
                     smooth=b_smooth,
+                    proto_mesh=_get_bond_proto(mat_j),
                 )
         else:
             single_bond_mats: dict[float, bpy.types.Material] = {}
@@ -928,6 +985,7 @@ def build_scene(
                     col,
                     segments=b_seg,
                     smooth=b_smooth,
+                    proto_mesh=_get_bond_proto(bond_mat),
                 )
 
     raw_dashed = structure.get("dashed_bonds", [])

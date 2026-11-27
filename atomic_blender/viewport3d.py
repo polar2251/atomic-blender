@@ -625,6 +625,8 @@ class ViewportScene:
     show_cell_vectors: bool = False
     show_output_mask: bool = False
     _sprite_keys: list[str] = field(default_factory=list)
+    _bond_cache_key: Any = field(default=None, repr=False)
+    _bond_cache_data: Any = field(default=None, repr=False)
 
     def __post_init__(self) -> None:
         if self.target is None:
@@ -954,18 +956,74 @@ class ViewportScene:
 
         px = float(u_norm) * fw
         py = float(v_norm) * fh
-        best_idx: int | None = None
-        best_z = -1e18
-        for idx in range(len(self.positions)):
-            r_px = max(7.0, float(self.radii[idx]) * px_per_a)
-            dx = px - float(ax[idx])
-            dy = py - float(ay[idx])
-            if dx * dx + dy * dy <= r_px * r_px:
-                z_val = float(az[idx])
-                if best_idx is None or z_val > best_z:
-                    best_z = z_val
-                    best_idx = idx
-        return best_idx
+        r_px = np.maximum(7.0, self.radii * px_per_a)
+        dx = px - ax
+        dy = py - ay
+        hit_indices = np.flatnonzero(dx * dx + dy * dy <= r_px * r_px)
+        if len(hit_indices) == 0:
+            return None
+        return int(hit_indices[np.argmax(az[hit_indices])])
+
+    def _get_trimmed_bond_segments(self) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, list[str]]:
+        """Precompute surface-trimmed 3D bond segments once per scene topology/color state."""
+        cache_key = (
+            len(self.positions),
+            len(self.bond_i),
+            self.bond_color_mode,
+            self.single_bond_color,
+        )
+        if self._bond_cache_key == cache_key and self._bond_cache_data is not None:
+            return self._bond_cache_data
+
+        if len(self.bond_i) == 0 or len(self.positions) == 0:
+            empty3 = np.empty((0, 3), dtype=np.float64)
+            empty1 = np.empty(0, dtype=np.int32)
+            data = (empty3, empty3, empty1, empty1, [])
+            self._bond_cache_key = cache_key
+            self._bond_cache_data = data
+            return data
+
+        bi = self.bond_i
+        bj = self.bond_j
+        pi3 = self.positions[bi]
+        pj3 = self.positions[bj]
+        dv = pj3 - pi3
+        dist3 = np.linalg.norm(dv, axis=1)
+        ti = np.minimum(0.55 * self.radii[bi], dist3 * 0.45)
+        tj = np.minimum(0.55 * self.radii[bj], dist3 * 0.45)
+        keep = (dist3 >= 1e-6) & ((dist3 - ti - tj) > 0.02)
+        if not np.any(keep):
+            empty3 = np.empty((0, 3), dtype=np.float64)
+            empty1 = np.empty(0, dtype=np.int32)
+            data = (empty3, empty3, empty1, empty1, [])
+            self._bond_cache_key = cache_key
+            self._bond_cache_data = data
+            return data
+
+        bi_k = bi[keep]
+        bj_k = bj[keep]
+        d_hat = dv[keep] / dist3[keep, None]
+        p_start = pi3[keep] + d_hat * ti[keep, None]
+        p_end = pj3[keep] - d_hat * tj[keep, None]
+
+        if self.bond_color_mode == "bicolor":
+            p_mid = 0.5 * (pi3[keep] + pj3[keep])
+            seg_p0 = np.concatenate([p_start, p_mid], axis=0)
+            seg_p1 = np.concatenate([p_mid, p_end], axis=0)
+            seg_a = np.concatenate([bi_k, bj_k], axis=0)
+            seg_b = seg_a
+            seg_colors = [self.colors[int(i)] for i in bi_k] + [self.colors[int(j)] for j in bj_k]
+        else:
+            seg_p0 = p_start
+            seg_p1 = p_end
+            seg_a = bi_k
+            seg_b = bj_k
+            seg_colors = [self.single_bond_color] * len(seg_a)
+
+        data = (seg_p0, seg_p1, seg_a, seg_b, seg_colors)
+        self._bond_cache_key = cache_key
+        self._bond_cache_data = data
+        return data
 
     def render_image(
         self,
@@ -1106,51 +1164,26 @@ class ViewportScene:
 
             if len(self.bond_i) > 0:
                 bond_w = max(3, min(26, int(round(2.7 * self.bond_radius * px_per_a))))
-                bi, bj = self.bond_i, self.bond_j
-                for k in range(len(bi)):
-                    i_idx, j_idx = int(bi[k]), int(bj[k])
-                    pi3 = self.positions[i_idx]
-                    pj3 = self.positions[j_idx]
-                    dv = pj3 - pi3
-                    dist3 = float(np.linalg.norm(dv))
-                    if dist3 < 1e-6:
-                        continue
-                    d_hat = dv / dist3
-                    # Trim bond endpoints inside sphere surfaces for clean 3D junction occlusion
-                    trim_i = min(0.55 * float(self.radii[i_idx]), dist3 * 0.45)
-                    trim_j = min(0.55 * float(self.radii[j_idx]), dist3 * 0.45)
-                    if dist3 - trim_i - trim_j <= 0.02:
-                        continue
-                    p_start = pi3 + d_hat * trim_i
-                    p_end = pj3 - d_hat * trim_j
-                    p_mid = 0.5 * (pi3 + pj3)
-
-                    if self.bond_color_mode == "bicolor":
-                        a_i = float(self.atom_alphas[i_idx]) if i_idx < len(self.atom_alphas) else 1.0
-                        a_j = float(self.atom_alphas[j_idx]) if j_idx < len(self.atom_alphas) else 1.0
-                        pts3 = [
-                            (p_start, p_mid, self.colors[i_idx], a_i),
-                            (p_mid, p_end, self.colors[j_idx], a_j),
-                        ]
+                seg_p0, seg_p1, seg_a, seg_b, seg_colors = self._get_trimmed_bond_segments()
+                if len(seg_p0) > 0:
+                    r0 = seg_p0 - self.target
+                    r1 = seg_p1 - self.target
+                    sx0 = cx0 + (r0 @ right) * px_per_a
+                    sy0 = cy0 - (r0 @ up) * px_per_a
+                    sz0 = r0 @ back
+                    sx1 = cx0 + (r1 @ right) * px_per_a
+                    sy1 = cy0 - (r1 @ up) * px_per_a
+                    sz1 = r1 @ back
+                    sz_mid = 0.5 * (sz0 + sz1)
+                    if len(self.atom_alphas) == len(self.positions):
+                        seg_alphas = np.minimum(self.atom_alphas[seg_a], self.atom_alphas[seg_b])
                     else:
-                        a_ij = min(
-                            float(self.atom_alphas[i_idx]) if i_idx < len(self.atom_alphas) else 1.0,
-                            float(self.atom_alphas[j_idx]) if j_idx < len(self.atom_alphas) else 1.0,
-                        )
-                        pts3 = [(p_start, p_end, self.single_bond_color, a_ij)]
-                    for s0, s1, b_hex, b_alpha in pts3:
-                        r0 = s0 - self.target
-                        r1 = s1 - self.target
-                        sx0 = float(cx0 + np.dot(r0, right) * px_per_a)
-                        sy0 = float(cy0 - np.dot(r0, up) * px_per_a)
-                        sz0 = float(np.dot(r0, back))
-                        sx1 = float(cx0 + np.dot(r1, right) * px_per_a)
-                        sy1 = float(cy0 - np.dot(r1, up) * px_per_a)
-                        sz1 = float(np.dot(r1, back))
+                        seg_alphas = np.ones(len(seg_a), dtype=np.float64)
+                    for k in range(len(seg_p0)):
                         draw_items.append((
-                            0.5 * (sz0 + sz1),
+                            float(sz_mid[k]),
                             1,
-                            ("bond", sx0, sy0, sx1, sy1, bond_w, b_hex, b_alpha),
+                            ("bond", float(sx0[k]), float(sy0[k]), float(sx1[k]), float(sy1[k]), bond_w, seg_colors[k], float(seg_alphas[k])),
                         ))
 
             if len(self.dashed_pairs) > 0:
@@ -1197,6 +1230,8 @@ class ViewportScene:
         draw_items.sort(key=lambda item: (item[0], item[1]))
 
         # Two-phase render: draw vector segments onto `draw`, flushing before compositing sprites
+        bond_col_cache: dict[tuple[str, int], tuple[tuple[int, int, int, int], tuple[int, int, int, int]]] = {}
+        simple_drag_bonds = bool(interactive and len(self.bond_i) > 150)
         for _z, _ord, payload in draw_items:
             tag = payload[0]
             if tag == "cell":
@@ -1205,22 +1240,26 @@ class ViewportScene:
             elif tag == "bond":
                 _, px0, py0, px1, py1, bw, b_hex, b_alpha = payload
                 a_u8 = max(8, min(255, int(round(255.0 * b_alpha))))
-                br, bg_c, bb, _ = _shade_rgba_tuple(b_hex, 0.90)
-                hr, hg, hb, _ = _shade_rgba_tuple(b_hex, 1.0, mix_white=0.45)
-                body_col = (br, bg_c, bb, a_u8)
-                hi_col = (hr, hg, hb, a_u8)
+                cached_cols = bond_col_cache.get((b_hex, a_u8))
+                if cached_cols is None:
+                    br, bg_c, bb, _ = _shade_rgba_tuple(b_hex, 0.90)
+                    hr, hg, hb, _ = _shade_rgba_tuple(b_hex, 1.0, mix_white=0.45)
+                    cached_cols = ((br, bg_c, bb, a_u8), (hr, hg, hb, a_u8))
+                    bond_col_cache[(b_hex, a_u8)] = cached_cols
+                body_col, hi_col = cached_cols
                 draw.line((px0, py0, px1, py1), fill=body_col, width=bw)
-                r_cap = bw * 0.45
-                if r_cap >= 1.2:
-                    draw.ellipse((px0 - r_cap, py0 - r_cap, px0 + r_cap, py0 + r_cap), fill=body_col)
-                    draw.ellipse((px1 - r_cap, py1 - r_cap, px1 + r_cap, py1 + r_cap), fill=body_col)
-                if bw >= 3:
-                    off = max(0.8, bw * 0.16)
-                    draw.line(
-                        (px0 - off, py0 - off, px1 - off, py1 - off),
-                        fill=hi_col,
-                        width=max(1, int(round(bw * 0.28))),
-                    )
+                if not simple_drag_bonds:
+                    r_cap = bw * 0.45
+                    if r_cap >= 1.2:
+                        draw.ellipse((px0 - r_cap, py0 - r_cap, px0 + r_cap, py0 + r_cap), fill=body_col)
+                        draw.ellipse((px1 - r_cap, py1 - r_cap, px1 + r_cap, py1 + r_cap), fill=body_col)
+                    if bw >= 3:
+                        off = max(0.8, bw * 0.16)
+                        draw.line(
+                            (px0 - off, py0 - off, px1 - off, py1 - off),
+                            fill=hi_col,
+                            width=max(1, int(round(bw * 0.28))),
+                        )
             elif tag == "dashed_bond":
                 _, px0, py0, px1, py1, bw, d_rgba = payload
                 _draw_dashed_segment(draw, (px0, py0), (px1, py1), fill=d_rgba, width=bw, dash_px=7.0, gap_px=5.0)
