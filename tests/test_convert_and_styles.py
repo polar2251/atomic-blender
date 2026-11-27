@@ -1399,14 +1399,23 @@ class TestAtomicBlender(unittest.TestCase):
             AtomicBlenderApp,
             WELCOME_FRAME_INTERVAL_MS,
             _blend_hex_color,
-            _welcome_title_fade_alpha,
+            _welcome_header_fade_alpha,
+            _welcome_prompt_fade_alpha,
             extract_input_path,
             format_input_display,
         )
 
         self.assertLessEqual(WELCOME_FRAME_INTERVAL_MS, 100)
-        self.assertAlmostEqual(_welcome_title_fade_alpha(0, 72), 1.0, places=3)
-        self.assertLess(_welcome_title_fade_alpha(9, 72), 0.45)
+        # Header: starts dim (0.15) -> bright (1.0 at step 16) -> holds faint (0.32 for step >= 36)
+        self.assertAlmostEqual(_welcome_header_fade_alpha(0), 0.15, places=3)
+        self.assertAlmostEqual(_welcome_header_fade_alpha(16), 1.0, places=3)
+        self.assertAlmostEqual(_welcome_header_fade_alpha(36), 0.32, places=3)
+        self.assertAlmostEqual(_welcome_header_fade_alpha(80), 0.32, places=3)
+        # Bottom prompt: dim -> bright -> repeating
+        self.assertAlmostEqual(_welcome_prompt_fade_alpha(0), 0.22, places=2)
+        self.assertAlmostEqual(_welcome_prompt_fade_alpha(32), 1.0, places=2)
+        self.assertAlmostEqual(_welcome_prompt_fade_alpha(64), _welcome_prompt_fade_alpha(0), places=3)
+
         self.assertEqual(_blend_hex_color("#000000", "#FFFFFF", 0.0), "#000000")
         self.assertEqual(_blend_hex_color("#000000", "#FFFFFF", 1.0), "#FFFFFF")
         sample_p = r"C:\tmp\demo\sample.cif"
@@ -1417,17 +1426,19 @@ class TestAtomicBlender(unittest.TestCase):
         self.assertTrue(gif_path.is_file(), f"Missing pre-rendered welcome GIF: {gif_path}")
         with Image.open(gif_path) as im:
             self.assertGreaterEqual(getattr(im, "n_frames", 1), 72)
+            self.assertEqual(im.size, (360, 360))
 
         app = AtomicBlenderApp()
         app.withdraw()
         try:
-            # No "Structure:" banner label text cluttering top bar, and no thumbnail cards in Display panel
             self.assertFalse(hasattr(app, "_repr_thumb_cards"))
             self.assertIn("ball_stick", app._display_checks)
             self.assertIn("licorice", app._display_checks)
             self.assertIn("vdw", app._display_checks)
+            # Settings button moved into the same preview toolbar as Log toggle
+            self.assertEqual(app.btn_settings.winfo_parent(), app._btn_log_toggle.winfo_parent())
 
-            app.canvas.configure(width=800, height=620)
+            app.canvas.configure(width=900, height=700)
             app.update_idletasks()
             app._draw_3d_viewport()
 
@@ -1435,29 +1446,42 @@ class TestAtomicBlender(unittest.TestCase):
             sub_ids = app.canvas.find_withtag("welcome_subtitle")
             atom_ids = app.canvas.find_withtag("welcome_atom")
             drag_ids = app.canvas.find_withtag("welcome_drag")
-            self.assertTrue(title_ids and sub_ids and atom_ids and drag_ids)
-            # No descriptions or 4 bottom dots on the Welcome canvas
+            fmt_ids = app.canvas.find_withtag("welcome_formats")
+            self.assertTrue(title_ids and sub_ids and atom_ids and drag_ids and fmt_ids)
             self.assertEqual(app.canvas.find_withtag("welcome_style"), ())
             self.assertEqual(app.canvas.find_withtag("welcome_style_desc"), ())
             self.assertEqual(app.canvas.find_withtag("welcome_dots"), ())
             self.assertEqual(app.canvas.itemcget(title_ids[0], "text"), "Welcome")
+            self.assertEqual(app.canvas.itemcget(sub_ids[0], "text"), "Atomic Blender Studio")
             title_font = app.canvas.itemcget(title_ids[0], "font")
-            self.assertIn("72", title_font)
+            self.assertIn("64", title_font)
             self.assertIn("Light", title_font)
             self.assertIn("Drag & drop", app.canvas.itemcget(drag_ids[0], "text"))
+            self.assertIn("CIF", app.canvas.itemcget(fmt_ids[0], "text"))
 
-            y_title = app.canvas.coords(title_ids[0])[1]
-            y_sub = app.canvas.coords(sub_ids[0])[1]
-            y_atom = app.canvas.coords(atom_ids[0])[1]
-            y_drag = app.canvas.coords(drag_ids[0])[1]
-            self.assertGreaterEqual(y_sub - y_title, 68)
-            self.assertLess(y_sub, y_atom)
-            self.assertLess(y_atom, y_drag)
+            # Atomic Blender Studio sits directly above Welcome with zero bbox overlap
+            sub_bbox = app.canvas.bbox(sub_ids[0])
+            title_bbox = app.canvas.bbox(title_ids[0])
+            atom_bbox = app.canvas.bbox(atom_ids[0])
+            drag_bbox = app.canvas.bbox(drag_ids[0])
+            self.assertIsNotNone(sub_bbox)
+            self.assertIsNotNone(title_bbox)
+            self.assertIsNotNone(atom_bbox)
+            self.assertIsNotNone(drag_bbox)
+            self.assertLessEqual(sub_bbox[3], title_bbox[1])
+            self.assertLessEqual(title_bbox[3], atom_bbox[1])
+            self.assertLessEqual(atom_bbox[3], drag_bbox[1])
+
+            # Header title & subtitle share the exact white-fade fill color
+            self.assertEqual(
+                app.canvas.itemcget(title_ids[0], "fill"),
+                app.canvas.itemcget(sub_ids[0], "fill"),
+            )
 
             # Hovering over the atom center pauses frame advancement; leaving resumes it
-            x_atom = int(round(app.canvas.coords(atom_ids[0])[0]))
-            y_atom_i = int(round(y_atom))
-            app._on_canvas_hover_motion(type("E", (), {"x": x_atom, "y": y_atom_i})())  # type: ignore[arg-type]
+            x_atom = int(round(0.5 * (atom_bbox[0] + atom_bbox[2])))
+            y_atom = int(round(0.5 * (atom_bbox[1] + atom_bbox[3])))
+            app._on_canvas_hover_motion(type("E", (), {"x": x_atom, "y": y_atom})())  # type: ignore[arg-type]
             self.assertTrue(app._welcome_hover_paused)
             paused_idx = app._welcome_frame_idx
             app._tick_welcome_animation()
@@ -1468,12 +1492,22 @@ class TestAtomicBlender(unittest.TestCase):
 
             n_frames = len(app._welcome_photo_refs)
             self.assertGreaterEqual(n_frames, 72)
-            seen_title_colors: set[str] = set()
-            for _ in range(n_frames):
-                seen_title_colors.add(app.canvas.itemcget(title_ids[0], "fill"))
+            # Header brightens then holds steady after step >= 36 while prompt keeps repeating
+            fill_0 = app.canvas.itemcget(title_ids[0], "fill")
+            for _ in range(16):
                 app._tick_welcome_animation()
-            self.assertEqual(app._welcome_frame_idx, 0)
-            self.assertGreater(len(seen_title_colors), 4)
+            fill_16 = app.canvas.itemcget(title_ids[0], "fill")
+            self.assertNotEqual(fill_0, fill_16)
+            for _ in range(20):
+                app._tick_welcome_animation()
+            fill_36 = app.canvas.itemcget(title_ids[0], "fill")
+            prompt_36 = app.canvas.itemcget(drag_ids[0], "fill")
+            for _ in range(16):
+                app._tick_welcome_animation()
+            fill_52 = app.canvas.itemcget(title_ids[0], "fill")
+            prompt_52 = app.canvas.itemcget(drag_ids[0], "fill")
+            self.assertEqual(fill_36, fill_52)
+            self.assertNotEqual(prompt_36, prompt_52)
             self.assertIsNotNone(app._welcome_after_id)
         finally:
             app.destroy()

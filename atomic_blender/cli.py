@@ -540,7 +540,7 @@ def render_welcome_loop_with_blender(
             "background_color": [0.9, 0.92, 0.95],
         },
         "camera": {"margin": 1.06},
-        "render": {"resolution": [240, 240], "samples": 18, "transparent": True},
+        "render": {"resolution": [360, 360], "samples": 16, "transparent": True},
     }
 
     style_studio = copy.deepcopy(base_style)
@@ -619,7 +619,7 @@ for s_idx, style in enumerate(styles):
         structure=structure,
         style=style,
         view='iso',
-        resolution=(240, 240),
+        resolution=(360, 360),
         reset_factory=True,
     )
     scene = bpy.context.scene
@@ -674,7 +674,7 @@ for s_idx, style in enumerate(styles):
         )
 
         # Solid backdrop matching the GUI canvas (#0F1115) prevents 8-bit GIF glow banding
-        backdrop = Image.new("RGBA", (240, 240), (15, 17, 21, 255))
+        backdrop = Image.new("RGBA", (360, 360), (15, 17, 21, 255))
 
         composited: list[Image.Image] = []
         for k in range(n_frames):
