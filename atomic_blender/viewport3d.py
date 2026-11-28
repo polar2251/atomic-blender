@@ -578,6 +578,15 @@ def _find_bonds(
     return np.asarray(bi, dtype=np.int32), np.asarray(bj, dtype=np.int32)
 
 
+def _interactive_lod_scale(n_atoms: int) -> float:
+    """Return an adaptive viewport render scale during interactive drag/zoom."""
+    if n_atoms >= 800:
+        return 0.50
+    if n_atoms >= 200:
+        return 0.62
+    return 0.75
+
+
 @dataclass
 class ViewportScene:
     """In-memory 3D representation and camera state shared with Blender Cycles."""
@@ -1039,9 +1048,10 @@ class ViewportScene:
 
         cw = max(16, int(canvas_w))
         ch = max(16, int(canvas_h))
+        lod = _interactive_lod_scale(len(self.positions)) if (interactive and cw >= 64 and ch >= 64) else 1.0
         ss = 1.0
-        rw = cw
-        rh = ch
+        rw = max(16, int(round(cw * lod)))
+        rh = max(16, int(round(ch * lod)))
 
         # Background canvas + clipped camera output frame
         outer_bg = (21, 23, 28, 255) if self.dark_backdrop else (232, 234, 237, 255)
@@ -1223,8 +1233,12 @@ class ViewportScene:
 
             for idx in range(len(self.positions)):
                 diam_px = max(2, int(round(2.0 * float(self.radii[idx]) * px_per_a)))
-                z_norm = (float(az[idx]) - z_min) / z_span
-                bucket = min(2, max(0, int(z_norm * 2.999)))
+                if interactive:
+                    diam_px = max(2, (diam_px + 1) & ~1)
+                    bucket = 1
+                else:
+                    z_norm = (float(az[idx]) - z_min) / z_span
+                    bucket = min(2, max(0, int(z_norm * 2.999)))
                 draw_items.append((float(az[idx]), 2, ("atom", float(ax[idx]), float(ay[idx]), diam_px, idx, bucket)))
 
         draw_items.sort(key=lambda item: (item[0], item[1]))
@@ -1232,6 +1246,7 @@ class ViewportScene:
         # Two-phase render: draw vector segments onto `draw`, flushing before compositing sprites
         bond_col_cache: dict[tuple[str, int], tuple[tuple[int, int, int, int], tuple[int, int, int, int]]] = {}
         simple_drag_bonds = bool(interactive and len(self.bond_i) > 150)
+        fast_drag_scene = bool(interactive and len(self.positions) > 250)
         for _z, _ord, payload in draw_items:
             tag = payload[0]
             if tag == "cell":
@@ -1262,7 +1277,10 @@ class ViewportScene:
                         )
             elif tag == "dashed_bond":
                 _, px0, py0, px1, py1, bw, d_rgba = payload
-                _draw_dashed_segment(draw, (px0, py0), (px1, py1), fill=d_rgba, width=bw, dash_px=7.0, gap_px=5.0)
+                if fast_drag_scene:
+                    draw.line((px0, py0, px1, py1), fill=d_rgba, width=bw)
+                else:
+                    _draw_dashed_segment(draw, (px0, py0), (px1, py1), fill=d_rgba, width=bw, dash_px=7.0, gap_px=5.0)
             elif tag == "poly_face":
                 _, poly2d, f_rgba = payload
                 draw.polygon(poly2d, fill=f_rgba)
@@ -1309,7 +1327,7 @@ class ViewportScene:
                             outline=(45, 212, 191, 240),
                             width=max(2, min(4, int(round(diam_px * 0.08)))),
                         )
-                    if self.show_labels and diam_px >= 10:
+                    if self.show_labels and diam_px >= 10 and not fast_drag_scene:
                         lbl = atom_label(idx, self.symbols[idx])
                         px_font = max(9, min(15, int(round(diam_px * (0.31 if len(lbl) >= 3 else 0.36)))))
                         lfont = _load_overlay_font(px_font)
@@ -1405,6 +1423,8 @@ class ViewportScene:
                 outline=border_col,
                 width=1,
             )
+        if rw != cw or rh != ch:
+            img = img.resize((cw, ch), Image.Resampling.BILINEAR)
         return img
 
     def to_view_dict(
