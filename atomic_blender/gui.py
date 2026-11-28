@@ -5780,7 +5780,17 @@ def main(argv: list[str] | None = None) -> int:
         return cli_main(raw_argv[2:])
     parser = argparse.ArgumentParser(prog="atomic-blender-gui", description="Launch Atomic Blender desktop GUI")
     parser.add_argument("input", nargs="?", default=None, help="Optional structure file to prefill")
+    parser.add_argument("--tk", action="store_true", help="Force legacy Tkinter desktop UI")
     args = parser.parse_args(raw_argv)
+    use_tk = bool(args.tk) or os.environ.get("ATOMIC_BLENDER_BACKEND", "").strip().lower() == "tk"
+    if not use_tk:
+        try:
+            from atomic_blender.qt_gui import HAS_PYSIDE6, launch_qt_gui
+
+            if HAS_PYSIDE6:
+                return launch_qt_gui(initial_input=args.input)
+        except Exception:
+            pass
     return launch_gui(initial_input=args.input)
 
 
