@@ -708,8 +708,16 @@ class AtomicStudioQtWindow(QMainWindow):
         op_row.addWidget(self.lbl_opacity)
         lay.addLayout(op_row)
 
+        self.chk_fade_selected = QCheckBox("Fade Selected Atoms")
+        self.chk_fade_selected.setChecked(False)
+        self.chk_fade_selected.setToolTip("Fade selected atoms to the Opacity slider level")
+        self.chk_fade_selected.toggled.connect(self._on_fade_selected_toggled)
+        lay.addWidget(self.chk_fade_selected)
+
         self.chk_fade_unselected = QCheckBox("Fade Unselected Atoms")
-        self.chk_fade_unselected.toggled.connect(lambda: self._sync_selection_and_alphas(trigger_blender=True))
+        self.chk_fade_unselected.setChecked(False)
+        self.chk_fade_unselected.setToolTip("Fade unselected background atoms to the Opacity slider level")
+        self.chk_fade_unselected.toggled.connect(self._on_fade_unselected_toggled)
         lay.addWidget(self.chk_fade_unselected)
 
         self.chk_selection_outline = QCheckBox("Show Selection Outline")
@@ -1352,6 +1360,22 @@ class AtomicStudioQtWindow(QMainWindow):
             self.viewport._overlay.update()
             self._record_history_snapshot()
 
+    def _on_fade_selected_toggled(self, checked: bool) -> None:
+        if checked and self.chk_fade_unselected.isChecked():
+            self.chk_fade_unselected.blockSignals(True)
+            self.chk_fade_unselected.setChecked(False)
+            self.chk_fade_unselected.blockSignals(False)
+        self._sync_selection_and_alphas(trigger_blender=True)
+        self._record_history_snapshot()
+
+    def _on_fade_unselected_toggled(self, checked: bool) -> None:
+        if checked and self.chk_fade_selected.isChecked():
+            self.chk_fade_selected.blockSignals(True)
+            self.chk_fade_selected.setChecked(False)
+            self.chk_fade_selected.blockSignals(False)
+        self._sync_selection_and_alphas(trigger_blender=True)
+        self._record_history_snapshot()
+
     def _update_measurement_label(self) -> None:
         if self._structure_cache is None:
             self.lbl_measurement.setText("Click 1–4 atoms to measure distance / angle / dihedral")
@@ -1378,7 +1402,7 @@ class AtomicStudioQtWindow(QMainWindow):
                 self.slider_opacity.value() / 100.0,
                 invert=True,
             )
-        elif self._selected_atoms and self.slider_opacity.value() < 100:
+        elif self.chk_fade_selected.isChecked() and self._selected_atoms:
             alphas = compute_atom_alphas(
                 n,
                 self._selected_atoms,
@@ -1988,6 +2012,7 @@ class AtomicStudioQtWindow(QMainWindow):
             "selected_atoms": sorted(self._selected_atoms),
             "selection_order": list(self._selection_order),
             "opacity": int(self.slider_opacity.value()),
+            "fade_selected": bool(self.chk_fade_selected.isChecked()),
             "fade_unselected": bool(self.chk_fade_unselected.isChecked()),
             "show_selection_outline": bool(self.chk_selection_outline.isChecked()),
         }
@@ -2024,6 +2049,7 @@ class AtomicStudioQtWindow(QMainWindow):
                 self.chk_labels,
                 self.chk_dark,
                 self.slider_opacity,
+                self.chk_fade_selected,
                 self.chk_fade_unselected,
                 self.chk_selection_outline,
             )
@@ -2047,6 +2073,7 @@ class AtomicStudioQtWindow(QMainWindow):
             self.chk_dark.setChecked(bool(snap.get("dark", True)))
             self.slider_opacity.setValue(int(snap.get("opacity", 30)))
             self.lbl_opacity.setText(f"{self.slider_opacity.value()}%")
+            self.chk_fade_selected.setChecked(bool(snap.get("fade_selected", False)))
             self.chk_fade_unselected.setChecked(bool(snap.get("fade_unselected", False)))
             self.chk_selection_outline.setChecked(bool(snap.get("show_selection_outline", True)))
             for w in widgets:
