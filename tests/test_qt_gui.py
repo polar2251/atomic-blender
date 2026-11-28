@@ -111,6 +111,40 @@ class TestQtGui(unittest.TestCase):
             win.close()
             self.app.processEvents()
 
+    def test_camera_presets_preserve_cell_vectors_and_fit_atoms(self) -> None:
+        import json
+        import numpy as np
+        from atomic_blender.cli import resolve_style_path
+        from atomic_blender.viewport3d import ViewportScene, preset_to_quat
+
+        style = json.loads(resolve_style_path("default").read_text(encoding="utf-8"))
+        cu_unit = {
+            "symbols": ["Cu"] * 4,
+            "positions": [
+                [0.0, 0.0, 0.0],
+                [0.0, 1.8075, 1.8075],
+                [1.8075, 0.0, 1.8075],
+                [1.8075, 1.8075, 0.0],
+            ],
+            "cell": [[3.615, 0.0, 0.0], [0.0, 3.615, 0.0], [0.0, 0.0, 3.615]],
+            "pbc": [True, True, True],
+            "has_cell": True,
+            "origin": [0.0, 0.0, 0.0],
+        }
+        vp = ViewportScene.from_neutral_dict(cu_unit, style=style, radius_scale=1.35, bonds_mode="none")
+        orig_cell = vp.cell_vecs.copy()
+        min_expected_scale = 3.615 + 2.0 * float(vp.radii[0])
+
+        for preset in ("iso", "side-oblique", "a", "b", "c", "a*", "b*", "c*"):
+            q = preset_to_quat(preset, vp.cell_vecs)
+            vp.fit_camera(quat=q, aspect=1.0)
+            self.assertTrue(np.allclose(vp.cell_vecs, orig_cell), f"cell_vecs mutated on preset {preset}")
+            self.assertGreaterEqual(
+                vp.ortho_scale,
+                min_expected_scale,
+                f"ortho_scale collapsed ({vp.ortho_scale}) on preset {preset}",
+            )
+
 
 if __name__ == "__main__":
     unittest.main()
