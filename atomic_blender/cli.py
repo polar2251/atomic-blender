@@ -902,10 +902,46 @@ def build_standalone_exe(output_dir: Path | None = None, install_shortcuts: bool
             "atomic_blender.elements",
             "--hidden-import",
             "atomic_blender.viewport3d",
+            "--hidden-import",
+            "atomic_blender.qt_gui",
+            "--hidden-import",
+            "atomic_blender.qt_gui.window",
+            "--hidden-import",
+            "atomic_blender.qt_gui.gl_viewport",
+            "--hidden-import",
+            "atomic_blender.qt_gui.theme",
+            "--hidden-import",
+            "OpenGL.platform.win32",
+            "--hidden-import",
+            "OpenGL.arrays.numpymodule",
+            "--hidden-import",
+            "OpenGL.arrays.vbo",
             "--collect-submodules",
             "ase.io",
             "--collect-data",
             "ase",
+            "--exclude-module",
+            "PySide6.QtWebEngineCore",
+            "--exclude-module",
+            "PySide6.QtWebEngineWidgets",
+            "--exclude-module",
+            "PySide6.QtQuick",
+            "--exclude-module",
+            "PySide6.QtQml",
+            "--exclude-module",
+            "PySide6.QtMultimedia",
+            "--exclude-module",
+            "PySide6.QtCharts",
+            "--exclude-module",
+            "PySide6.Qt3DCore",
+            "--exclude-module",
+            "PySide6.QtDesigner",
+            "--exclude-module",
+            "PySide6.QtPdf",
+            "--exclude-module",
+            "PySide6.QtSql",
+            "--exclude-module",
+            "PySide6.QtNetwork",
             "--exclude-module",
             "matplotlib",
             "--exclude-module",
@@ -1017,9 +1053,23 @@ def cmd_install_desktop(args: argparse.Namespace) -> int:
 
 def cmd_gui(args: argparse.Namespace) -> int:
     """Launch the standalone desktop GUI client."""
+    backend = getattr(args, "backend", "auto")
+    initial = str(args.input) if args.input else None
+    if backend in ("auto", "qt"):
+        try:
+            from atomic_blender.qt_gui import HAS_PYSIDE6, launch_qt_gui
+
+            if HAS_PYSIDE6:
+                return launch_qt_gui(initial_input=initial)
+            if backend == "qt":
+                raise RuntimeError("PySide6 backend requested but PySide6 is not installed.")
+        except Exception:
+            if backend == "qt":
+                raise
+
     from atomic_blender.gui import launch_gui
 
-    return launch_gui(initial_input=str(args.input) if args.input else None)
+    return launch_gui(initial_input=initial)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -1072,6 +1122,12 @@ def build_parser() -> argparse.ArgumentParser:
 
     p_gui = sub.add_parser("gui", help="Launch the standalone desktop GUI client")
     p_gui.add_argument("input", nargs="?", type=Path, default=None, help="Optional structure file to prefill")
+    p_gui.add_argument(
+        "--backend",
+        choices=["auto", "qt", "tk"],
+        default="auto",
+        help="Desktop GUI toolkit backend (default: auto -> PySide6/OpenGL with Tk fallback)",
+    )
     p_gui.set_defaults(func=cmd_gui)
 
     p_desk = sub.add_parser("install-desktop", help="Install Desktop and Start Menu shortcuts (and optional standalone .exe)")

@@ -15,6 +15,12 @@ dependencies = [
     "pillow>=9.0",
 ]
 
+[project.optional-dependencies]
+qt = [
+    "PySide6>=6.6",
+    "PyOpenGL>=3.1.7",
+]
+
 [project.scripts]
 atomic-blender = "atomic_blender.cli:main"
 
