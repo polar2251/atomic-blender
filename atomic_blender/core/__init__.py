@@ -2,10 +2,12 @@
 
 from atomic_blender.core.clipboard import copy_pil_image_to_clipboard, open_folder
 from atomic_blender.core.config import (
+    JOURNAL_PRESETS,
     MATERIAL_FINISH_PRESETS,
     GuiRenderConfig,
     build_render_cli_args,
     compute_preview_resolution,
+    embed_png_dpi,
     extract_input_path,
     format_input_display,
     inspect_structure_summary,
@@ -28,6 +30,7 @@ from atomic_blender.core.preview_worker import BlenderPreviewWorker
 __all__ = [
     "BlenderPreviewWorker",
     "GuiRenderConfig",
+    "JOURNAL_PRESETS",
     "MATERIAL_FINISH_PRESETS",
     "UndoHistory",
     "auto_detect_adsorbate_indices",
@@ -39,6 +42,7 @@ __all__ = [
     "compute_preview_resolution",
     "compute_selection_measurement",
     "copy_pil_image_to_clipboard",
+    "embed_png_dpi",
     "extract_input_path",
     "find_neighbor_atoms",
     "format_input_display",

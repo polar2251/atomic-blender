@@ -11,6 +11,35 @@ import numpy as np
 
 from atomic_blender.viewport3d import compute_cell_parameters
 
+JOURNAL_PRESETS: dict[str, tuple[int, int, int]] = {
+    "1400×1400": (1400, 1400, 300),
+    "700×700": (700, 700, 300),
+    "1400×1200": (1400, 1200, 300),
+    "1920×1080": (1920, 1080, 300),
+    "Nature 1-Col (300 DPI)": (1051, 1051, 300),
+    "Nature 2-Col (300 DPI)": (2161, 1440, 300),
+    "ACS 1-Col (600 DPI)": (2008, 2008, 600),
+    "ACS 2-Col (600 DPI)": (4205, 2400, 600),
+}
+
+
+def embed_png_dpi(png_path: Path, dpi: int = 300) -> bool:
+    """Embed physical ``dpi`` metadata into an exported PNG image when Pillow is available."""
+    p = Path(png_path)
+    if not p.is_file():
+        return False
+    target_dpi = max(72, int(dpi))
+    try:
+        from PIL import Image
+
+        with Image.open(p) as im:
+            im.load()
+            im.save(p, format="PNG", dpi=(target_dpi, target_dpi))
+        return True
+    except Exception:
+        return False
+
+
 MATERIAL_FINISH_PRESETS: dict[str, dict[str, float]] = {
     "studio": {},
     "chalk": {
