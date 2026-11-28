@@ -103,10 +103,10 @@ def axes_to_quat(right: np.ndarray, up: np.ndarray, back: np.ndarray) -> Quat:
 
 def direction_to_quat(view_dir: np.ndarray, up_hint: np.ndarray | None = None) -> Quat:
     """Compute camera quaternion looking from ``+view_dir`` toward the origin."""
-    vd = np.asarray(view_dir, dtype=np.float64)
-    vd /= max(1e-12, float(np.linalg.norm(vd)))
+    vd = np.array(view_dir, dtype=np.float64, copy=True)
+    vd = vd / max(1e-12, float(np.linalg.norm(vd)))
     forward = -vd
-    up = np.array([0.0, 0.0, 1.0], dtype=np.float64) if up_hint is None else np.asarray(up_hint, dtype=np.float64)
+    up = np.array([0.0, 0.0, 1.0], dtype=np.float64) if up_hint is None else np.array(up_hint, dtype=np.float64, copy=True)
     up = up / max(1e-12, float(np.linalg.norm(up)))
     if abs(float(np.dot(forward, up))) > 0.999:
         up = np.array([0.0, 1.0, 0.0] if abs(forward[2]) > 0.9 else [0.0, 0.0, 1.0], dtype=np.float64)
@@ -162,7 +162,7 @@ def preset_to_quat(preset: str, cell_vecs: np.ndarray | None = None) -> Quat:
 
     def _axis(idx: int, fallback: tuple[float, float, float]) -> np.ndarray:
         if cell_vecs is not None and len(cell_vecs) == 3:
-            vec = np.asarray(cell_vecs[idx], dtype=np.float64)
+            vec = np.array(cell_vecs[idx], dtype=np.float64, copy=True)
             if float(np.linalg.norm(vec)) > 1e-6:
                 return vec
         return np.array(fallback, dtype=np.float64)
@@ -919,10 +919,14 @@ class ViewportScene:
         self.target = target
         right, up, _ = quat_to_axes(self.quat)
         rel = pts - target
-        xs_c = np.max(np.abs(rel @ right)) if len(pts) else 1.0
-        ys_c = np.max(np.abs(rel @ up)) if len(pts) else 1.0
-        half_w = max(float(xs_c), 0.5) * self.margin
-        half_h = max(float(ys_c), 0.5) * self.margin
+        xs_c = float(np.max(np.abs(rel @ right))) if len(pts) else 1.0
+        ys_c = float(np.max(np.abs(rel @ up))) if len(pts) else 1.0
+        if self.show_atoms and len(self.positions) > 0 and crop_z is None:
+            atom_rel = self.positions - target
+            xs_c = max(xs_c, float(np.max(np.abs(atom_rel @ right) + self.radii)))
+            ys_c = max(ys_c, float(np.max(np.abs(atom_rel @ up) + self.radii)))
+        half_w = max(xs_c, 0.5) * self.margin
+        half_h = max(ys_c, 0.5) * self.margin
         self.ortho_scale = max(2.0 * half_w, 2.0 * half_h * max(0.05, aspect))
 
     def orbit(self, d_yaw_rad: float, d_pitch_rad: float) -> None:
