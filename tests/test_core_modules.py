@@ -65,6 +65,21 @@ class TestCoreModules(unittest.TestCase):
         self.assertEqual(len(h), 0)
         self.assertIsNone(h.current())
 
+    def test_journal_presets_and_embed_png_dpi(self) -> None:
+        import tempfile
+        from PIL import Image
+
+        self.assertEqual(core.JOURNAL_PRESETS["Nature 1-Col (300 DPI)"], (1051, 1051, 300))
+        self.assertEqual(core.JOURNAL_PRESETS["ACS 2-Col (600 DPI)"], (4205, 2400, 600))
+        with tempfile.TemporaryDirectory() as tmp:
+            p = Path(tmp) / "out.png"
+            Image.new("RGBA", (32, 32), (20, 40, 60, 255)).save(p)
+            self.assertTrue(core.embed_png_dpi(p, 600))
+            with Image.open(p) as im:
+                dpi_x, dpi_y = im.info.get("dpi", (0, 0))
+                self.assertAlmostEqual(dpi_x, 600, places=0)
+                self.assertAlmostEqual(dpi_y, 600, places=0)
+
     def test_gui_reexports_core_symbols_identically(self) -> None:
         for sym in (
             "BlenderPreviewWorker",

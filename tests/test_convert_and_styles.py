@@ -1918,6 +1918,78 @@ class TestAtomicBlender(unittest.TestCase):
                 )
                 self.assertIn("CYCLES_PERF_OK", b_proc.stdout)
 
+    def test_commercial_ux_undo_redo_progress_cancel_hud_and_builtin_samples(self) -> None:
+        from atomic_blender.gui import AtomicBlenderApp, JOURNAL_PRESETS
+
+        st = {
+            "symbols": ["Cu", "Cu"],
+            "positions": [[0.0, 0.0, 0.0], [2.5, 0.0, 0.0]],
+            "cell": [[6.0, 0.0, 0.0], [0.0, 6.0, 0.0], [0.0, 0.0, 6.0]],
+            "pbc": [True, True, True],
+            "has_cell": True,
+            "origin": [0.0, 0.0, 0.0],
+        }
+        app = AtomicBlenderApp()
+        app.withdraw()
+        try:
+            app.var_blender.set("")
+            app.canvas.configure(width=760, height=560)
+            app.update_idletasks()
+
+            # 1. Built-in Welcome sample loader pills present & clickable loader sets Input
+            app._draw_3d_viewport()
+            self.assertEqual(len(app.canvas.find_withtag("welcome_samples")), 6)
+            app._load_builtin_sample("cu_bulk")
+            self.assertIn("fcc_cu_bulk.cif", app.var_input.get())
+
+            # 2. Undo / Redo captures & restores visual edits
+            app._history.clear()
+            app._structure_cache = st
+            app._structure_version = 1
+            app.var_inspector.set("Cu2 | 2 atoms (Cu)")
+            app._rebuild_viewport(reset_camera=True, trigger_preview=False)
+            self.assertEqual(app.var_material_finish.get(), "studio")
+            self.assertTrue(len(app.canvas.find_withtag("hud_banner")) >= 1)
+
+            app._set_material_finish("chalk")
+            self.assertEqual(app.var_material_finish.get(), "chalk")
+            self.assertTrue(app._history.can_undo)
+            app._undo()
+            self.assertEqual(app.var_material_finish.get(), "studio")
+            self.assertTrue(app._history.can_redo)
+            app._redo()
+            self.assertEqual(app.var_material_finish.get(), "chalk")
+
+            # 3. Journal DPI preset updates resolution & target DPI
+            app.var_res_preset_label.set("ACS 1-Col (600 DPI)")
+            app._on_res_preset_selected()
+            self.assertEqual((app.var_res_w.get(), app.var_res_h.get(), app._target_dpi), JOURNAL_PRESETS["ACS 1-Col (600 DPI)"])
+
+            # 4. Progress bar & Cancel button visibility + kill handling
+            class _DummyProc:
+                def __init__(self) -> None:
+                    self.killed = False
+
+                def poll(self) -> None:
+                    return None
+
+                def kill(self) -> None:
+                    self.killed = True
+
+            dummy = _DummyProc()
+            app._active_render_proc = dummy  # type: ignore[assignment]
+            app._set_busy(True, "Rendering...")
+            self.assertEqual(app._render_progress.winfo_manager(), "pack")
+            self.assertEqual(app.btn_cancel_render.winfo_manager(), "pack")
+            app._on_cancel_render()
+            self.assertTrue(dummy.killed)
+            self.assertTrue(app._render_cancelled)
+            app._set_busy(False, "Ready")
+            self.assertEqual(app._render_progress.winfo_manager(), "")
+            self.assertEqual(app.btn_cancel_render.winfo_manager(), "")
+        finally:
+            app.destroy()
+
 
 if __name__ == "__main__":
     unittest.main()

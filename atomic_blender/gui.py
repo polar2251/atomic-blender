@@ -30,6 +30,7 @@ from atomic_blender.cli import (
     resolve_style_path,
 )
 from atomic_blender.core import (
+    JOURNAL_PRESETS,
     MATERIAL_FINISH_PRESETS,
     BlenderPreviewWorker,
     GuiRenderConfig,
@@ -43,6 +44,7 @@ from atomic_blender.core import (
     compute_preview_resolution,
     compute_selection_measurement,
     copy_pil_image_to_clipboard,
+    embed_png_dpi,
     extract_input_path,
     find_neighbor_atoms,
     format_input_display,
@@ -456,6 +458,71 @@ class DarkSlider(tk.Canvas):
         self.create_oval(tx - 2.5, cy - 2.5, tx + 2.5, cy + 2.5, fill="#0F172A", outline="")
 
 
+class DarkTooltip:
+    """Lightweight dark hover tooltip with delayed popup and automatic cleanup."""
+
+    def __init__(self, widget: tk.Widget, text: str, delay_ms: int = 450) -> None:
+        self._widget = widget
+        self._text = text
+        self._delay_ms = max(100, int(delay_ms))
+        self._after_id: str | None = None
+        self._win: tk.Toplevel | None = None
+        widget.bind("<Enter>", self._on_enter, add="+")
+        widget.bind("<Leave>", self._on_leave, add="+")
+        widget.bind("<ButtonPress>", self._on_leave, add="+")
+        widget.bind("<Destroy>", self._on_leave, add="+")
+
+    def _on_enter(self, _event: tk.Event | None = None) -> None:
+        self._cancel()
+        if not self._widget.winfo_exists():
+            return
+        self._after_id = self._widget.after(self._delay_ms, self._show)
+
+    def _on_leave(self, _event: tk.Event | None = None) -> None:
+        self._cancel()
+        self._hide()
+
+    def _cancel(self) -> None:
+        if self._after_id is not None:
+            try:
+                self._widget.after_cancel(self._after_id)
+            except Exception:
+                pass
+            self._after_id = None
+
+    def _show(self) -> None:
+        self._after_id = None
+        if self._win is not None or not self._widget.winfo_exists():
+            return
+        try:
+            x = self._widget.winfo_rootx() + 8
+            y = self._widget.winfo_rooty() + self._widget.winfo_height() + 6
+            tw = tk.Toplevel(self._widget)
+            tw.wm_overrideredirect(True)
+            tw.wm_geometry(f"+{x}+{y}")
+            frame = tk.Frame(tw, bg="#1E2430", highlightbackground="#334155", highlightthickness=1, padx=7, pady=4)
+            frame.pack()
+            tk.Label(frame, text=self._text, bg="#1E2430", fg="#E2E8F0", font=("Segoe UI", 8)).pack()
+            self._win = tw
+        except Exception:
+            self._win = None
+
+    def _hide(self) -> None:
+        if self._win is not None:
+            try:
+                self._win.destroy()
+            except Exception:
+                pass
+            self._win = None
+
+
+def attach_tooltip(widget: Any, text: str) -> DarkTooltip | None:
+    """Attach a ``DarkTooltip`` to ``widget`` if it supports Tk bindings."""
+    if widget is None or not hasattr(widget, "bind"):
+        return None
+    return DarkTooltip(widget, text)
+
+
 def _enable_hidpi() -> None:
     """Enable native DPI awareness and AppUserModelID on Windows so fonts, canvas, and taskbar icon are crisp."""
     if sys.platform.startswith("win") or os.name == "nt":
@@ -483,10 +550,10 @@ class AtomicBlenderApp(tk.Tk):
         self.title("Atomic Blender Studio — Desktop Client")
         sw = max(800, int(self.winfo_screenwidth()))
         sh = max(600, int(self.winfo_screenheight()))
-        min_w = min(1320, max(1120, sw - 80))
-        min_h = min(880, max(760, sh - 90))
+        min_w = min(1320, max(960, sw - 24))
+        min_h = min(880, max(640, sh - 68))
         init_w = min(1520, max(min_w, int(sw * 0.80)))
-        init_h = min(996, max(min_h, int(round(init_w / 1.52))))
+        init_h = min(996, max(min_h, int(round(init_w / 1.48))))
         pos_x = max(0, (sw - init_w) // 2)
         pos_y = max(8, (sh - init_h) // 2 - 12)
         self.geometry(f"{init_w}x{init_h}+{pos_x}+{pos_y}")
@@ -545,6 +612,12 @@ class AtomicBlenderApp(tk.Tk):
         self._preview_seq = 0
         self._destroyed = False
         self._poll_after_id: str | None = None
+        self._history = UndoHistory(max_depth=50)
+        self._restoring_history = False
+        self._active_render_proc: subprocess.Popen[str] | None = None
+        self._render_cancelled = False
+        self._target_dpi = 300
+        self._welcome_sample_rects: list[tuple[float, float, float, float, str]] = []
         self._welcome_pil_frames: list[Any] = []
         self._welcome_photo_refs: list[Any] = []
         self._welcome_frame_idx: int = 0
@@ -801,6 +874,15 @@ class AtomicBlenderApp(tk.Tk):
 
         style.configure("Horizontal.TScale", background=panel, troughcolor=recessed, bordercolor=border)
         style.configure("Vertical.TScrollbar", background=ctrl, troughcolor=recessed, arrowcolor=muted, bordercolor=border)
+        style.configure(
+            "Horizontal.TProgressbar",
+            troughcolor=recessed,
+            background=accent,
+            bordercolor=border,
+            lightcolor=accent,
+            darkcolor=accent,
+            thickness=8,
+        )
 
     def _init_variables(self, initial_input: str | None) -> None:
         detected_blender = ""
@@ -946,8 +1028,15 @@ class AtomicBlenderApp(tk.Tk):
 
         status_bar = ttk.Frame(self, padding=(10, 2, 10, 6), style="Outer.TFrame")
         status_bar.pack(fill=tk.X)
+        self._status_bar = status_bar
         ttk.Label(status_bar, textvariable=self.var_status, style="Banner.TLabel", foreground="#94A3B8").pack(
             side=tk.LEFT
+        )
+        self.btn_cancel_render = ttk.Button(
+            status_bar, text="Cancel", style="Compact.TButton", width=0, command=self._on_cancel_render
+        )
+        self._render_progress = ttk.Progressbar(
+            status_bar, mode="indeterminate", length=110, style="Horizontal.TProgressbar"
         )
 
     def _apply_initial_sash(self) -> None:
@@ -1013,12 +1102,13 @@ class AtomicBlenderApp(tk.Tk):
         cb_res = ttk.Combobox(
             row_sz,
             textvariable=self.var_res_preset_label,
-            values=["1400×1400", "700×700", "1400×1200", "1920×1080"],
+            values=list(JOURNAL_PRESETS.keys()),
             state="readonly",
-            width=10,
+            width=18,
         )
         cb_res.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(6, 0))
         cb_res.bind("<<ComboboxSelected>>", lambda _e: self._on_res_preset_selected())
+        attach_tooltip(cb_res, "Resolution & publication DPI preset (Nature / ACS)")
 
         ttk.Label(right_col, text="ViewSrc").grid(row=1, column=0, sticky=tk.W, pady=2)
         row_vm = ttk.Frame(right_col)
@@ -1378,25 +1468,32 @@ class AtomicBlenderApp(tk.Tk):
             f_act, text="Render High-Res PNG", style="Accent.TButton", command=self._on_render
         )
         self.btn_render.pack(fill=tk.X, pady=(0, 4))
+        attach_tooltip(self.btn_render, "Render full-resolution Blender Cycles PNG (Ctrl+R)")
 
         row_sub = ttk.Frame(f_act, style="Outer.TFrame")
         row_sub.pack(fill=tk.X)
         for c_i in range(4):
             row_sub.columnconfigure(c_i, weight=1, uniform="sub_act")
-        ttk.Button(
+        btn_ts = ttk.Button(
             row_sub, text="Top+Side", style="Compact.TButton", width=0, command=self._on_render_top_side_panel
-        ).grid(row=0, column=0, sticky=tk.EW, padx=(0, 2))
-        ttk.Button(
+        )
+        btn_ts.grid(row=0, column=0, sticky=tk.EW, padx=(0, 2))
+        attach_tooltip(btn_ts, "Render combined Top + Side publication panel")
+        btn_batch = ttk.Button(
             row_sub, text="Batch...", style="Compact.TButton", width=0, command=self._on_batch_render_files
-        ).grid(row=0, column=1, sticky=tk.EW, padx=(0, 2))
+        )
+        btn_batch.grid(row=0, column=1, sticky=tk.EW, padx=(0, 2))
+        attach_tooltip(btn_batch, "Batch render multiple structure files")
         self.btn_blender = ttk.Button(
             row_sub, text="Blender", style="Compact.TButton", width=0, command=self._on_open_in_blender
         )
         self.btn_blender.grid(row=0, column=2, sticky=tk.EW, padx=(0, 2))
+        attach_tooltip(self.btn_blender, "Open current scene in Blender GUI")
         self.btn_folder = ttk.Button(
             row_sub, text="Folder", style="Compact.TButton", width=0, command=self._on_open_folder
         )
         self.btn_folder.grid(row=0, column=3, sticky=tk.EW)
+        attach_tooltip(self.btn_folder, "Open output folder")
 
     def _switch_tab(self, tab_name: str) -> None:
         alias = {"select": "selection", "scene": "tool"}.get(tab_name, tab_name)
@@ -1675,6 +1772,7 @@ class AtomicBlenderApp(tk.Tk):
         )
         self.combo_texture.grid(row=0, column=1, sticky=tk.EW, padx=(4, 0), pady=2)
         self.combo_texture.bind("<<ComboboxSelected>>", lambda _e: self._on_texture_selected())
+        attach_tooltip(self.combo_texture, "Surface shader texture (Studio / Chalk / Flat / Metal)")
 
         ttk.Label(self.f_rep_body, text="Scale").grid(row=1, column=0, sticky=tk.W, pady=2)
         row_sc = ttk.Frame(self.f_rep_body)
@@ -2247,6 +2345,14 @@ class AtomicBlenderApp(tk.Tk):
         self.bind("<Control-S>", lambda _e: self._on_key_shortcut("s", ctrl=True))
         self.bind("<Control-c>", lambda _e: self._on_key_shortcut("c", ctrl=True))
         self.bind("<Control-C>", lambda _e: self._on_key_shortcut("c", ctrl=True))
+        self.bind("<Control-z>", lambda _e: self._on_key_shortcut("z", ctrl=True))
+        self.bind("<Control-Z>", lambda _e: self._on_key_shortcut("z", ctrl=True))
+        self.bind("<Control-y>", lambda _e: self._on_key_shortcut("y", ctrl=True))
+        self.bind("<Control-Y>", lambda _e: self._on_key_shortcut("y", ctrl=True))
+        self.bind("<Control-Shift-Z>", lambda _e: self._on_key_shortcut("y", ctrl=True))
+        self.bind("<Control-Shift-z>", lambda _e: self._on_key_shortcut("y", ctrl=True))
+        self.bind("<F1>", lambda _e: self._on_key_shortcut("F1"))
+        self.bind("<KeyPress-question>", lambda _e: self._on_key_shortcut("F1"))
         for keysym, norm_key in (
             ("<KeyPress-r>", "r"),
             ("<KeyPress-R>", "r"),
@@ -2287,10 +2393,24 @@ class AtomicBlenderApp(tk.Tk):
                     return None
                 self._on_copy_image()
                 return "break"
+            if key == "z":
+                if self._is_typing_focus():
+                    return None
+                self._undo()
+                return "break"
+            if key == "y":
+                if self._is_typing_focus():
+                    return None
+                self._redo()
+                return "break"
             return None
 
         if self._is_typing_focus():
             return None
+
+        if key == "F1":
+            self._show_shortcuts_dialog()
+            return "break"
 
         if key in ("r", "Home"):
             self._on_reset_view()
@@ -2334,22 +2454,26 @@ class AtomicBlenderApp(tk.Tk):
             tb, text="Log", style="Tool.TButton", width=0, command=self._toggle_log_panel
         )
         self._btn_log_toggle.pack(side=tk.RIGHT)
+        attach_tooltip(self._btn_log_toggle, "Show / hide Cycles output log")
         self.btn_settings = ttk.Button(
             tb, text="⚙ Settings", style="Tool.TButton", width=0, command=self._toggle_settings_panel
         )
         self.btn_settings.pack(side=tk.RIGHT, padx=(0, 3))
-        ttk.Button(tb, text="Fit", style="Tool.TButton", width=0, command=self._on_reset_view).pack(
-            side=tk.LEFT, padx=(0, 3)
-        )
-        ttk.Button(tb, text="Save View", style="Tool.TButton", width=0, command=self._on_save_view_json).pack(
-            side=tk.LEFT, padx=(0, 3)
-        )
-        ttk.Button(tb, text="Copy", style="Tool.TButton", width=0, command=self._on_copy_image).pack(
-            side=tk.LEFT, padx=(0, 6)
-        )
-        DarkCheckbutton(
+        attach_tooltip(self.btn_settings, "Open Output, Blender, Resolution & Journal DPI settings")
+        btn_fit = ttk.Button(tb, text="Fit", style="Tool.TButton", width=0, command=self._on_reset_view)
+        btn_fit.pack(side=tk.LEFT, padx=(0, 3))
+        attach_tooltip(btn_fit, "Reset / fit camera to structure (R or Home)")
+        btn_sv = ttk.Button(tb, text="Save View", style="Tool.TButton", width=0, command=self._on_save_view_json)
+        btn_sv.pack(side=tk.LEFT, padx=(0, 3))
+        attach_tooltip(btn_sv, "Export exact camera framing as view.json")
+        btn_cp = ttk.Button(tb, text="Copy", style="Tool.TButton", width=0, command=self._on_copy_image)
+        btn_cp.pack(side=tk.LEFT, padx=(0, 6))
+        attach_tooltip(btn_cp, "Copy current render / viewport image to clipboard (Ctrl+C)")
+        chk_dark = DarkCheckbutton(
             tb, text="Dark", variable=self.var_dark_backdrop, command=self._on_backdrop_toggled
-        ).pack(side=tk.LEFT)
+        )
+        chk_dark.pack(side=tk.LEFT)
+        attach_tooltip(chk_dark, "Toggle dark / light viewport backdrop")
 
         self.canvas = tk.Canvas(f_prev, bg="#0F1115", highlightthickness=0)
         self.canvas.pack(fill=tk.BOTH, expand=True)
@@ -3590,6 +3714,7 @@ class AtomicBlenderApp(tk.Tk):
         self._refresh_atom_list()
         self._refresh_element_chip_styles()
         self._update_measurement_banner()
+        self._record_history_snapshot()
         self._redraw_canvas()
         if trigger_blender and (
             alphas_changed
@@ -3675,14 +3800,10 @@ class AtomicBlenderApp(tk.Tk):
         self._on_ghost_options_changed(trigger_blender=True)
 
     def _on_res_preset_selected(self) -> None:
-        res_map = {
-            "1400×1400": (1400, 1400),
-            "700×700": (700, 700),
-            "1400×1200": (1400, 1200),
-            "1920×1080": (1920, 1080),
-        }
-        w, h = res_map.get(self.var_res_preset_label.get(), (1400, 1400))
+        w, h, dpi = JOURNAL_PRESETS.get(self.var_res_preset_label.get(), (1400, 1400, 300))
+        self._target_dpi = dpi
         self._set_resolution(w, h)
+        self.var_status.set(f"Resolution {w}×{h} @ {dpi} DPI")
 
     def _on_view_source_selected(self) -> None:
         self.var_view_mode.set("file" if self.var_view_source_label.get() == "view.json" else "preset")
@@ -3889,6 +4010,37 @@ class AtomicBlenderApp(tk.Tk):
         self.btn_render.configure(state=state)
         self.btn_blender.configure(state=state)
         self.var_status.set(status_text)
+        if hasattr(self, "_render_progress") and hasattr(self, "btn_cancel_render"):
+            if busy:
+                if not self.btn_cancel_render.winfo_manager():
+                    self.btn_cancel_render.pack(side=tk.RIGHT, padx=(6, 0))
+                if not self._render_progress.winfo_manager():
+                    self._render_progress.pack(side=tk.RIGHT, padx=(8, 0))
+                try:
+                    self._render_progress.start(14)
+                except Exception:
+                    pass
+            else:
+                try:
+                    self._render_progress.stop()
+                except Exception:
+                    pass
+                if self._render_progress.winfo_manager():
+                    self._render_progress.pack_forget()
+                if self.btn_cancel_render.winfo_manager():
+                    self.btn_cancel_render.pack_forget()
+
+    def _on_cancel_render(self) -> None:
+        self._render_cancelled = True
+        proc = getattr(self, "_active_render_proc", None)
+        if proc is not None:
+            try:
+                if proc.poll() is None:
+                    proc.kill()
+            except Exception:
+                pass
+        self._append_log("Render cancelled by user.")
+        self.var_status.set("Cancelling render...")
 
     def _popen_cli(self, cli_args: list[str]) -> subprocess.Popen[str]:
         """Launch ``atomic_blender.cli`` cleanly in Python or frozen .exe mode without console flicker."""
@@ -3906,15 +4058,26 @@ class AtomicBlenderApp(tk.Tk):
 
     def _run_cli_async(self, cli_args: list[str], mode: str, target_path: Path) -> None:
         self._task_start = time.monotonic()
+        self._render_cancelled = False
         self._set_busy(True, f"Running {mode}...")
         self._append_log(f"$ atomic-blender {' '.join(cli_args)}")
 
         def worker() -> None:
             proc = self._popen_cli(cli_args)
-            assert proc.stdout is not None
-            for raw_line in proc.stdout:
-                self._queue.put(("log", raw_line))
-            rc = proc.wait()
+            self._active_render_proc = proc
+            try:
+                assert proc.stdout is not None
+                for raw_line in proc.stdout:
+                    self._queue.put(("log", raw_line))
+                rc = proc.wait()
+            finally:
+                try:
+                    if proc.stdout is not None:
+                        proc.stdout.close()
+                except Exception:
+                    pass
+                if self._active_render_proc is proc:
+                    self._active_render_proc = None
             self._queue.put(("done", (mode, rc, target_path)))
 
         threading.Thread(target=worker, daemon=True).start()
@@ -4227,6 +4390,7 @@ class AtomicBlenderApp(tk.Tk):
             self._ghost_vp_scene = None
         if reset_camera:
             self.var_canvas_mode.set("3d")
+        self._record_history_snapshot()
         self._redraw_canvas()
         if trigger_preview:
             self._request_blender_preview()
@@ -4389,6 +4553,11 @@ class AtomicBlenderApp(tk.Tk):
         return (cx, cy, hit_r)
 
     def _on_canvas_lbutton_down(self, event: tk.Event) -> None:
+        if self._vp_scene is None and self._pil_image is None:
+            for x0_s, y0_s, x1_s, y1_s, s_key in getattr(self, "_welcome_sample_rects", []):
+                if x0_s <= event.x <= x1_s and y0_s <= event.y <= y1_s:
+                    self._load_builtin_sample(s_key)
+                    return
         hit = self._axes_canvas_center()
         if hit is not None:
             ax_cx, ax_cy, hit_r = hit
@@ -4471,9 +4640,11 @@ class AtomicBlenderApp(tk.Tk):
             self._dragging = False
             self._drag_mode = None
             if was_axes:
+                self._record_history_snapshot()
                 self._redraw_canvas()
                 return
             if self.var_canvas_mode.get() == "3d":
+                self._record_history_snapshot()
                 self._draw_3d_viewport(interactive=False)
                 self._request_blender_preview()
 
@@ -4709,6 +4880,43 @@ class AtomicBlenderApp(tk.Tk):
             fill=formats_fill,
             tags=("welcome", "welcome_formats"),
         )
+        fmt_bbox = self.canvas.bbox("welcome_formats")
+        y_samples = (fmt_bbox[3] + 12) if fmt_bbox else (y_formats + 24)
+        sample_defs = (
+            ("cu_bulk", "Cu Bulk"),
+            ("water_box", "Water Box"),
+            ("co_pt111", "CO / Pt(111)"),
+        )
+        pill_bg = "#171B24" if dark_bg else "#E2E8F0"
+        pill_edge = "#2A3241" if dark_bg else "#CBD5E1"
+        pill_fg = "#94A3B8" if dark_bg else "#334155"
+        self._welcome_sample_rects = []
+        pill_w, pill_h, gap_x = 92, 24, 10
+        start_x = cx - ((len(sample_defs) * pill_w + (len(sample_defs) - 1) * gap_x) // 2)
+        for idx_s, (s_key, s_lbl) in enumerate(sample_defs):
+            x0_s = start_x + idx_s * (pill_w + gap_x)
+            x1_s = x0_s + pill_w
+            y1_s = y_samples + pill_h
+            self.canvas.create_rectangle(
+                x0_s,
+                y_samples,
+                x1_s,
+                y1_s,
+                fill=pill_bg,
+                outline=pill_edge,
+                width=1,
+                tags=("welcome", "welcome_samples", f"welcome_sample_{s_key}"),
+            )
+            self.canvas.create_text(
+                0.5 * (x0_s + x1_s),
+                0.5 * (y_samples + y1_s),
+                text=s_lbl,
+                anchor=tk.CENTER,
+                font=("Segoe UI", 8),
+                fill=pill_fg,
+                tags=("welcome", "welcome_samples", f"welcome_sample_{s_key}"),
+            )
+            self._welcome_sample_rects.append((x0_s, y_samples, x1_s, y1_s, s_key))
 
         if len(self._welcome_photo_refs) > 1 and self._welcome_after_id is None and not getattr(self, "_destroyed", False):
             self._welcome_after_id = self.after(WELCOME_FRAME_INTERVAL_MS, self._tick_welcome_animation)
@@ -4807,6 +5015,7 @@ class AtomicBlenderApp(tk.Tk):
             img = vp.render_image(cw, ch, res_w, res_h, interactive=is_interactive)
             self._vp_photo_ref = ImageTk.PhotoImage(img)
             self.canvas.create_image(0, 0, image=self._vp_photo_ref, anchor=tk.NW)
+            self._draw_hud_overlay()
             return
         pad = min(14.0, min(cw, ch) * 0.12)
         scale = min((cw - pad) / res_w, (ch - pad) / res_h)
@@ -5005,6 +5214,205 @@ class AtomicBlenderApp(tk.Tk):
             self._photo_ref = self._pil_image.subsample(factor, factor)
 
         self.canvas.create_image(cw // 2, ch // 2, image=self._photo_ref, anchor=tk.CENTER)
+        self._draw_hud_overlay()
+
+    def _draw_hud_overlay(self) -> None:
+        """Draw a subtle compact structure summary HUD pill at top-left when a structure is loaded."""
+        if self._structure_cache is None or not hasattr(self, "canvas"):
+            return
+        summary = self.var_inspector.get().strip()
+        if not summary:
+            return
+        if self._ghost_vp_scene is not None and self.var_compare_mode.get() == "side_by_side":
+            return
+        dark_bg = bool(self.var_dark_backdrop.get())
+        bg = "#131720" if dark_bg else "#F1F5F9"
+        edge = "#2A3241" if dark_bg else "#CBD5E1"
+        fg = "#CBD5E1" if dark_bg else "#1E293B"
+        txt_id = self.canvas.create_text(
+            18,
+            14,
+            text=summary,
+            anchor=tk.NW,
+            font=("Segoe UI", 8),
+            fill=fg,
+            tags=("hud", "hud_banner"),
+        )
+        bb = self.canvas.bbox(txt_id)
+        if bb is not None:
+            rect_id = self.canvas.create_rectangle(
+                bb[0] - 8,
+                bb[1] - 4,
+                bb[2] + 8,
+                bb[3] + 4,
+                fill=bg,
+                outline=edge,
+                width=1,
+                tags=("hud", "hud_banner"),
+            )
+            self.canvas.tag_lower(rect_id, txt_id)
+
+    def _capture_undo_state(self) -> dict[str, Any]:
+        snap: dict[str, Any] = {
+            "style": self.var_style.get(),
+            "material_finish": self.var_material_finish.get(),
+            "color_map": self.var_color_map.get(),
+            "bonds": self.var_bonds.get(),
+            "bond_color": self.var_bond_color.get(),
+            "radius_scale": round(float(self.var_radius_scale.get()), 4),
+            "show_cell": bool(self.var_show_cell.get()),
+            "show_cell_vectors": bool(self.var_show_cell_vectors.get()),
+            "show_polyhedra": bool(self.var_show_polyhedra.get()),
+            "show_axes": bool(self.var_show_axes.get()),
+            "axes_labels": bool(self.var_axes_labels.get()),
+            "axes_fixed": bool(self.var_axes_fixed.get()),
+            "axes_pos": [round(float(self._axes_pos[0]), 4), round(float(self._axes_pos[1]), 4)],
+            "show_scale_bar": bool(self.var_show_scale_bar.get()),
+            "show_hbonds": bool(self.var_show_hbonds.get()),
+            "hbond_mode": self.var_hbond_mode.get(),
+            "hbond_min": float(self.var_hbond_min.get()),
+            "hbond_max": float(self.var_hbond_max.get()),
+            "slice_mode": self.var_slice_mode.get(),
+            "slice_depth": round(float(self.var_slice_depth.get()), 4),
+            "slice_ghost": bool(self.var_slice_ghost.get()),
+            "dark_backdrop": bool(self.var_dark_backdrop.get()),
+            "show_atoms": bool(self._show_atoms),
+            "unsel_scale_mode": self.var_unsel_scale_mode.get(),
+            "sel_opacity": round(float(self.var_sel_opacity.get()), 4),
+            "alpha_invert": bool(self.var_alpha_invert.get()),
+            "selected_atoms": sorted(self._selected_atoms),
+            "selection_order": list(self._selection_order),
+            "custom_element_colors": dict(self._custom_element_colors),
+            "view_preset": self.var_view_preset.get(),
+            "use_interactive_cam": bool(self._use_interactive_cam),
+        }
+        if self._vp_scene is not None:
+            snap["camera"] = {
+                "quat": [round(float(v), 6) for v in self._vp_scene.quat],
+                "ortho_scale": round(float(self._vp_scene.ortho_scale), 6),
+                "target": [round(float(v), 6) for v in self._vp_scene.target],
+            }
+        return snap
+
+    def _record_history_snapshot(self) -> None:
+        if getattr(self, "_restoring_history", False) or not hasattr(self, "_history"):
+            return
+        if self._structure_cache is None:
+            return
+        self._history.push(self._capture_undo_state())
+
+    def _apply_undo_state(self, snap: dict[str, Any]) -> None:
+        self._restoring_history = True
+        try:
+            self.apply_figure_recipe(snap, trigger_preview=False)
+            self._selected_atoms = set(int(i) for i in snap.get("selected_atoms", []))
+            self._selection_order = [int(i) for i in snap.get("selection_order", [])]
+            self.var_alpha_invert.set(bool(snap.get("alpha_invert", False)))
+            self.var_unsel_scale_mode.set(str(snap.get("unsel_scale_mode", "same")))
+            op = float(snap.get("sel_opacity", 0.30))
+            self.var_sel_opacity.set(op)
+            self.var_sel_opacity_label.set(f"{int(round(op * 100.0))}%")
+            self.var_axes_fixed.set(bool(snap.get("axes_fixed", True)))
+            ax_pos = snap.get("axes_pos", [0.12, 0.86])
+            if isinstance(ax_pos, list) and len(ax_pos) == 2:
+                self._axes_pos = (float(ax_pos[0]), float(ax_pos[1]))
+            self._show_atoms = bool(snap.get("show_atoms", True))
+            self.var_show_atoms.set(self._show_atoms)
+            self._use_interactive_cam = bool(snap.get("use_interactive_cam", False))
+            if "view_preset" in snap:
+                self.var_view_preset.set(str(snap["view_preset"]))
+            self._sync_selection_and_alphas(trigger_blender=False)
+            if self._vp_scene is not None:
+                self._draw_3d_viewport(interactive=False)
+                self._request_blender_preview()
+        finally:
+            self._restoring_history = False
+
+    def _undo(self) -> None:
+        if not hasattr(self, "_history") or not self._history.can_undo:
+            self.var_status.set("Nothing to undo")
+            return
+        snap = self._history.undo()
+        if snap is not None:
+            self._apply_undo_state(snap)
+            self.var_status.set("Undo applied")
+
+    def _redo(self) -> None:
+        if not hasattr(self, "_history") or not self._history.can_redo:
+            self.var_status.set("Nothing to redo")
+            return
+        snap = self._history.redo()
+        if snap is not None:
+            self._apply_undo_state(snap)
+            self.var_status.set("Redo applied")
+
+    def _load_builtin_sample(self, sample_key: str) -> None:
+        """Load one of the built-in showcase structures cleanly from Welcome quick pills."""
+        rel_map = {
+            "cu_bulk": "fcc_cu_bulk.cif",
+            "water_box": "water_box.xyz",
+            "co_pt111": "co_on_pt111.vasp",
+        }
+        rel = rel_map.get(sample_key, "fcc_cu_bulk.cif")
+        cand_paths = [
+            package_dir().parent / "examples" / rel,
+            Path.cwd() / "examples" / rel,
+        ]
+        target = next((p for p in cand_paths if p.is_file()), None)
+        if target is None:
+            # Fallback embedded neutral JSON when launched outside the repo tree
+            fallback_structs = {
+                "cu_bulk": {
+                    "symbols": ["Cu"] * 4,
+                    "positions": [[0.0, 0.0, 0.0], [0.0, 1.8075, 1.8075], [1.8075, 0.0, 1.8075], [1.8075, 1.8075, 0.0]],
+                    "cell": [[3.615, 0.0, 0.0], [0.0, 3.615, 0.0], [0.0, 0.0, 3.615]],
+                    "pbc": [True, True, True],
+                    "has_cell": True,
+                    "origin": [0.0, 0.0, 0.0],
+                },
+                "water_box": {
+                    "symbols": ["O", "H", "H"],
+                    "positions": [[3.0, 3.0, 3.0], [3.757, 3.586, 3.0], [2.243, 3.586, 3.0]],
+                    "cell": [[6.0, 0.0, 0.0], [0.0, 6.0, 0.0], [0.0, 0.0, 6.0]],
+                    "pbc": [True, True, True],
+                    "has_cell": True,
+                    "origin": [0.0, 0.0, 0.0],
+                },
+                "co_pt111": {
+                    "symbols": ["Pt", "Pt", "Pt", "C", "O"],
+                    "positions": [[0.0, 0.0, 0.0], [2.77, 0.0, 0.0], [1.385, 2.399, 0.0], [1.385, 0.8, 1.85], [1.385, 0.8, 3.00]],
+                    "cell": [[5.54, 0.0, 0.0], [0.0, 4.80, 0.0], [0.0, 0.0, 14.0]],
+                    "pbc": [True, True, False],
+                    "has_cell": True,
+                    "origin": [0.0, 0.0, 0.0],
+                },
+            }
+            out_json = Path(self._preview_tmp_dir.name) / f"sample_{sample_key}.json"
+            out_json.write_text(json.dumps(fallback_structs.get(sample_key, fallback_structs["cu_bulk"])), encoding="utf-8")
+            target = out_json
+        self.var_input.set(format_input_display(str(target)))
+        self.var_output.set(str(target.with_suffix(".png")))
+        self._schedule_inspect()
+        self.var_status.set(f"Loading built-in sample: {target.name}")
+
+    def _show_shortcuts_dialog(self) -> None:
+        msg = (
+            "Mouse Controls:\n"
+            "  • Left-Drag: Orbit camera (or drag Reference Axes gizmo)\n"
+            "  • Right-Drag / Shift+Left-Drag: Pan view\n"
+            "  • Scroll Wheel: Zoom in / out\n"
+            "  • Double-Click Atom: Toggle select & measure geometry\n\n"
+            "Keyboard Shortcuts:\n"
+            "  • Ctrl+O: Open structure file\n"
+            "  • Ctrl+R / Ctrl+S: Render High-Res PNG\n"
+            "  • Ctrl+Z / Ctrl+Y: Undo / Redo visual edit\n"
+            "  • Ctrl+C: Copy current image to clipboard\n"
+            "  • R / Home: Fit & reset camera\n"
+            "  • L / A / Esc: Toggle labels / axes / clear selection\n"
+            "  • Arrows / Shift+Arrows / +/-: Step rotate, pan, or zoom\n"
+            "  • F1 or ?: Show this shortcuts reference"
+        )
+        messagebox.showinfo("Keyboard & Mouse Shortcuts", msg, parent=self)
 
     def destroy(self) -> None:
         self._destroyed = True
@@ -5080,6 +5488,7 @@ class AtomicBlenderApp(tk.Tk):
                 in_raw = extract_input_path(self.var_input.get())
                 if in_raw:
                     self._add_recent_file(in_raw)
+                self._history.clear()
                 self._rebuild_viewport(reset_camera=True, trigger_preview=True)
             elif kind == "structure_frames":
                 if len(payload) == 4:
@@ -5109,6 +5518,7 @@ class AtomicBlenderApp(tk.Tk):
                 if in_raw:
                     self._add_recent_file(in_raw)
                 if self._structure_cache is not None:
+                    self._history.clear()
                     self._rebuild_viewport(reset_camera=True, trigger_preview=True)
             elif kind == "preview_done":
                 seq, png_path = payload
@@ -5129,12 +5539,14 @@ class AtomicBlenderApp(tk.Tk):
             elif kind == "done":
                 mode, rc, target_path = payload
                 elapsed = time.monotonic() - self._task_start
-                if rc != 0:
+                if self._render_cancelled and rc != 0:
+                    self._set_busy(False, f"Cancelled after {elapsed:.1f}s")
+                elif rc != 0:
                     self._set_busy(False, f"Failed (exit {rc}) after {elapsed:.1f}s")
                     messagebox.showerror("Render Failed", f"Command exited with status {rc}. Check Log for details.")
                 elif mode == "render":
                     self._preview_seq += 1
-                    self._set_busy(False, f"Rendered {target_path.name} in {elapsed:.1f}s")
+                    self._set_busy(False, f"Rendered {target_path.name} in {elapsed:.1f}s ({self._target_dpi} DPI)")
                     cmap_info = getattr(self, "_active_colormap_info", None)
                     if (
                         (self.var_show_axes.get() or self.var_show_scale_bar.get() or cmap_info is not None)
@@ -5175,6 +5587,7 @@ class AtomicBlenderApp(tk.Tk):
                             out_img.save(target_path)
                         except Exception as exc:
                             self._append_log(f"Overlay warning: {exc}")
+                    embed_png_dpi(target_path, getattr(self, "_target_dpi", 300))
                     self._load_preview(target_path)
                 elif mode == "open_blender":
                     self._set_busy(False, f"Opening {target_path.name} in Blender...")
