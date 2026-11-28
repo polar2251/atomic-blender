@@ -712,6 +712,12 @@ class AtomicStudioQtWindow(QMainWindow):
         self.chk_fade_unselected.toggled.connect(lambda: self._sync_selection_and_alphas(trigger_blender=True))
         lay.addWidget(self.chk_fade_unselected)
 
+        self.chk_selection_outline = QCheckBox("Show Selection Outline")
+        self.chk_selection_outline.setChecked(True)
+        self.chk_selection_outline.setToolTip("Show or hide teal selection outline rings while keeping selection active")
+        self.chk_selection_outline.toggled.connect(self._on_selection_outline_toggled)
+        lay.addWidget(self.chk_selection_outline)
+
         self.lbl_measurement = QLabel("Click 1–4 atoms to measure distance / angle / dihedral")
         self.lbl_measurement.setObjectName("MeasureLabel")
         self.lbl_measurement.setWordWrap(True)
@@ -1149,8 +1155,9 @@ class AtomicStudioQtWindow(QMainWindow):
             axes_labels=True,
             dark_backdrop=bool(self.chk_dark.isChecked()),
             selected_atoms=set(self._selected_atoms),
+            show_selection_highlight=bool(self.chk_selection_outline.isChecked()),
             show_scale_bar=bool(self.chk_scale_bar.isChecked()),
-            show_measure_overlay=True,
+            show_measure_overlay=bool(self.chk_selection_outline.isChecked()),
             selection_order=list(self._selection_order),
             show_cell_vectors=bool(self.chk_cell_vectors.isChecked()),
         )
@@ -1335,6 +1342,15 @@ class AtomicStudioQtWindow(QMainWindow):
     def _on_opacity_changed(self, val: int) -> None:
         self.lbl_opacity.setText(f"{val}%")
         self._sync_selection_and_alphas(trigger_blender=False, sync_list=False)
+
+    def _on_selection_outline_toggled(self, checked: bool) -> None:
+        if self._vp_scene is not None:
+            self._vp_scene.show_selection_highlight = bool(checked)
+            self._vp_scene.show_measure_overlay = bool(checked)
+            self.viewport.mark_geometry_dirty()
+            self.viewport.update()
+            self.viewport._overlay.update()
+            self._record_history_snapshot()
 
     def _update_measurement_label(self) -> None:
         if self._structure_cache is None:
@@ -1742,8 +1758,15 @@ class AtomicStudioQtWindow(QMainWindow):
                         q = self._vp_scene.quat if self._vp_scene is not None else (1.0, 0.0, 0.0, 0.0)
                         cv = self._vp_scene.cell_vecs if (self._vp_scene is not None and self._vp_scene.has_cell) else None
                         render_reference_axes_overlay(out_img, q, show_labels=True, dark_backdrop=bool(self.chk_dark.isChecked()), cell_vecs=cv)
-                    if self._vp_scene is not None and (self.chk_labels.isChecked() or self._selected_atoms):
-                        render_atom_labels_and_selection_overlay(out_img, self._vp_scene, self._res_w, self._res_h, draw_labels=bool(self.chk_labels.isChecked()), draw_selection=bool(self._selected_atoms))
+                    if self._vp_scene is not None and (self.chk_labels.isChecked() or (self._selected_atoms and self.chk_selection_outline.isChecked())):
+                        render_atom_labels_and_selection_overlay(
+                            out_img,
+                            self._vp_scene,
+                            self._res_w,
+                            self._res_h,
+                            draw_labels=bool(self.chk_labels.isChecked()),
+                            draw_selection=bool(self._selected_atoms and self.chk_selection_outline.isChecked()),
+                        )
                     out_img.save(target_path)
                     embed_png_dpi(target_path, self._target_dpi)
                     self.viewport.set_blender_preview(out_img)
@@ -1966,6 +1989,7 @@ class AtomicStudioQtWindow(QMainWindow):
             "selection_order": list(self._selection_order),
             "opacity": int(self.slider_opacity.value()),
             "fade_unselected": bool(self.chk_fade_unselected.isChecked()),
+            "show_selection_outline": bool(self.chk_selection_outline.isChecked()),
         }
         if self._vp_scene is not None:
             snap["camera"] = {
@@ -2001,6 +2025,7 @@ class AtomicStudioQtWindow(QMainWindow):
                 self.chk_dark,
                 self.slider_opacity,
                 self.chk_fade_unselected,
+                self.chk_selection_outline,
             )
             for w in widgets:
                 w.blockSignals(True)
@@ -2023,6 +2048,7 @@ class AtomicStudioQtWindow(QMainWindow):
             self.slider_opacity.setValue(int(snap.get("opacity", 30)))
             self.lbl_opacity.setText(f"{self.slider_opacity.value()}%")
             self.chk_fade_unselected.setChecked(bool(snap.get("fade_unselected", False)))
+            self.chk_selection_outline.setChecked(bool(snap.get("show_selection_outline", True)))
             for w in widgets:
                 w.blockSignals(False)
 

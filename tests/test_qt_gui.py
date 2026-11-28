@@ -95,6 +95,21 @@ class TestQtGui(unittest.TestCase):
             self.app.processEvents()
             self.assertEqual((win._res_w, win._res_h, win._target_dpi), JOURNAL_PRESETS["ACS 1-Col (600 DPI)"])
 
+            # 6b. Select tab: hide selection outline while keeping selection active (visible by default)
+            win.switch_tab("select")
+            self.assertTrue(win.chk_selection_outline.isChecked())
+            self.assertTrue(win._vp_scene.show_selection_highlight)
+            win._on_gl_atom_clicked(0, False)
+            self.app.processEvents()
+            self.assertEqual(win._selected_atoms, {0})
+            win.chk_selection_outline.setChecked(False)
+            self.app.processEvents()
+            self.assertEqual(win._selected_atoms, {0})
+            self.assertFalse(win._vp_scene.show_selection_highlight)
+            win.chk_selection_outline.setChecked(True)
+            self.app.processEvents()
+            self.assertTrue(win._vp_scene.show_selection_highlight)
+
             # 7. Check CLI parser --backend flag
             parsed = build_parser().parse_args(["gui", "--backend", "qt"])
             self.assertEqual(parsed.backend, "qt")
