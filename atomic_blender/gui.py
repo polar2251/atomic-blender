@@ -1191,6 +1191,7 @@ class AtomicBlenderApp(tk.Tk):
         self._inspect_after_id: str | None = None
         self._inspect_seq: int = 0
         self._hq_after_id: str | None = None
+        self._drag_redraw_after_id: str | None = None
         self._preview_path: Path | None = None
         self._pil_image: Any = None
         self._photo_ref: Any = None
@@ -4956,28 +4957,27 @@ class AtomicBlenderApp(tk.Tk):
         else:
             view_arg = self.var_view_preset.get().strip() or "iso"
 
-        scene_key = json.dumps(
-            [
-                self._structure_version,
-                str(style_path),
-                style_mtime,
-                sorted(self._custom_element_colors.items()),
-                fin_key,
-                self.var_bonds.get(),
-                self.var_bond_color.get(),
-                round(float(self.var_radius_scale.get()), 4),
-                bool(self.var_show_cell.get()),
-                crop_z,
-                bool(self.var_fit_view.get()),
-                [round(float(a), 3) for a in self._structure_cache.get("alphas", [])],
-                [round(float(s), 3) for s in self._structure_cache.get("radius_scales", [])],
-                list(self._structure_cache.get("colors", [])),
-                list(self._structure_cache.get("dashed_bonds", [])),
-                self._structure_cache.get("ghost_start_index"),
-                len(self._structure_cache.get("polyhedra", [])),
-                bool(self._structure_cache.get("show_cell_vectors", False)),
-            ]
-        )
+        geom_payload = [
+            self._structure_version,
+            str(style_path),
+            style_mtime,
+            sorted(self._custom_element_colors.items()),
+            self.var_bonds.get(),
+            self.var_bond_color.get(),
+            round(float(self.var_radius_scale.get()), 4),
+            bool(self.var_show_cell.get()),
+            crop_z,
+            bool(self.var_fit_view.get()),
+            [round(float(a), 3) for a in self._structure_cache.get("alphas", [])],
+            [round(float(s), 3) for s in self._structure_cache.get("radius_scales", [])],
+            list(self._structure_cache.get("colors", [])),
+            list(self._structure_cache.get("dashed_bonds", [])),
+            self._structure_cache.get("ghost_start_index"),
+            len(self._structure_cache.get("polyhedra", [])),
+            bool(self._structure_cache.get("show_cell_vectors", False)),
+        ]
+        geom_key = json.dumps(geom_payload)
+        scene_key = json.dumps(geom_payload + [fin_key])
 
         self._preview_seq += 1
         seq = self._preview_seq
@@ -4989,6 +4989,7 @@ class AtomicBlenderApp(tk.Tk):
                 "action": "render",
                 "seq": seq,
                 "blender_exe": str(blender_path),
+                "geom_key": geom_key,
                 "scene_key": scene_key,
                 "structure": str(struct_json),
                 "style": str(eff_style_path),
@@ -5090,6 +5091,20 @@ class AtomicBlenderApp(tk.Tk):
         self._drag_mode = "pan"
         self._drag_last = (event.x, event.y)
 
+    def _schedule_drag_redraw(self) -> None:
+        """Coalesce high-rate mouse motion events into smooth ~60 FPS viewport frames."""
+        if getattr(self, "_drag_redraw_after_id", None) is None and not getattr(self, "_destroyed", False):
+            self._drag_redraw_after_id = self.after(16, self._flush_drag_redraw)
+
+    def _flush_drag_redraw(self) -> None:
+        self._drag_redraw_after_id = None
+        if getattr(self, "_destroyed", False):
+            return
+        if self._drag_mode == "axes":
+            self._redraw_canvas()
+        elif self._vp_scene is not None:
+            self._draw_3d_viewport(interactive=bool(self._dragging))
+
     def _on_canvas_motion(self, event: tk.Event) -> None:
         if not self._dragging:
             return
@@ -5103,7 +5118,7 @@ class AtomicBlenderApp(tk.Tk):
                 self.var_axes_fixed.set(False)
                 if self._vp_scene is not None:
                     self._vp_scene.axes_pos = self._axes_pos
-                self._redraw_canvas()
+                self._schedule_drag_redraw()
             return
         if self._vp_scene is None:
             return
@@ -5122,9 +5137,15 @@ class AtomicBlenderApp(tk.Tk):
         self.var_canvas_mode.set("3d")
         self._use_interactive_cam = True
         self._preview_seq += 1
-        self._draw_3d_viewport()
+        self._schedule_drag_redraw()
 
     def _on_canvas_mouse_up(self, _event: tk.Event) -> None:
+        if getattr(self, "_drag_redraw_after_id", None) is not None:
+            try:
+                self.after_cancel(self._drag_redraw_after_id)  # type: ignore[arg-type]
+            except Exception:
+                pass
+            self._drag_redraw_after_id = None
         if self._dragging:
             was_axes = self._drag_mode == "axes"
             self._dragging = False
@@ -5667,7 +5688,13 @@ class AtomicBlenderApp(tk.Tk):
 
     def destroy(self) -> None:
         self._destroyed = True
-        for aid_attr in ("_poll_after_id", "_inspect_after_id", "_hq_after_id", "_welcome_after_id"):
+        for aid_attr in (
+            "_poll_after_id",
+            "_inspect_after_id",
+            "_hq_after_id",
+            "_drag_redraw_after_id",
+            "_welcome_after_id",
+        ):
             aid = getattr(self, aid_attr, None)
             if aid is not None:
                 try:

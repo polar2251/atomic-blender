@@ -1800,6 +1800,124 @@ class TestAtomicBlender(unittest.TestCase):
                 )
                 self.assertIn("BOND_INSTANCE_OK", b_proc.stdout)
 
+    def test_interactive_lod_coalesced_drag_preview_and_cycles_optimizations(self) -> None:
+        import subprocess
+        from atomic_blender.gui import AtomicBlenderApp, find_blender_executable
+        from atomic_blender.viewport3d import ViewportScene, _interactive_lod_scale
+
+        # 1. Interactive LOD scale tiers & exact output canvas dimensions on 500-atom structure
+        self.assertEqual(_interactive_lod_scale(50), 0.75)
+        self.assertEqual(_interactive_lod_scale(300), 0.62)
+        self.assertEqual(_interactive_lod_scale(900), 0.50)
+
+        nx, ny, nz = 10, 10, 5
+        coords = [[x * 2.5, y * 2.5, z * 2.5] for x in range(nx) for y in range(ny) for z in range(nz)]
+        big_struct = {
+            "symbols": ["Cu"] * len(coords),
+            "positions": coords,
+            "cell": [[25.0, 0.0, 0.0], [0.0, 25.0, 0.0], [0.0, 0.0, 15.0]],
+            "pbc": [True, True, True],
+            "has_cell": True,
+            "origin": [0.0, 0.0, 0.0],
+        }
+        style = json.loads(resolve_style_path("studio").read_text(encoding="utf-8"))
+        vp = ViewportScene.from_neutral_dict(big_struct, style, bonds_mode="none")
+        vp.fit_camera(aspect=1.0)
+        img_drag = vp.render_image(640, 480, 1400, 1400, interactive=True)
+        img_hq = vp.render_image(640, 480, 1400, 1400, interactive=False)
+        self.assertEqual(img_drag.size, (640, 480))
+        self.assertEqual(img_hq.size, (640, 480))
+
+        # 2. Drag coalescing schedules deferred frame & mouse release immediately triggers fast Blender preview with geom_key
+        class _RecorderWorker:
+            def __init__(self) -> None:
+                self.requests: list[dict[str, object]] = []
+
+            def request(self, cmd: dict[str, object]) -> None:
+                self.requests.append(cmd)
+
+            def stop(self) -> None:
+                pass
+
+        with tempfile.TemporaryDirectory() as tmp:
+            fake_blender = Path(tmp) / "blender.exe"
+            fake_blender.write_text("", encoding="utf-8")
+            app = AtomicBlenderApp()
+            app.withdraw()
+            try:
+                rec = _RecorderWorker()
+                app._preview_worker.stop()
+                app._preview_worker = rec  # type: ignore[assignment]
+                app.var_blender.set(str(fake_blender))
+                app._structure_cache = big_struct
+                app._structure_version = 1
+                app._rebuild_viewport(reset_camera=True, trigger_preview=False)
+
+                app._dragging = True
+                app._drag_mode = "orbit"
+                app._drag_last = (10, 10)
+                ev1 = type("E", (), {"x": 22, "y": 16, "state": 0})()
+                ev2 = type("E", (), {"x": 30, "y": 24, "state": 0})()
+                app._on_canvas_motion(ev1)  # type: ignore[arg-type]
+                aid = app._drag_redraw_after_id
+                self.assertIsNotNone(aid)
+                app._on_canvas_motion(ev2)  # type: ignore[arg-type]
+                self.assertEqual(app._drag_redraw_after_id, aid)
+                self.assertEqual(len(rec.requests), 0)
+
+                app._on_canvas_mouse_up(ev2)  # type: ignore[arg-type]
+                self.assertIsNone(app._drag_redraw_after_id)
+                self.assertEqual(len(rec.requests), 1)
+                self.assertIn("geom_key", rec.requests[0])
+                self.assertIn("scene_key", rec.requests[0])
+                key1_g = rec.requests[0]["geom_key"]
+                key1_s = rec.requests[0]["scene_key"]
+
+                app._set_material_finish("chalk")
+                self.assertEqual(len(rec.requests), 2)
+                self.assertEqual(rec.requests[1]["geom_key"], key1_g)
+                self.assertNotEqual(rec.requests[1]["scene_key"], key1_s)
+            finally:
+                app.destroy()
+
+        # 3. Blender Cycles optimization defaults + in-place material update
+        try:
+            blender_exe = find_blender_executable()
+        except FileNotFoundError:
+            blender_exe = None
+        if blender_exe is not None:
+            repo_root = Path(__file__).resolve().parent.parent
+            with tempfile.TemporaryDirectory() as tmp:
+                drv = Path(tmp) / "test_cycles_perf.py"
+                drv.write_text(
+                    "import bpy, sys\n"
+                    f"sys.path.insert(0, {str(repo_root)!r})\n"
+                    "from atomic_blender import scene_builder\n"
+                    f"st = {big_struct!r}\n"
+                    "st = {'symbols': ['Cu', 'O'], 'positions': [[0,0,0],[0,0,2]], 'cell': [[6,0,0],[0,6,0],[0,0,6]], 'pbc': [True,True,True], 'has_cell': True, 'origin': [0,0,0]}\n"
+                    "style = {'material': {'roughness': 0.35, 'ao_factor': 0.15}, 'bonds': {'enabled': False}, 'cell': {'enabled': False}}\n"
+                    "scene_builder.build_scene(st, style, view='iso', reset_factory=True)\n"
+                    "sc = bpy.context.scene\n"
+                    "assert sc.cycles.use_adaptive_sampling is True\n"
+                    "assert sc.render.use_persistent_data is True\n"
+                    "assert sc.cycles.caustics_reflective is False\n"
+                    "assert sc.cycles.max_bounces <= 6\n"
+                    "cu_objs_before = len(sc.objects)\n"
+                    "style2 = {'material': {'roughness': 0.88, 'specular': 0.12, 'ao_factor': 0.35}, 'world': {'color': [0.9,0.9,0.9,1.0], 'strength': 0.5}}\n"
+                    "ok = scene_builder._update_scene_materials_in_place(sc, style2)\n"
+                    "assert ok is True\n"
+                    "assert len(sc.objects) == cu_objs_before\n"
+                    "print('CYCLES_PERF_OK')\n",
+                    encoding="utf-8",
+                )
+                b_proc = subprocess.run(
+                    [str(blender_exe), "--background", "--factory-startup", "--python-exit-code", "1", "--python", str(drv)],
+                    capture_output=True,
+                    text=True,
+                    check=True,
+                )
+                self.assertIn("CYCLES_PERF_OK", b_proc.stdout)
+
 
 if __name__ == "__main__":
     unittest.main()

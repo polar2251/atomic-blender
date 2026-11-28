@@ -688,14 +688,17 @@ def export_camera_view(scene: bpy.types.Scene, cam_obj: bpy.types.Object) -> dic
 
 
 def configure_render_and_world(scene: bpy.types.Scene, style: dict[str, Any]) -> None:
-    """Apply Cycles device, sampling, denoising, transparency, and world settings."""
+    """Apply Cycles device, adaptive sampling, bounce caps, denoising, and world settings."""
     render_cfg = style.get("render", {})
     scene.render.engine = render_cfg.get("engine", "CYCLES")
 
     if scene.render.engine == "CYCLES":
         prefs = bpy.context.preferences.addons["cycles"].preferences
         gpu_ok = False
-        for backend in render_cfg.get("device_priority", ["OPTIX", "CUDA", "CPU"]):
+        raw_prio = list(render_cfg.get("device_priority", ["OPTIX", "CUDA", "HIP", "ONEAPI", "METAL", "CPU"]))
+        if raw_prio == ["OPTIX", "CUDA", "CPU"]:
+            raw_prio = ["OPTIX", "CUDA", "HIP", "ONEAPI", "METAL", "CPU"]
+        for backend in raw_prio:
             if backend == "CPU":
                 break
             try:
@@ -715,8 +718,29 @@ def configure_render_and_world(scene: bpy.types.Scene, style: dict[str, Any]) ->
             scene.cycles.device = "CPU"
             print("Using Cycles backend: CPU")
 
-        scene.cycles.samples = int(render_cfg.get("samples", 64))
-        scene.cycles.use_denoising = bool(render_cfg.get("use_denoising", True))
+        c = scene.cycles
+        c.samples = int(render_cfg.get("samples", 64))
+        c.use_denoising = bool(render_cfg.get("use_denoising", True))
+        if hasattr(c, "use_adaptive_sampling"):
+            c.use_adaptive_sampling = bool(render_cfg.get("use_adaptive_sampling", True))
+        if hasattr(c, "adaptive_threshold"):
+            c.adaptive_threshold = float(render_cfg.get("adaptive_threshold", 0.015))
+        c.max_bounces = int(render_cfg.get("max_bounces", 6))
+        c.diffuse_bounces = int(render_cfg.get("diffuse_bounces", 2))
+        c.glossy_bounces = int(render_cfg.get("glossy_bounces", 2))
+        c.transmission_bounces = int(render_cfg.get("transmission_bounces", 4))
+        c.transparent_max_bounces = int(render_cfg.get("transparent_max_bounces", 6))
+        if hasattr(c, "caustics_reflective"):
+            c.caustics_reflective = False
+        if hasattr(c, "caustics_refractive"):
+            c.caustics_refractive = False
+        if hasattr(c, "denoising_use_gpu"):
+            try:
+                c.denoising_use_gpu = bool(c.device == "GPU")
+            except Exception:
+                pass
+        if hasattr(scene.render, "use_persistent_data"):
+            scene.render.use_persistent_data = bool(render_cfg.get("use_persistent_data", True))
 
     scene.render.film_transparent = bool(render_cfg.get("film_transparent", True))
     scene.render.image_settings.file_format = render_cfg.get("file_format", "PNG")
@@ -1174,6 +1198,8 @@ def _resolve_view_arg(view_val: str | dict[str, Any]) -> str | dict[str, Any]:
 
 def _apply_fast_preview_cycles_settings(scene: bpy.types.Scene) -> None:
     """Tune Cycles bounce caps, adaptive sampling, and AA filter for fast crisp previews."""
+    if hasattr(scene.render, "use_persistent_data"):
+        scene.render.use_persistent_data = True
     if scene.render.engine != "CYCLES":
         return
     c = scene.cycles
@@ -1194,9 +1220,72 @@ def _apply_fast_preview_cycles_settings(scene: bpy.types.Scene) -> None:
             pass
 
 
+def _update_scene_materials_in_place(scene: bpy.types.Scene, style: dict[str, Any]) -> bool:
+    """Update Principled BSDF & world background in place; return False if full node rebuild is needed."""
+    skip_prefixes = ("mat_bond_", "mat_cell", "mat_poly_", "mat_dashed_", "mat_arrow_")
+    atom_mats = [m for m in bpy.data.materials if m.name.startswith("mat_") and not m.name.startswith(skip_prefixes)]
+    if not atom_mats:
+        return False
+
+    for mat in atom_mats:
+        parts = mat.name.split("_")
+        if len(parts) < 4:
+            continue
+        elem = parts[1]
+        nt = getattr(mat, "node_tree", None)
+        if nt is None:
+            return False
+        bsdf = nt.nodes.get("Principled BSDF")
+        if bsdf is None:
+            return False
+        kw = _element_material_kwargs(elem, style)
+        bsdf.inputs["Roughness"].default_value = kw["roughness"]
+        if "Metallic" in bsdf.inputs:
+            bsdf.inputs["Metallic"].default_value = kw["metallic"]
+        if "Specular IOR Level" in bsdf.inputs:
+            bsdf.inputs["Specular IOR Level"].default_value = kw["specular"]
+        elif "Specular" in bsdf.inputs:
+            bsdf.inputs["Specular"].default_value = kw["specular"]
+        if "Subsurface Weight" in bsdf.inputs:
+            bsdf.inputs["Subsurface Weight"].default_value = kw["subsurface_weight"]
+        elif "Subsurface" in bsdf.inputs:
+            bsdf.inputs["Subsurface"].default_value = kw["subsurface_weight"]
+        if "Subsurface Scale" in bsdf.inputs:
+            bsdf.inputs["Subsurface Scale"].default_value = kw["subsurface_scale"]
+        if "Coat Weight" in bsdf.inputs:
+            bsdf.inputs["Coat Weight"].default_value = kw["coat_weight"]
+        elif "Clearcoat" in bsdf.inputs:
+            bsdf.inputs["Clearcoat"].default_value = kw["coat_weight"]
+        if "Coat Roughness" in bsdf.inputs:
+            bsdf.inputs["Coat Roughness"].default_value = kw["coat_roughness"]
+        elif "Clearcoat Roughness" in bsdf.inputs:
+            bsdf.inputs["Clearcoat Roughness"].default_value = kw["coat_roughness"]
+
+        ao_nodes = [n for n in nt.nodes if getattr(n, "type", "") == "AMBIENT_OCCLUSION"]
+        if kw["ao_factor"] > 0.0 and not ao_nodes:
+            return False
+        for ao_n in ao_nodes:
+            if "Distance" in ao_n.inputs:
+                ao_n.inputs["Distance"].default_value = kw["ao_distance"]
+        for n in nt.nodes:
+            ntype = getattr(n, "type", "")
+            if ntype in ("MIX", "MIX_RGB"):
+                n.inputs[0].default_value = kw["ao_factor"]
+
+    world_cfg = style.get("world", {})
+    if scene.world is not None and scene.world.node_tree is not None:
+        bg = scene.world.node_tree.nodes.get("Background")
+        if bg is not None:
+            wcol = world_cfg.get("color", [0.85, 0.85, 0.85, 1.0])
+            bg.inputs["Color"].default_value = tuple(float(c) for c in wcol)
+            bg.inputs["Strength"].default_value = float(world_cfg.get("strength", 0.6))
+    return True
+
+
 def run_preview_server() -> None:
     """Keep Blender warm and render preview PNGs on demand from JSON-line commands on stdin."""
     current_scene_key: str | None = None
+    current_geom_key: str | None = None
     cached_framing: dict[str, Any] | None = None
     cached_style: dict[str, Any] | None = None
     print("PREVIEW_READY", flush=True)
@@ -1216,6 +1305,7 @@ def run_preview_server() -> None:
 
             seq = cmd["seq"]
             scene_key = str(cmd["scene_key"])
+            geom_key = str(cmd.get("geom_key") or scene_key)
             style = json.loads(Path(cmd["style"]).read_text(encoding="utf-8"))
             if cmd.get("samples") is not None:
                 style.setdefault("render", {})["samples"] = int(cmd["samples"])
@@ -1228,7 +1318,12 @@ def run_preview_server() -> None:
             res = tuple(int(x) for x in cmd["resolution"])
             view_arg = _resolve_view_arg(cmd["view"])
 
-            if scene_key != current_scene_key:
+            reused_geom = (
+                current_scene_key is not None
+                and current_geom_key == geom_key
+                and (scene_key == current_scene_key or _update_scene_materials_in_place(bpy.context.scene, style))
+            )
+            if not reused_geom:
                 structure = json.loads(Path(cmd["structure"]).read_text(encoding="utf-8"))
                 cached_framing = build_scene(
                     structure=structure,
@@ -1245,6 +1340,7 @@ def run_preview_server() -> None:
                 )
                 _apply_fast_preview_cycles_settings(bpy.context.scene)
                 current_scene_key = scene_key
+                current_geom_key = geom_key
                 cached_style = style
             else:
                 scene = bpy.context.scene
@@ -1259,9 +1355,11 @@ def run_preview_server() -> None:
                     cam_obj=scene.camera,
                     view=view_arg,
                     framing_data=cached_framing,
-                    style=cached_style or style,
+                    style=style,
                     fit_override=bool(cmd.get("fit_view", False)),
                 )
+                current_scene_key = scene_key
+                cached_style = style
 
             out_path = Path(cmd["out"])
             out_path.parent.mkdir(parents=True, exist_ok=True)
