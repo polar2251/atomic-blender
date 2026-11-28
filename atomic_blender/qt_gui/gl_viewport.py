@@ -395,7 +395,8 @@ class _ViewportOverlay(QWidget):
             cy0 = fy0 + fh * 0.5
             px_per_a = vp._px_per_angstrom_for_frame(fw, fh)
             right, up, back = quat_to_axes(scene.quat)
-            if scene.show_atoms and len(scene.positions) > 0 and (scene.show_labels or (vp.has_blender_preview() and scene.selected_atoms)):
+            show_sel_ring = bool(scene.show_selection_highlight and scene.selected_atoms)
+            if scene.show_atoms and len(scene.positions) > 0 and (scene.show_labels or (vp.has_blender_preview() and show_sel_ring)):
                 rel = scene.positions - scene.target
                 ax = cx0 + (rel @ right) * px_per_a
                 ay = cy0 - (rel @ up) * px_per_a
@@ -403,7 +404,7 @@ class _ViewportOverlay(QWidget):
                 for idx in sorted(range(len(scene.positions)), key=lambda i: float(az[i])):
                     diam_px = max(2.0, 2.0 * float(scene.radii[idx]) * px_per_a)
                     sx, sy = float(ax[idx]), float(ay[idx])
-                    if vp.has_blender_preview() and idx in scene.selected_atoms and diam_px >= 6.0:
+                    if vp.has_blender_preview() and scene.show_selection_highlight and idx in scene.selected_atoms and diam_px >= 6.0:
                         r_ring = diam_px * 0.5 + 1.5
                         painter.setPen(QPen(QColor(45, 212, 191, 240), max(2.0, min(4.0, diam_px * 0.08))))
                         painter.setBrush(Qt.BrushStyle.NoBrush)
